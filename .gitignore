@@ -4,6 +4,12 @@ build_*/
 cmake-build-*/
 **/build_*/
 **/build/
+_build/
+_build/
+**/_build/
+bin/
+server/_build/
+server/bin/
 
 #JUCE
 /JUCE/
