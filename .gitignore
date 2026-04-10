@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+build_*/
+cmake-build-*/
+**/build_*/
+**/build/
+
+#JUCE
+/JUCE/
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+
+# Logs
+*.log
+
+# macOS
+*.app/
