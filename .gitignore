@@ -31,3 +31,28 @@ server/bin/
 
 # macOS
 *.app/
+
+# Environment and secrets
+.env
+.env.*
+.env.local
+.env.production
+*.env
+secrets/
+credentials/
+keys/
+*.pem
+*.key
+*.crt
+*.csr
+
+# Server config with credentials
+server/config/
+**/server_config*
+**/credentials*
+
+# Credentials
+*password*
+*secret*
+*token*
+credential*
