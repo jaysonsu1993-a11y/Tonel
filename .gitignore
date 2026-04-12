@@ -31,3 +31,6 @@ server/bin/
 
 # macOS
 *.app/
+
+# Runtime config (generated/overridden per deployment)
+config.json
