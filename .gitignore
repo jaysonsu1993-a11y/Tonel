@@ -1,17 +1,28 @@
-# Build artifacts
+# Build artifacts (CMake + Unix)
 build/
+build_/
 build_*/
 cmake-build-*/
-**/build_*/
 **/build/
-_build/
+**/build_*/
 _build/
 **/_build/
+
+# Binaries
 bin/
-server/_build/
 server/bin/
 
-#JUCE
+# Xcode generated
+build_xcode/
+build-xcode/
+*.xcodeproj/
+*.xcworkspace/
+
+# Desktop build dirs (specific names)
+build-desktop/
+build_xcode_legacy/
+
+# JUCE (external)
 /JUCE/
 
 # OS files
@@ -23,18 +34,23 @@ server/bin/
 # IDE
 .vscode/
 .idea/
-*.xcodeproj/
-*.xcworkspace/
 *.code-workspace
 
 # Logs
 *.log
 
-# macOS
+# macOS apps
 *.app/
-
-# Build (xcode)
-build_xcode/
 
 # Runtime config (generated/overridden per deployment)
 config.json
+
+# Web
+web/dist/
+web/node_modules/
+
+# Deploy script (contains SSH credentials)
+deploy.sh
+
+# Environment files
+.env
