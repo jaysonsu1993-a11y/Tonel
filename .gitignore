@@ -25,12 +25,16 @@ server/bin/
 .idea/
 *.xcodeproj/
 *.xcworkspace/
+*.code-workspace
 
 # Logs
 *.log
 
 # macOS
 *.app/
+
+# Build (xcode)
+build_xcode/
 
 # Runtime config (generated/overridden per deployment)
 config.json
