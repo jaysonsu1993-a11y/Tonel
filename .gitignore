@@ -49,8 +49,6 @@ config.json
 web/dist/
 web/node_modules/
 
-# Deploy script (contains SSH credentials)
-deploy.sh
 
 # Environment files
 .env
