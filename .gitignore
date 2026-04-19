@@ -50,5 +50,8 @@ web/dist/
 web/node_modules/
 
 
+# Local-only docs (sensitive info, credentials, internal planning)
+.local-docs/
+
 # Environment files
 .env
