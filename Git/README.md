@@ -24,20 +24,20 @@ Each module has its own build system. Choose what you need:
 
 ```bash
 # Desktop app (AppKit + miniaudio -- recommended, no JUCE dependency)
-cd Tonel-Desktop-AppKit
+cd Git/Tonel-Desktop-AppKit
 cmake -S . -B build && cmake --build build
 
 # Desktop app (Legacy JUCE client -- requires JUCE license)
-cd Tonel-Desktop
+cd Git/Tonel-Desktop
 cmake -S . -B build -DJUCE_PATH=/path/to/JUCE && cmake --build build
 
 # Server (signaling + mixer)
-cd server
+cd Git/server
 cmake -S . -B build && cmake --build build
 # Outputs: build/signaling_server, build/mixer_server
 
 # Web client
-cd web
+cd Git/web
 npm install && npm run dev
 ```
 

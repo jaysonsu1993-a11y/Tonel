@@ -26,11 +26,11 @@ All versions are in sync at `0.3.2`. Update all version numbers together when re
 
 | Location | File |
 |---|---|
-| Root project | `CMakeLists.txt` → `project(Tonel VERSION X.Y.Z)` |
-| AppKit client | `Tonel-Desktop-AppKit/CMakeLists.txt` → `MACOSX_BUNDLE_VERSION` |
-| JUCE client | `Tonel-Desktop/CMakeLists.txt` |
-| Server | `server/CMakeLists.txt` |
-| Web | `web/package.json` → `version` |
+| Root project | `Git/CMakeLists.txt` → `project(Tonel VERSION X.Y.Z)` |
+| AppKit client | `Git/Tonel-Desktop-AppKit/CMakeLists.txt` → `MACOSX_BUNDLE_VERSION` |
+| JUCE client | `Git/Tonel-Desktop/CMakeLists.txt` |
+| Server | `Git/server/CMakeLists.txt` |
+| Web | `Git/web/package.json` → `version` |
 
 ### Changelog
 
@@ -139,7 +139,7 @@ clang-format -i src/**/*.cpp src/**/*.h
 - Run:
 
 ```bash
-cd web
+cd Git/web
 npx eslint src --ext .ts,.tsx
 npx prettier --write 'src/**/*.{ts,tsx}'
 ```
@@ -187,15 +187,15 @@ git clone https://github.com/jaysonsu1993-a11y/Tonel.git
 cd Tonel
 
 # Desktop (AppKit -- recommended)
-cd Tonel-Desktop-AppKit
+cd Git/Tonel-Desktop-AppKit
 cmake -S . -B build && cmake --build build
 
 # Server
-cd ../server
+cd Git/server
 cmake -S . -B build && cmake --build build
 
 # Web
-cd ../web
+cd Git/web
 npm install && npm run dev
 ```
 

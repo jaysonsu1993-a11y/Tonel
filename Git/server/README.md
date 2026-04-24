@@ -23,7 +23,7 @@ Two server components run on the same machine:
 ## Build
 
 ```bash
-cd server
+cd Git/server
 cmake -S . -B build && cmake --build build
 ```
 

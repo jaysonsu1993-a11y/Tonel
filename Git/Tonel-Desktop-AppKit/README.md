@@ -29,7 +29,7 @@ No other system libraries required. miniaudio is included in `libs/miniaudio/`.
 ## Build
 
 ```bash
-cd Tonel-Desktop-AppKit
+cd Git/Tonel-Desktop-AppKit
 cmake -S . -B build && cmake --build build
 ```
 
@@ -70,7 +70,7 @@ Tonel-Desktop-AppKit/src/
 
 ## Configuration
 
-The SPA1 protocol header is included from `../S1-Desktop/spa1.h`. See `docs/SPA1_PROTOCOL.md` for the protocol specification.
+The SPA1 protocol header is at `Git/Tonel-Desktop/spa1.h`. See `docs/SPA1_PROTOCOL.md` for the protocol specification.
 
 ## macOS Deployment Target
 

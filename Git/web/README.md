@@ -26,7 +26,7 @@ Dependencies (`package.json`):
 ## Development
 
 ```bash
-cd web
+cd Git/web
 npm install
 npm run dev
 ```
