@@ -152,6 +152,12 @@ class AudioService {
   private userId:           string = ''
   private roomId:           string = ''
 
+  // Audio latency (RTT via control DataChannel)
+  private pingTimer:        ReturnType<typeof setInterval> | null = null
+  private pingSentAt:       number = 0
+  private _audioLatency:    number = -1
+  private latencyCallbacks: Array<(ms: number) => void> = []
+
   // Playback
   private audioContextPlay: AudioContext | null = null
   private masterGain:       GainNode | null = null
@@ -567,12 +573,18 @@ class AudioService {
         console.log('[Mixer] JSON:', msg)
         if (msg.type === 'MIXER_JOIN_ACK') {
           console.log('[Mixer] MIXER_JOIN_ACK received, starting capture')
-          // UDP handshake was already sent via wsUdp before this;
-          // now the control channel confirms the user is registered.
           this.startCapture()
+          this.startPing()
         } else if (msg.type === 'HANDSHAKE_ACK' || msg.type === 'OK') {
           console.log('[Mixer] Handshake ack, starting capture')
           this.startCapture()
+          this.startPing()
+        } else if (msg.type === 'PONG') {
+          if (this.pingSentAt > 0) {
+            this._audioLatency = Math.round(performance.now() - this.pingSentAt)
+            this.pingSentAt = 0
+            this.latencyCallbacks.forEach(cb => cb(this._audioLatency))
+          }
         }
       } catch (_) {
         console.warn('[Mixer] Non-JSON string:', data)
@@ -758,7 +770,40 @@ class AudioService {
     this.setMuted(false)
   }
 
+  // ── Audio latency measurement (via control DataChannel PING/PONG) ─────────
+
+  private startPing(): void {
+    this.stopPing()
+    this.pingTimer = setInterval(() => {
+      if (this.controlChannel?.readyState === 'open') {
+        this.pingSentAt = performance.now()
+        this.controlChannel.send(JSON.stringify({ type: 'PING' }) + '\n')
+      }
+    }, 3000)
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer)
+      this.pingTimer = null
+    }
+  }
+
+  /** Subscribe to audio latency updates (ms RTT via DataChannel). Returns unsubscribe. */
+  onLatency(callback: (ms: number) => void): () => void {
+    this.latencyCallbacks.push(callback)
+    if (this._audioLatency >= 0) callback(this._audioLatency)
+    return () => {
+      this.latencyCallbacks = this.latencyCallbacks.filter(cb => cb !== callback)
+    }
+  }
+
+  get audioLatency(): number {
+    return this._audioLatency
+  }
+
   destroy(): void {
+    this.stopPing()
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId)
     }

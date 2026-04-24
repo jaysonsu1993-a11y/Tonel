@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { audioService } from '../services/audioService'
-import { signalService } from '../services/signalService'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
 
@@ -31,9 +30,9 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
     })
   }, [])
 
-  // Subscribe to latency updates
+  // Subscribe to audio latency updates (via WebRTC DataChannel, not signaling)
   useEffect(() => {
-    const unsub = signalService.onLatency((ms) => setLatency(ms))
+    const unsub = audioService.onLatency((ms) => setLatency(ms))
     return unsub
   }, [])
 

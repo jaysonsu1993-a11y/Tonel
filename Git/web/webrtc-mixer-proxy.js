@@ -142,11 +142,21 @@ function createPeer(userId, offerSdp, sendSignaling) {
         console.error(`[WebRTC-Proxy] TCP error for ${userId}:`, err.message)
       })
 
-      // DataChannel → TCP
+      // DataChannel → TCP (with PING short-circuit)
       dc.onMessage((msg) => {
+        const str = msg.toString().trim()
+        // Handle PING locally — no need to go to mixer server
+        try {
+          const parsed = JSON.parse(str)
+          if (parsed.type === 'PING') {
+            if (dc.isOpen()) {
+              dc.sendMessage(JSON.stringify({ type: 'PONG' }))
+            }
+            return
+          }
+        } catch (_) {}
         if (tcpClient && !tcpClient.destroyed) {
-          const data = msg.toString().trim() + '\n'
-          tcpClient.write(data)
+          tcpClient.write(str + '\n')
         }
       })
     } else if (label === 'audio') {
