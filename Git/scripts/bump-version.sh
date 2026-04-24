@@ -92,7 +92,7 @@ echo "   Config schema:$(grep -oP '\"default\": \"\K[0-9]+\.[0-9]+\.[0-9]+' conf
 
 echo ""
 echo "📝 下一步:"
-echo "   1. 在 CHANGES.md 顶部添加 v$NEW_VERSION 条目"
+echo "   1. 在 CHANGELOG.md 顶部添加 v$NEW_VERSION 条目 (Keep a Changelog 格式)"
 echo "   2. git add -A && git commit -m \"release: v$NEW_VERSION\""
 echo "   3. git tag -a v$NEW_VERSION -m \"v$NEW_VERSION\""
 echo "   4. git push origin main --tags"

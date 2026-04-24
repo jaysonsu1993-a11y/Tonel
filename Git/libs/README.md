@@ -1,52 +1,42 @@
-# S1 第三方库
+# Tonel Third-Party Libraries
 
-本目录包含项目依赖的第三方库。
-
-## JUCE
-
-- **位置**: `~/JUCE` (通过 CMake FetchContent 引入)
-- **版本**: 8.x (最新)
-- **许可证**: JUCE License (商业付费 / GPLv3)
-- **官网**: https://juce.com
-- **用途**: 音频引擎、GUI、网络
+This directory contains third-party dependencies used by Tonel.
 
 ## miniaudio
 
-- **位置**: `./miniaudio/`
-- **版本**: master
-- **许可证**: MIT (免费，可闭源)
-- **官网**: https://miniaud.io
-- **用途**: 轻量音频引擎 (可选)
+- **Location**: `./miniaudio/`
+- **Version**: master
+- **License**: MIT (free, can be used in closed-source projects)
+- **Website**: https://miniaud.io
+- **Purpose**: Lightweight audio engine (used by Tonel-Desktop-AppKit)
 
-## miniaudio 使用方式
+## JUCE (Legacy)
+
+- **Location**: `~/JUCE` (fetched via CMake FetchContent)
+- **Version**: 8.x
+- **License**: JUCE License (commercial paid / GPLv3)
+- **Website**: https://juce.com
+- **Purpose**: Audio engine, GUI, networking (used by legacy Tonel-Desktop JUCE client only)
+- **Status**: Legacy -- AppKit client (miniaudio) is the recommended build
+
+## Usage
 
 ```c
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio/miniaudio.h"
-
-// 播放音频
-ma_device_config config = ma_device_config_init(ma_device_type_playback);
-config.playback.format   = ma_format_f32;
-config.playback.channels  = 2;
-config.sampleRate        = 48000;
-config.dataCallback       = data_callback;
-
-ma_device device;
-ma_device_init(&device, &config, &device);
-ma_device_start(&device);
 ```
 
-## 许可证说明
+## License Summary
 
-| 库 | 许可证 | 闭源可用 | 商业可用 |
-|----|--------|----------|----------|
-| JUCE | GPL/Commercial | ❌ (GPL) / ✅ (付费) | ✅ (付费) |
-| miniaudio | MIT | ✅ | ✅ |
+| Library | License | Closed-Source | Commercial |
+|---------|---------|---------------|------------|
+| JUCE | GPL/Commercial | No (GPL) / Yes (paid) | Yes (paid) |
+| miniaudio | MIT | Yes | Yes |
 
-## 更新 miniaudio
+## Updating miniaudio
 
 ```bash
-cd ~/project-s/band-rehearsal-platform/libs
+cd Git/libs
 rm -rf miniaudio
 curl -L -o miniaudio.zip https://github.com/mackron/miniaudio/archive/refs/heads/master.zip
 unzip -o miniaudio.zip

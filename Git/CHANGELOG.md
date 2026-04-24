@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-04-24
+
+### Fixed
+- Empty rooms not auto-destroyed when last user leaves -- `RoomManager::leave_room()` now checks `user_count() == 0` and erases the room from `rooms_` map
+
+## [0.3.3] - 2026-04-22
+
+### Security
+- Server room passwords now use PBKDF2-HMAC-SHA256 hashing instead of plaintext storage
+  - 16-byte random salt, 10000 iterations, 32-byte SHA-256 output
+  - Storage format: `base64(salt):base64(hash)`
+  - Constant-time comparison to prevent timing attacks
+
+### Fixed
+- `config.schema.json` field naming aligned with coding standards (camelCase → snake_case)
+- Server and desktop config parsers synchronized to use new snake_case keys
+
+### Changed
+- `docs/server-mixer.md` rewritten to match actual implementation (v1.1)
+
 ## [0.3.2] - 2026-04-24
 
 ### Fixed
@@ -61,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mixer mode for 5+ users (server-mediated mixing)
 - Opus codec support
 
+[0.3.4]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.2.0...v0.3.0
