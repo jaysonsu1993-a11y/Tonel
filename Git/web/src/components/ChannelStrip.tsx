@@ -12,12 +12,12 @@ interface ChannelStripProps {
   isSolo?: boolean
   onMute?: (muted: boolean) => void
   onSolo?: (solo: boolean) => void
+  onVolume?: (volume: number) => void
 }
 
 export function ChannelStrip({
   peerId,
   name,
-  addr,
   level,
   peak,
   isSelf = false,
@@ -25,17 +25,19 @@ export function ChannelStrip({
   isSolo = false,
   onMute,
   onSolo,
+  onVolume,
 }: ChannelStripProps) {
-  // peerId kept for future use (WebRTC data channel routing)
   void peerId
   const [localMuted, setLocalMuted] = useState(isMuted)
   const [localSolo, setLocalSolo] = useState(isSolo)
+  const [volume, setVolume] = useState(100) // 0-100
 
   useEffect(() => { setLocalMuted(isMuted) }, [isMuted])
   useEffect(() => { setLocalSolo(isSolo) }, [isSolo])
 
   const displayLevel = localMuted ? 0 : level
   const displayPeak = localMuted ? 0 : peak
+  const dbValue = displayLevel > 0 ? Math.round(20 * Math.log10(displayLevel)) : -60
 
   const handleMute = () => {
     setLocalMuted(!localMuted)
@@ -47,33 +49,56 @@ export function ChannelStrip({
     onSolo?.(!localSolo)
   }
 
-  const avatarEmoji = isSelf ? '🎤' : '🎸'
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = Number(e.target.value)
+    setVolume(val)
+    onVolume?.(val / 100)
+  }
 
   return (
-    <div className={`participant-card ${isSelf ? 'self' : ''}`}>
-      <div className="p-avatar">{avatarEmoji}</div>
-      <div className="p-info">
-        <div className="p-name">{name}</div>
-        {addr && <div className="p-addr">{addr}</div>}
+    <div className={`ch-strip ${isSelf ? 'ch-self' : ''}`}>
+      {/* Channel name */}
+      <div className="ch-name" title={name}>
+        {name}
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
-        <LedMeter level={displayLevel} peak={displayPeak} segments={16} direction="vertical" />
-        <div className="p-controls">
-          <button
-            className={`btn-mute ${localMuted ? 'active' : ''}`}
-            onClick={handleMute}
-            title="Mute"
-          >
-            M
-          </button>
-          <button
-            className={`btn-solo ${localSolo ? 'active' : ''}`}
-            onClick={handleSolo}
-            title="Solo"
-          >
-            S
-          </button>
+
+      {/* Meter + Fader area */}
+      <div className="ch-meter-fader">
+        {/* LED Meter */}
+        <div className="ch-meter">
+          <LedMeter level={displayLevel} peak={displayPeak} segments={24} direction="vertical" />
         </div>
+
+        {/* Vertical Fader */}
+        <div className="ch-fader-wrap">
+          <input
+            type="range"
+            className="ch-fader"
+            min={0}
+            max={100}
+            value={volume}
+            onChange={handleVolumeChange}
+          />
+        </div>
+      </div>
+
+      {/* dB readout */}
+      <div className="ch-db">{dbValue > -60 ? `${dbValue}` : '-inf'} dB</div>
+
+      {/* Mute / Solo buttons */}
+      <div className="ch-buttons">
+        <button
+          className={`ch-btn ch-mute ${localMuted ? 'active' : ''}`}
+          onClick={handleMute}
+        >
+          M
+        </button>
+        <button
+          className={`ch-btn ch-solo ${localSolo ? 'active' : ''}`}
+          onClick={handleSolo}
+        >
+          S
+        </button>
       </div>
     </div>
   )

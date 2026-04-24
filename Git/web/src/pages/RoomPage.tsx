@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { audioService } from '../services/audioService'
+import { signalService } from '../services/signalService'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
-import { LedMeter } from '../components/LedMeter'
 
 interface Props {
   roomId: string
@@ -18,6 +18,7 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
   const [copied, setCopied] = useState(false)
   const [inputDevices, setInputDevices] = useState<MediaDeviceInfo[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string>('')
+  const [latency, setLatency] = useState<number>(-1)
   const joinedRef = useRef(false)
 
   // Load available audio input devices
@@ -28,6 +29,12 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
         setSelectedDevice(devs[0].deviceId)
       }
     })
+  }, [])
+
+  // Subscribe to latency updates
+  useEffect(() => {
+    const unsub = signalService.onLatency((ms) => setLatency(ms))
+    return unsub
   }, [])
 
   useEffect(() => {
@@ -77,7 +84,6 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
   }
 
   const selfPeak = selfLevel > 0 ? selfLevel * 1.1 : 0
-  const dbm = selfLevel > 0 ? Math.round(20 * Math.log10(selfLevel) + 60) : -60
 
   return (
     <div className="room-page">
@@ -88,7 +94,7 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
             <div className="room-id">{roomId}</div>
           </div>
           <button className="btn-copy" onClick={copyRoomId}>
-            {copied ? '✓ 已复制' : '复制'}
+            {copied ? '已复制' : '复制'}
           </button>
         </div>
 
@@ -101,59 +107,56 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
           >
             {inputDevices.map(d => (
               <option key={d.deviceId} value={d.deviceId}>
-                {d.label || `麦克风 ${d.deviceId.slice(0, 8)}`}
+                {d.label || `Input ${d.deviceId.slice(0, 8)}`}
               </option>
             ))}
           </select>
+        </div>
+
+        {/* 麦克风静音 */}
+        <button
+          className={`btn-mic-toggle ${isMuted ? 'muted' : ''}`}
+          onClick={toggleMute}
+        >
+          {isMuted ? 'MIC OFF' : 'MIC ON'}
+        </button>
+
+        <div className="latency-display">
+          <span className="latency-label">延迟</span>
+          <span className={`latency-value ${latency < 0 ? 'offline' : latency < 50 ? 'good' : latency < 100 ? 'ok' : 'bad'}`}>
+            {latency < 0 ? '--' : `${latency}ms`}
+          </span>
         </div>
 
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
       </header>
 
       <div className="room-content">
-        {/* 自己的麦克风 */}
-        <div className="mic-panel self">
-          <button
-            className={`mic-btn ${isMuted ? 'muted' : ''}`}
-            onClick={toggleMute}
-          >
-            {isMuted ? '🔇' : '🎤'}
-            <span>{isMuted ? '已静音' : '正在录音'}</span>
-          </button>
-          <div className="meter-section">
-            <div className="meter-label">输入电平</div>
-            <div className="meter-bar-wrap">
-              <div
-                className={`meter-bar ${isMuted ? 'muted' : ''}`}
-                style={{ width: `${Math.min(100, selfLevel * 100)}%` }}
-              />
-            </div>
-            <div className="meter-dbm">{dbm} dB</div>
+        {/* 调音台区域 */}
+        <div className="mixer-section">
+          <div className="mixer-header">
+            <span className="mixer-label">MIXER</span>
+            <span className="mixer-count">{peers.length + 1} CH</span>
           </div>
-          <LedMeter level={selfLevel} peak={selfPeak} segments={16} direction="vertical" />
-        </div>
-
-        {/* 参与者 */}
-        <div className="participants-section">
-          <div className="participants-header">
-            <div className="participants-label">乐手</div>
-            <div className="participants-count">{peers.length + 1} 人</div>
-          </div>
-          <div className="participants-grid">
+          <div className="mixer-channels">
             <ChannelStrip
               peerId={userId}
-              name="你"
+              name="YOU"
               level={selfLevel}
               peak={selfPeak}
               isSelf
               isMuted={isMuted}
+              onMute={(muted) => {
+                if (muted) audioService.mute()
+                else audioService.unmute()
+                setIsMuted(muted)
+              }}
             />
             {peers.map(p => (
               <ChannelStrip
                 key={p.user_id}
                 peerId={p.user_id}
                 name={p.user_id.slice(0, 8)}
-                addr={`${p.ip}:${p.port}`}
                 level={0}
                 peak={0}
               />

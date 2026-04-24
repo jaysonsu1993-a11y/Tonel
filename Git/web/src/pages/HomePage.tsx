@@ -12,8 +12,6 @@ interface Props {
 }
 
 export function HomePage({ isLoggedIn, onCreateRoom, onJoinRoom, onClearJoinError, peers, joinError, createError }: Props) {
-  const [roomId, setRoomId] = useState('')
-  const [joinPassword, setJoinPassword] = useState('')
   const [isJoining, setIsJoining] = useState(false)
   const [isCreating, setIsCreating] = useState(false)
 
@@ -21,6 +19,11 @@ export function HomePage({ isLoggedIn, onCreateRoom, onJoinRoom, onClearJoinErro
   const [showCreatePanel, setShowCreatePanel] = useState(false)
   const [pendingRoomId, setPendingRoomId] = useState('')
   const [createPassword, setCreatePassword] = useState('')
+
+  // 加入房间面板状态
+  const [showJoinPanel, setShowJoinPanel] = useState(false)
+  const [joinRoomId, setJoinRoomId] = useState('')
+  const [joinPassword, setJoinPassword] = useState('')
 
   const handleCreateClick = () => {
     setPendingRoomId('')
@@ -42,12 +45,25 @@ export function HomePage({ isLoggedIn, onCreateRoom, onJoinRoom, onClearJoinErro
     setCreatePassword('')
   }
 
-  const handleJoin = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (roomId.trim().length < 1) return
+  const handleJoinClick = () => {
+    setJoinRoomId('')
+    setJoinPassword('')
+    onClearJoinError()
+    setShowJoinPanel(true)
+  }
+
+  const handleJoinConfirm = async () => {
+    if (joinRoomId.trim().length < 1) return
     setIsJoining(true)
-    await onJoinRoom(roomId.trim().toUpperCase(), joinPassword || undefined)
+    await onJoinRoom(joinRoomId.trim().toUpperCase(), joinPassword || undefined)
     setIsJoining(false)
+  }
+
+  const handleJoinCancel = () => {
+    setShowJoinPanel(false)
+    setJoinRoomId('')
+    setJoinPassword('')
+    onClearJoinError()
   }
 
   return (
@@ -67,7 +83,6 @@ export function HomePage({ isLoggedIn, onCreateRoom, onJoinRoom, onClearJoinErro
         {/* 创建房间 */}
         {!showCreatePanel ? (
           <button className="action-card" onClick={handleCreateClick}>
-            <div className="action-card-icon">➕</div>
             <h3>创建房间</h3>
             <p>发起新的排练会话</p>
           </button>
@@ -101,16 +116,22 @@ export function HomePage({ isLoggedIn, onCreateRoom, onJoinRoom, onClearJoinErro
         )}
 
         {/* 加入房间 */}
-        <div className="join-section">
-          <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '12px' }}>加入房间</h3>
-          <form className="join-form" onSubmit={handleJoin}>
+        {!showJoinPanel ? (
+          <button className="action-card" onClick={handleJoinClick}>
+            <h3>加入房间</h3>
+            <p>加入已有的排练会话</p>
+          </button>
+        ) : (
+          <div className="action-card create-panel">
+            <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '12px' }}>加入房间</h3>
             <input
               type="text"
               placeholder="输入房间号"
-              value={roomId}
-              onChange={e => { setRoomId(e.target.value.toUpperCase()); onClearJoinError() }}
+              value={joinRoomId}
+              onChange={e => { setJoinRoomId(e.target.value.toUpperCase()); onClearJoinError() }}
               className="room-input"
               maxLength={8}
+              autoFocus
             />
             <input
               type="password"
@@ -120,29 +141,32 @@ export function HomePage({ isLoggedIn, onCreateRoom, onJoinRoom, onClearJoinErro
               className="room-input"
             />
             {joinError && <p className="form-error">{joinError}</p>}
-            <button type="submit" className="btn btn-primary" disabled={isJoining}>
-              {isJoining ? '连接中…' : '加入'}
-            </button>
-          </form>
-        </div>
+            <div className="create-panel-actions">
+              <button className="btn btn-primary" onClick={handleJoinConfirm} disabled={isJoining || joinRoomId.trim().length < 1}>
+                {isJoining ? '连接中…' : '加入'}
+              </button>
+              <button className="btn btn-ghost" onClick={handleJoinCancel} disabled={isJoining}>取消</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Features */}
       <div className="features" id="features">
         <div className="feature">
-          <span className="feature-icon">🎵</span>
+          <span className="feature-dot" />
           <span>低延迟音频</span>
         </div>
         <div className="feature">
-          <span className="feature-icon">🎸</span>
+          <span className="feature-dot" />
           <span>多轨混音</span>
         </div>
         <div className="feature">
-          <span className="feature-icon">📱</span>
+          <span className="feature-dot" />
           <span>跨平台支持</span>
         </div>
         <div className="feature">
-          <span className="feature-icon">🔒</span>
+          <span className="feature-dot" />
           <span>房间密码保护</span>
         </div>
       </div>

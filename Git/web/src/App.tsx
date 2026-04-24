@@ -77,8 +77,7 @@ export default function App() {
       <nav className="nav">
         <div className="nav-left">
           <a href="/" className="nav-brand">
-            <span className="nav-logo">🎸</span>
-            <span className="nav-name">S1</span>
+            <span className="nav-name">Tonel</span>
           </a>
           <ul className="nav-links">
             <li><a href="#features">功能</a></li>

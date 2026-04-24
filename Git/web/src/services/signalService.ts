@@ -22,6 +22,12 @@ class SignalService {
   private roomId = ''
   private userId = ''
 
+  // Ping/latency measurement
+  private pingTimer: ReturnType<typeof setInterval> | null = null
+  private pingSentAt = 0
+  private _latency = -1
+  private latencyCallbacks: Array<(ms: number) => void> = []
+
   async connect(): Promise<void> {
     // Use wss if page is https, else ws
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -39,6 +45,17 @@ class SignalService {
         for (const raw of messages) {
           try {
             const parsed = JSON.parse(raw)
+
+            // Handle PONG for latency measurement
+            if (parsed.type === 'PONG' || parsed.type === 'HEARTBEAT_ACK') {
+              if (this.pingSentAt > 0) {
+                this._latency = Math.round(performance.now() - this.pingSentAt)
+                this.pingSentAt = 0
+                this.latencyCallbacks.forEach(cb => cb(this._latency))
+              }
+              continue
+            }
+
             // Server sends PEER_JOINED with flat {user_id, ip, port} at top level,
             // but SignalMessage expects a nested peer object — normalize here.
             let msg: SignalMessage
@@ -80,9 +97,10 @@ class SignalService {
     this.stopHeartbeat()
     this.heartbeatTimer = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
+        this.pingSentAt = performance.now()
         this.send({ type: 'HEARTBEAT', user_id: this.userId })
       }
-    }, 10000) // Send heartbeat every 10 seconds
+    }, 5000) // Send heartbeat every 5 seconds (also serves as ping)
   }
 
   private stopHeartbeat(): void {
@@ -90,6 +108,24 @@ class SignalService {
       clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = null
     }
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer)
+      this.pingTimer = null
+    }
+  }
+
+  /** Subscribe to latency updates (ms). Returns unsubscribe function. */
+  onLatency(callback: (ms: number) => void): () => void {
+    this.latencyCallbacks.push(callback)
+    // Immediately report last known latency if available
+    if (this._latency >= 0) callback(this._latency)
+    return () => {
+      this.latencyCallbacks = this.latencyCallbacks.filter(cb => cb !== callback)
+    }
+  }
+
+  get latency(): number {
+    return this._latency
   }
 
   async joinRoom(roomId: string, userId: string, ip: string, port: number, password?: string): Promise<void> {

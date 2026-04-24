@@ -323,6 +323,14 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
 
 .feature-icon { font-size: 16px; }
 
+.feature-dot {
+  width: 5px;
+  height: 5px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 /* Online users */
 .online-section {
   background: var(--bg-elevated);
@@ -461,6 +469,35 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   overflow-y: auto;
 }
 
+/* Latency display */
+.latency-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.latency-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.latency-value {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.latency-value.good { color: #4ade80; }
+.latency-value.ok { color: #facc15; }
+.latency-value.bad { color: #f87171; }
+.latency-value.offline { color: var(--text-faint); }
+
 /* Latency tester row */
 .room-latency-row {
   margin-bottom: 24px;
@@ -549,118 +586,69 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   font-family: 'SF Mono', monospace;
 }
 
-/* Participants */
-.participants-section {
+/* Mic toggle button in header */
+.btn-mic-toggle {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #000;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.btn-mic-toggle:hover {
+  background: var(--accent-hover);
+}
+
+.btn-mic-toggle.muted {
+  background: transparent;
+  color: #f87171;
+  border-color: #f87171;
+}
+
+.btn-mic-toggle.muted:hover {
+  background: rgba(248, 113, 113, 0.1);
+}
+
+/* Mixer section (DAW-style) */
+.mixer-section {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 24px;
+  padding: 20px 24px;
 }
 
-.participants-header {
+.mixer-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
-.participants-count {
-  font-size: 13px;
+.mixer-label {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-weight: 600;
+}
+
+.mixer-count {
+  font-size: 12px;
   color: var(--text-muted);
   font-family: 'SF Mono', monospace;
 }
 
-.participants-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
-}
-
-.participant-card {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 16px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  transition: border-color 0.15s;
-}
-
-.participant-card.self {
-  border-color: var(--border-bright);
-}
-
-.p-avatar {
-  width: 44px;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-hover);
-  border-radius: 8px;
-  font-size: 20px;
-  flex-shrink: 0;
-}
-
-.p-info {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.p-name {
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.p-addr {
-  font-size: 11px;
-  color: var(--text-faint);
-  font-family: 'SF Mono', monospace;
-}
-
-.p-controls {
+.mixer-channels {
   display: flex;
   gap: 6px;
-}
-
-.p-btn {
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 700;
-  cursor: pointer;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  transition: all 0.15s;
-}
-
-.p-btn:hover {
-  border-color: var(--border-bright);
-  color: var(--text);
-}
-
-.p-btn.mute.active {
-  background: var(--red);
-  border-color: var(--red);
-  color: #fff;
-}
-
-.p-btn.solo.active {
-  background: var(--yellow);
-  border-color: var(--yellow);
-  color: #000;
+  overflow-x: auto;
+  padding-bottom: 8px;
 }
 
 .empty-hint {
@@ -670,6 +658,149 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   padding: 40px;
   grid-column: 1 / -1;
   font-style: italic;
+}
+
+/* ==================== CHANNEL STRIP (Mixer/DAW style) ==================== */
+.ch-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 80px;
+  min-height: 280px;
+  transition: border-color 0.15s;
+}
+
+.ch-strip.ch-self {
+  border-color: var(--border-bright);
+}
+
+.ch-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+  padding: 0 2px;
+}
+
+.ch-meter-fader {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  flex: 1;
+  min-height: 140px;
+}
+
+.ch-meter {
+  width: 12px;
+  display: flex;
+  align-items: stretch;
+}
+
+.ch-meter .led-meter {
+  width: 100%;
+  flex: 1;
+}
+
+.ch-meter .led-segment {
+  height: auto !important;
+  flex: 1;
+}
+
+/* Vertical fader (range input) */
+.ch-fader-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+}
+
+.ch-fader {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 140px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.ch-fader::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 24px;
+  height: 10px;
+  background: var(--text);
+  border-radius: 2px;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.15);
+}
+
+.ch-fader::-moz-range-thumb {
+  width: 24px;
+  height: 10px;
+  background: var(--text);
+  border-radius: 2px;
+  cursor: pointer;
+  border: none;
+}
+
+.ch-db {
+  font-size: 10px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text-muted);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.ch-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.ch-btn {
+  width: 28px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.12s;
+}
+
+.ch-btn:hover {
+  border-color: var(--border-bright);
+  color: var(--text);
+}
+
+.ch-mute.active {
+  background: #f87171;
+  border-color: #f87171;
+  color: #000;
+}
+
+.ch-solo.active {
+  background: #facc15;
+  border-color: #facc15;
+  color: #000;
 }
 
 /* ==================== RESPONSIVE ==================== */
