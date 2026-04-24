@@ -7,7 +7,8 @@
 
 Room::Room(const std::string& id, const std::string& owner_id,
            const std::string& password_hash)
-    : room_id_(id), owner_id_(owner_id), password_hash_(password_hash) {}
+    : room_id_(id), owner_id_(owner_id), password_hash_(password_hash),
+      empty_since_(std::chrono::steady_clock::now()) {}
 
 Room::~Room() = default;
 
@@ -24,7 +25,16 @@ bool Room::add_user(const std::string& user_id) {
 
 bool Room::remove_user(const std::string& user_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return users_.erase(user_id) > 0;
+    bool removed = users_.erase(user_id) > 0;
+    if (removed && users_.empty()) {
+        empty_since_ = std::chrono::steady_clock::now();
+    }
+    return removed;
+}
+
+std::chrono::steady_clock::time_point Room::empty_since() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return empty_since_;
 }
 
 std::vector<std::string> Room::get_users() const {
@@ -80,13 +90,22 @@ bool RoomManager::leave_room(const std::string& room_id,
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = rooms_.find(room_id);
     if (it == rooms_.end()) return false;
-    bool removed = it->second->remove_user(user_id);
-    // 如果房间为空，销毁房间
-    if (removed && it->second->user_count() == 0) {
-        rooms_.erase(it);
-        std::cout << "[Room] Room " << room_id << " destroyed (empty)" << std::endl;
+    return it->second->remove_user(user_id);
+}
+
+std::vector<std::string> RoomManager::reap_idle_rooms(std::chrono::steady_clock::duration max_idle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto now = std::chrono::steady_clock::now();
+    std::vector<std::string> reaped;
+    for (auto it = rooms_.begin(); it != rooms_.end(); ) {
+        if (it->second->user_count() == 0 && (now - it->second->empty_since()) >= max_idle) {
+            reaped.push_back(it->first);
+            it = rooms_.erase(it);
+        } else {
+            ++it;
+        }
     }
-    return removed;
+    return reaped;
 }
 
 std::vector<Room*> RoomManager::get_all_rooms() {

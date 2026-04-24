@@ -38,6 +38,7 @@ private:
     static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
     static void on_close(uv_handle_t* handle);
     static void on_heartbeat_timer(uv_timer_t* handle);
+    static void on_room_reaper_timer(uv_timer_t* handle);
 
     void handle_new_connection(uv_stream_t* server, int status);
     void handle_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
@@ -59,6 +60,7 @@ private:
     RoomManager room_manager_;
 
     uv_timer_t heartbeat_timer_;
+    uv_timer_t room_reaper_timer_;
 
     // user_id -> ClientContext map
     std::unordered_map<std::string, ClientContext*> user_id_to_ctx_;

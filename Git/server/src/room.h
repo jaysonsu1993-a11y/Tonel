@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <chrono>
 
 struct User;
 
@@ -25,11 +26,15 @@ public:
     bool has_user(const std::string& user_id) const;
     size_t user_count() const;
 
+    // Returns time point when the room became empty (or creation time if never joined)
+    std::chrono::steady_clock::time_point empty_since() const;
+
 private:
     std::string room_id_;
     std::string owner_id_;
     std::string password_hash_;
     std::set<std::string> users_;
+    std::chrono::steady_clock::time_point empty_since_;
     mutable std::mutex mutex_;
 };
 
@@ -41,6 +46,10 @@ public:
     bool join_room(const std::string& room_id, const std::string& user_id);
     bool leave_room(const std::string& room_id, const std::string& user_id);
     std::vector<Room*> get_all_rooms();
+
+    // Destroy rooms that have been empty for longer than max_idle duration.
+    // Returns the IDs of destroyed rooms.
+    std::vector<std::string> reap_idle_rooms(std::chrono::steady_clock::duration max_idle);
 
 private:
     std::unordered_map<std::string, std::unique_ptr<Room>> rooms_;

@@ -169,6 +169,11 @@ void SignalingServer::start() {
     uv_timer_init(loop_, &heartbeat_timer_);
     heartbeat_timer_.data = this;
     uv_timer_start(&heartbeat_timer_, on_heartbeat_timer, 30000, 30000);
+
+    // Reap idle (empty) rooms every 5 minutes
+    uv_timer_init(loop_, &room_reaper_timer_);
+    room_reaper_timer_.data = this;
+    uv_timer_start(&room_reaper_timer_, on_room_reaper_timer, 300000, 300000);
 }
 
 void SignalingServer::broadcast_to_room(const std::string& room_id,
@@ -273,6 +278,14 @@ void SignalingServer::on_close(uv_handle_t* handle) {
 
 void SignalingServer::on_heartbeat_timer(uv_timer_t* handle) {
     static_cast<SignalingServer*>(handle->data)->user_manager_.check_timeouts();
+}
+
+void SignalingServer::on_room_reaper_timer(uv_timer_t* handle) {
+    auto* self = static_cast<SignalingServer*>(handle->data);
+    auto reaped = self->room_manager_.reap_idle_rooms(std::chrono::minutes(30));
+    for (const auto& rid : reaped) {
+        std::cout << "[Room] Room " << rid << " reaped (idle >30min)" << std::endl;
+    }
 }
 
 // ============================================================

@@ -256,6 +256,12 @@ Automatic: P2P is preferred, switches to Mixer when:
 - **PC cleanup**: connectMixer() closes existing PeerConnection before creating new one,
   preventing "Called in wrong state: stable" errors during signal reconnect
 
+### Room Lifecycle
+
+- Rooms are created via `CREATE_ROOM` and start empty (creator does not auto-join)
+- Users join via `JOIN_ROOM` and leave via `LEAVE_ROOM` or TCP disconnect
+- **Idle room reaper**: a timer runs every 5 minutes and destroys any room that has been empty for ≥30 minutes. This handles rooms where the creator never joined, or rooms that became empty due to disconnects without proper cleanup.
+
 ### Monthly Cost
 
 | Service | Provider | Cost |

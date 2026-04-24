@@ -8,7 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.4] - 2026-04-24
 
 ### Fixed
-- Empty rooms not auto-destroyed when last user leaves -- `RoomManager::leave_room()` now checks `user_count() == 0` and erases the room from `rooms_` map
+- 空房间不会自动销毁 — 新增房间闲置回收机制：房间变空后30分钟自动销毁，每5分钟扫描一次。修复了创建后无人加入的房间永久残留的问题。
+
+### Changed
+- `RoomManager::leave_room()` 不再立即销毁空房间，统一由 reaper 定时器处理
+- `Room` 新增 `empty_since_` 时间戳，记录房间变空的时刻
+- `SignalingServer` 新增 `room_reaper_timer_`（5分钟周期）
 
 ## [0.3.3] - 2026-04-22
 
