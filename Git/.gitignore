@@ -1,6 +1,3 @@
-# Local sensitive docs (not synced to Git)
-/docs/
-
 # Build artifacts (CMake + Unix)
 build/
 build_/

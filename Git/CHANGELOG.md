@@ -1,0 +1,68 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.2] - 2026-04-24
+
+### Fixed
+- WebRTC "Called in wrong state: stable" error on signal reconnect -- connectMixer() now cleans up existing PeerConnection before creating new one
+- WebRTC answer SDP sent before ICE candidates ready -- proxy now uses onLocalDescription callback (node-datachannel)
+- WebSocket frequent disconnects (~13s interval) -- browser signalService sends HEARTBEAT every 10s to prevent Cloudflare Tunnel idle timeout
+- JUCE client build marked as Legacy, S1-Desktop-AppKit renamed to Tonel-Desktop-AppKit
+
+### Added
+- Google STUN server (stun.l.google.com:19302) as fallback for NAT traversal
+- Signaling reliability section in architecture docs
+
+## [0.3.1] - 2026-04-20
+
+### Fixed
+- WebRTC mixer proxy async SDP handling with node-datachannel
+- Server-side WebRTC ICE candidate relay
+
+## [0.3.0] - 2026-04-19
+
+### Added
+- WebRTC DataChannel-based mixer audio transport for web client
+- webrtc-mixer-proxy (node-datachannel) bridging browser DataChannel to server TCP/UDP
+- Cloudflare Tunnel for signaling (api.tonel.io)
+- Cloudflare Pages for web hosting (tonel.io)
+- Direct DTLS/SCTP audio path bypassing domain ICP restrictions
+
+### Changed
+- Web client signaling migrated from direct TCP to WebSocket via Cloudflare Tunnel
+- Mixer audio path changed from WebSocket to WebRTC DataChannel for lower latency
+
+## [0.2.0] - 2026-04-15
+
+### Added
+- Monochrome minimalist UI with animated instrument background
+- Channel strip component with LED meter
+- Room password protection
+- Audio input device selection in web client
+
+### Fixed
+- AppKit UI button click handling
+- AudioContext autoplay policy suspension
+
+## [0.1.0] - 2026-04-01
+
+### Added
+- Initial release of Tonel
+- AppKit native macOS client (zero license risk, MIT-only)
+- Signaling server (TCP/JSON room management)
+- Mixer server (UDP audio mixing with SPA1 protocol)
+- Web client for trial/demo (React + TypeScript)
+- SPA1 (Simple Protocol for Audio v1) -- custom 44-byte header binary protocol
+- P2P mesh mode for 2-4 users (UDP direct)
+- Mixer mode for 5+ users (server-mediated mixing)
+- Opus codec support
+
+[0.3.2]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/jaysonsu1993-a11y/Tonel/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/jaysonsu1993-a11y/Tonel/releases/tag/v0.1.0

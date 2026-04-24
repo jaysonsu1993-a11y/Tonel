@@ -1,0 +1,776 @@
+/* ============================================
+   S1 乐队排练平台 - Hermes 风格极简设计
+   ============================================ */
+
+:root {
+  /* Dark theme (default) - Black & White */
+  --bg: #000000;
+  --bg-elevated: #0a0a0a;
+  --bg-hover: #111111;
+  --border: #222222;
+  --border-bright: #333333;
+  --text: #e8e8e8;
+  --text-muted: #888888;
+  --text-faint: #444444;
+  --accent: #ffffff;       /* 白色 - monochrome accent */
+  --accent-hover: #cccccc;
+  --green: #bbbbbb;
+  --red: #666666;
+  --yellow: #999999;
+  
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
+
+/* ==================== LAYOUT ==================== */
+.app-root {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ==================== NAV ==================== */
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 24px;
+  height: 56px;
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.nav-left {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.nav-logo { font-size: 20px; }
+
+.nav-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.nav-links {
+  display: flex;
+  gap: 24px;
+  list-style: none;
+}
+
+.nav-links a {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 14px;
+  transition: color 0.15s;
+}
+
+.nav-links a:hover { color: var(--text); }
+
+.nav-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ==================== BUTTONS ==================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+  text-decoration: none;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #000;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.btn-ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border-bright);
+}
+
+.btn-danger {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+}
+
+.btn-danger:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.btn-lg {
+  padding: 12px 24px;
+  font-size: 15px;
+}
+
+/* ==================== MAIN CONTENT ==================== */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 10;
+}
+
+/* ==================== HOME PAGE ==================== */
+.home-page {
+  flex: 1;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 48px 24px;
+  width: 100%;
+  position: relative;
+  z-index: 10;
+}
+
+/* Hero */
+.hero {
+  text-align: center;
+  padding: 48px 0 56px;
+}
+
+.hero-title {
+  font-size: 42px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin-bottom: 16px;
+  background: linear-gradient(135deg, #ffffff 0%, #666666 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-subtitle {
+  font-size: 17px;
+  color: var(--text-muted);
+  margin-bottom: 32px;
+  max-width: 480px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* User badge */
+.user-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 32px;
+}
+
+.user-badge .dot {
+  width: 6px;
+  height: 6px;
+  background: var(--green);
+  border-radius: 50%;
+}
+
+/* Action cards */
+.action-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.action-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+  width: 100%;
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.action-card:hover {
+  border-color: var(--border-bright);
+  background: var(--bg-hover);
+  transform: translateY(-1px);
+}
+
+.action-card-icon {
+  font-size: 24px;
+  margin-bottom: 12px;
+}
+
+.action-card h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.action-card p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* Join form */
+.join-section {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 32px;
+}
+
+.join-form {
+  display: flex;
+  gap: 12px;
+}
+
+.room-input {
+  flex: 1;
+  padding: 12px 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 15px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.room-input:focus {
+  border-color: var(--border-bright);
+}
+
+.room-input::placeholder {
+  color: var(--text-faint);
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: inherit;
+}
+
+/* Features strip */
+.features {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  padding: 24px 0;
+  border-top: 1px solid var(--border);
+}
+
+.feature {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.feature-icon { font-size: 16px; }
+
+/* Online users */
+.online-section {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+}
+
+.online-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.section-label {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 500;
+}
+
+.online-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: 'SF Mono', monospace;
+}
+
+.peer-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.peer-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.peer-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--green);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--green);
+}
+
+.no-peers {
+  color: var(--text-faint);
+  font-size: 14px;
+  font-style: italic;
+}
+
+/* ==================== ROOM PAGE ==================== */
+.room-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 10;
+}
+
+.room-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.room-info {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.room-label {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.room-id {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  letter-spacing: 3px;
+  color: var(--text);
+}
+
+.room-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.device-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.device-selector label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.device-select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  min-width: 160px;
+}
+
+.device-select:hover {
+  border-color: var(--border-bright);
+}
+
+.room-content {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+/* Latency tester row */
+.room-latency-row {
+  margin-bottom: 24px;
+}
+
+/* Mic control */
+.mic-panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.mic-panel.self {
+  border-color: var(--border-bright);
+}
+
+.mic-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 24px;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #000;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.mic-btn:hover {
+  background: var(--accent-hover);
+}
+
+.mic-btn.muted {
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.mic-btn.muted:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.meter-section {
+  flex: 1;
+}
+
+.meter-label {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+
+.meter-bar-wrap {
+  height: 8px;
+  background: var(--bg);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.meter-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #333333 0%, #666666 30%, #999999 60%, #cccccc 100%);
+  border-radius: 4px;
+  transition: width 0.05s linear;
+}
+
+.meter-bar.muted {
+  background: var(--bg-hover);
+}
+
+.meter-dbm {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: 'SF Mono', monospace;
+}
+
+/* Participants */
+.participants-section {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.participants-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.participants-count {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-family: 'SF Mono', monospace;
+}
+
+.participants-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.participant-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: border-color 0.15s;
+}
+
+.participant-card.self {
+  border-color: var(--border-bright);
+}
+
+.p-avatar {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-hover);
+  border-radius: 8px;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.p-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.p-name {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.p-addr {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: 'SF Mono', monospace;
+}
+
+.p-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.p-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.15s;
+}
+
+.p-btn:hover {
+  border-color: var(--border-bright);
+  color: var(--text);
+}
+
+.p-btn.mute.active {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.p-btn.solo.active {
+  background: var(--yellow);
+  border-color: var(--yellow);
+  color: #000;
+}
+
+.empty-hint {
+  color: var(--text-faint);
+  font-size: 14px;
+  text-align: center;
+  padding: 40px;
+  grid-column: 1 / -1;
+  font-style: italic;
+}
+
+/* ==================== RESPONSIVE ==================== */
+@media (max-width: 640px) {
+  .nav { padding: 0 16px; }
+  .nav-links { display: none; }
+  .hero-title { font-size: 32px; }
+  .home-page { padding: 32px 16px; }
+  .action-grid { grid-template-columns: 1fr; }
+  .features { grid-template-columns: 1fr 1fr; }
+  .participants-grid { grid-template-columns: 1fr; }
+  .join-form { flex-direction: column; }
+  .mic-panel { flex-direction: column; align-items: stretch; }
+  .room-input { width: 100%; }
+}
+
+/* ==================== PASSWORD / CREATE PANEL ==================== */
+
+/* 密码输入框不需要 uppercase 和 letter-spacing */
+.room-input[type="password"] {
+  text-transform: none;
+  letter-spacing: normal;
+  font-family: inherit;
+}
+
+/* 创建房间面板（非 button，移除 cursor 和 hover 形变） */
+.action-card.create-panel {
+  cursor: default;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.action-card.create-panel:hover {
+  transform: none;
+}
+
+/* 生成的房间号展示 */
+.room-id-preview {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  padding: 8px 0 4px;
+}
+
+/* 创建面板按钮行 */
+.create-panel-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* 加入房间表单：竖排以容纳密码字段 */
+.join-form {
+  flex-direction: column;
+}
+
+.join-form .btn {
+  align-self: flex-start;
+}
+
+/* ==================== 密码错误覆盖页 ==================== */
+.error-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.error-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--red);
+  border-radius: 16px;
+  padding: 48px 40px;
+  text-align: center;
+  max-width: 360px;
+  width: 100%;
+}
+
+.error-icon {
+  font-size: 40px;
+  margin-bottom: 16px;
+}
+
+.error-card h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.error-card p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+}
+
+.form-error {
+  font-size: 12px;
+  color: var(--red);
+  margin: 0 0 8px;
+}

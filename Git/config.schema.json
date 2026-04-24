@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "S1 Band Rehearsal Platform Config",
+  "description": "Centralized configuration for S1 Desktop Client and Server",
+  "type": "object",
+  "properties": {
+    "audio": {
+      "type": "object",
+      "properties": {
+        "sample_rate": {
+          "type": "number",
+          "default": 48000,
+          "description": "Audio sample rate in Hz"
+        },
+        "buffer_size": {
+          "type": "number",
+          "default": 256,
+          "description": "Audio buffer size in samples"
+        },
+        "input_channels": {
+          "type": "number",
+          "default": 1,
+          "description": "Number of input audio channels"
+        },
+        "output_channels": {
+          "type": "number",
+          "default": 2,
+          "description": "Number of output audio channels"
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "stunServers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["stun:stun.l.google.com:19302"],
+          "description": "List of STUN server URIs (format: stun:host:port)"
+        },
+        "signalingPort": {
+          "type": "number",
+          "default": 9001,
+          "description": "Signaling server TCP port"
+        },
+        "mixerPort": {
+          "type": "number",
+          "default": 9002,
+          "description": "Mixer server port (TCP control + UDP audio)"
+        },
+        "mixerWsPort": {
+          "type": "number",
+          "default": 9005,
+          "description": "Mixer server WebSocket port (reserved for future)"
+        },
+        "p2p": {
+          "type": "object",
+          "properties": {
+            "maxPeers": {
+              "type": "number",
+              "default": 4,
+              "description": "Maximum number of P2P peers before switching to mixer"
+            }
+          }
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "properties": {
+        "appId": {
+          "type": "string",
+          "default": "Tonel",
+          "description": "Application identifier"
+        },
+        "version": {
+          "type": "string",
+          "default": "0.3.2",
+          "description": "Application version"
+        }
+      }
+    }
+  }
+}

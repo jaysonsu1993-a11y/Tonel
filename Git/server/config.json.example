@@ -1,0 +1,22 @@
+# S1 Server Configuration
+# Copy this file to config.json and adjust values as needed.
+# Do NOT commit config.json with secrets in it.
+
+{
+    "audio": {
+        "sample_rate": 48000,
+        "buffer_size": 256,
+        "input_channels": 1,
+        "output_channels": 2,
+        "frames": 480
+    },
+    "network": {
+        "signaling_port": 9001,
+        "mixer_port": 9002,
+        "mixer_udp_port": 9002
+    },
+    "app": {
+        "id": "S1-BandRehearsal",
+        "version": "0.1.0"
+    }
+}

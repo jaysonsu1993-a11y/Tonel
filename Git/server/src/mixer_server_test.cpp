@@ -1,0 +1,208 @@
+// mixer_server_test.cpp
+// Minimal test for AudioMixer + MixerServer
+//
+// Usage: ./mixer_server_test
+//   Runs unit tests for AudioMixer only (no network required).
+//
+// For integration test with the mixer server itself, run
+//   ./mixer_server <tcp_port> <udp_port>
+//
+//   e.g.  ./mixer_server 9001 9002
+
+#include "audio_mixer.h"
+#include "mixer_server.h"
+
+#include <cstdio>
+#include <cmath>
+#include <uv.h>
+
+// ============================================================
+// Unit tests for AudioMixer
+// ============================================================
+
+static bool approx(float a, float b, float eps = 1e-6f) {
+    return std::fabs(a - b) < eps;
+}
+
+static int test_empty_mix() {
+    AudioMixer m;
+    float out[480] = {0};
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        if (out[i] != 0.0f) {
+            std::fprintf(stderr, "FAIL: test_empty_mix — out[%d] = %f, expected 0\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_empty_mix\n");
+    return 0;
+}
+
+static int test_single_track() {
+    AudioMixer m;
+    float track[480];
+    for (int i = 0; i < 480; ++i) track[i] = 0.5f;
+    float out[480];
+    m.addTrack("user1", track, 480);
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        if (!approx(out[i], 0.5f)) {
+            std::fprintf(stderr, "FAIL: test_single_track — out[%d] = %f, expected 0.5\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_single_track\n");
+    return 0;
+}
+
+static int test_two_tracks() {
+    AudioMixer m;
+    float t1[480], t2[480];
+    for (int i = 0; i < 480; ++i) { t1[i] = 0.3f; t2[i] = 0.4f; }
+    float out[480];
+    m.addTrack("user1", t1, 480);
+    m.addTrack("user2", t2, 480);
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        if (!approx(out[i], 0.7f)) {
+            std::fprintf(stderr, "FAIL: test_two_tracks — out[%d] = %f, expected 0.7\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_two_tracks\n");
+    return 0;
+}
+
+static int test_weight() {
+    AudioMixer m;
+    float t1[480], t2[480];
+    for (int i = 0; i < 480; ++i) { t1[i] = 0.5f; t2[i] = 0.5f; }
+    float out[480];
+    m.addTrack("user1", t1, 480);
+    m.addTrack("user2", t2, 480);
+    m.setWeight("user2", 0.5f);  // half the volume of user2
+    m.mix(out, 480);
+    // Expected: 0.5 + 0.25 = 0.75
+    for (int i = 0; i < 480; ++i) {
+        if (!approx(out[i], 0.75f)) {
+            std::fprintf(stderr, "FAIL: test_weight — out[%d] = %f, expected 0.75\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_weight\n");
+    return 0;
+}
+
+static int test_limiter() {
+    AudioMixer m;
+    // 10 tracks at full volume — sum = 10.0, will be clamped to 1.0
+    float track[480];
+    for (int i = 0; i < 480; ++i) track[i] = 1.0f;
+    float out[480];
+    for (int u = 0; u < 10; ++u) {
+        m.addTrack("user" + std::to_string(u), track, 480);
+    }
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        if (out[i] > 1.0f || out[i] < -1.0f) {
+            std::fprintf(stderr, "FAIL: test_limiter — out[%d] = %f, outside [-1,1]\n", i, out[i]);
+            return 1;
+        }
+        if (out[i] != 1.0f) {
+            std::fprintf(stderr, "FAIL: test_limiter — out[%d] = %f, expected 1.0 (clamped)\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_limiter\n");
+    return 0;
+}
+
+static int test_remove_track() {
+    AudioMixer m;
+    float t1[480], t2[480];
+    for (int i = 0; i < 480; ++i) { t1[i] = 0.4f; t2[i] = 0.5f; }
+    float out[480];
+    m.addTrack("user1", t1, 480);
+    m.addTrack("user2", t2, 480);
+    m.removeTrack("user1");
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        if (!approx(out[i], 0.5f)) {
+            std::fprintf(stderr, "FAIL: test_remove_track — out[%d] = %f, expected 0.5\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_remove_track\n");
+    return 0;
+}
+
+static int test_track_count() {
+    AudioMixer m;
+    float t[480] = {0};
+    if (m.trackCount() != 0) { std::fprintf(stderr, "FAIL: trackCount init\n"); return 1; }
+    m.addTrack("u1", t, 480);
+    if (m.trackCount() != 1) { std::fprintf(stderr, "FAIL: trackCount u1\n"); return 1; }
+    m.addTrack("u2", t, 480);
+    if (m.trackCount() != 2) { std::fprintf(stderr, "FAIL: trackCount u2\n"); return 1; }
+    m.removeTrack("u1");
+    if (m.trackCount() != 1) { std::fprintf(stderr, "FAIL: trackCount after rm\n"); return 1; }
+    m.removeTrack("u2");
+    if (m.trackCount() != 0) { std::fprintf(stderr, "FAIL: trackCount empty\n"); return 1; }
+    std::printf("PASS: test_track_count\n");
+    return 0;
+}
+
+static int run_mixer_tests() {
+    std::printf("\n=== AudioMixer Unit Tests ===\n");
+    int failures = 0;
+    failures += test_empty_mix();
+    failures += test_single_track();
+    failures += test_two_tracks();
+    failures += test_weight();
+    failures += test_limiter();
+    failures += test_remove_track();
+    failures += test_track_count();
+    std::printf("\n=== AudioMixer: %d test(s) failed ===\n\n", failures);
+    return failures;
+}
+
+// ============================================================
+// MixerServer integration runner
+// ============================================================
+
+static void run_mixer_server(int tcp_port, int udp_port) {
+    uv_loop_t loop;
+    uv_loop_init(&loop);
+
+    MixerServer server(&loop, tcp_port, udp_port, 240);  // 5ms frames
+    server.start();
+
+    std::printf("MixerServer running — TCP:%d UDP:%d\n", tcp_port, udp_port);
+    std::printf("Press Ctrl+C to stop.\n");
+
+    uv_run(&loop, UV_RUN_DEFAULT);
+    uv_loop_close(&loop);
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+int main(int argc, char* argv[]) {
+    if (argc >= 2 && std::strcmp(argv[1], "--test") == 0) {
+        return run_mixer_tests();
+    }
+
+    if (argc >= 3) {
+        int tcp_port = std::atoi(argv[1]);
+        int udp_port = std::atoi(argv[2]);
+        run_mixer_server(tcp_port, udp_port);
+        return 0;
+    }
+
+    std::printf("Usage:\n");
+    std::printf("  %s --test           Run AudioMixer unit tests\n", argv[0]);
+    std::printf("  %s <tcp_port> <udp_port>  Start mixer server\n", argv[0]);
+    std::printf("\nUnit tests:\n");
+    return run_mixer_tests();
+}
