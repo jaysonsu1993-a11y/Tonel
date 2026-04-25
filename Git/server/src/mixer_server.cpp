@@ -652,7 +652,9 @@ void MixerServer::broadcast_levels(Room* room) {
     std::string json = "{\"type\":\"LEVELS\",\"levels\":{";
     bool first = true;
     for (const auto& kv : room->users) {
-        float rms = room->mixer.getTrackLevel(kv.first);
+        // mixer tracks are keyed by "roomId:userId", room->users by "userId"
+        std::string track_key = room->id + ":" + kv.first;
+        float rms = room->mixer.getTrackLevel(track_key);
         // Scale for visual sensitivity and clamp to 0-1
         float level = std::min(1.0f, rms * 2.5f);
         if (!first) json += ",";
