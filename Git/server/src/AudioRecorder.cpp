@@ -8,11 +8,52 @@
 
 #ifdef _WIN32
 #include <direct.h>
-#define mkdir_recursive(path) _mkdir(path)
 #else
 #include <unistd.h>
-#define mkdir_recursive(path) mkdir(path, 0755)
+#include <libgen.h>
 #endif
+
+// P1-2 fix: Recursively create directory path
+static bool mkdir_recursive(const std::string& path) {
+    if (path.empty()) return false;
+    
+    // If directory already exists, success
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        return true;
+    }
+    
+    // Try to create directly first
+#ifdef _WIN32
+    if (_mkdir(path.c_str()) == 0) return true;
+#else
+    if (mkdir(path.c_str(), 0755) == 0) return true;
+#endif
+    
+    // If failed, try creating parent first
+    if (errno == ENOENT) {
+        std::string parent = path;
+        // Remove trailing slash
+        while (!parent.empty() && (parent.back() == '/' || parent.back() == '\\')) {
+            parent.pop_back();
+        }
+        // Find last separator
+        size_t pos = parent.find_last_of("/\\");
+        if (pos != std::string::npos && pos > 0) {
+            parent = parent.substr(0, pos);
+            if (mkdir_recursive(parent)) {
+                // Retry creating this directory
+#ifdef _WIN32
+                return _mkdir(path.c_str()) == 0 || errno == EEXIST;
+#else
+                return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+#endif
+            }
+        }
+    }
+    
+    return errno == EEXIST;
+}
 
 // ============================================================
 // AudioRecorder

@@ -44,11 +44,11 @@ udpRecv.on('error', (err) => {
 const dcByUid = new Map()
 
 udpRecv.on('message', (msg) => {
-  if (msg.length < 44) return
+  if (msg.length < 76) return  // P1-1: header is now 76 bytes
   const magic = msg.readUInt32BE(0)
   if (magic !== 0x53415031) return  // Not 'SPA1'
 
-  const uidBuf = msg.slice(8, 40)
+  const uidBuf = msg.slice(8, 72)  // P1-1: userId is 64 bytes
   let uid = ''
   for (let i = 0; i < uidBuf.length; i++) {
     if (uidBuf[i] === 0) break
@@ -169,13 +169,13 @@ function createPeer(userId, offerSdp, sendSignaling) {
       // Bridge unreliable DataChannel ↔ mixer UDP:9003
       dc.onMessage((msg) => {
         const buf = Buffer.isBuffer(msg) ? msg : Buffer.from(msg)
-        if (buf.length < 44) return
+        if (buf.length < 76) return  // P1-1: header is now 76 bytes
 
         // On first SPA1 packet, register uid for UDP return routing
         if (!peerState.uid) {
           const magic = buf.readUInt32BE(0)
           if (magic === 0x53415031) {
-            const uidBuf = buf.slice(8, 40)
+            const uidBuf = buf.slice(8, 72)  // P1-1: userId is 64 bytes
             let rawUid = ''
             for (let i = 0; i < uidBuf.length; i++) {
               if (uidBuf[i] === 0) break

@@ -145,7 +145,33 @@ SignalingServer::SignalingServer(uv_loop_t* loop, int port)
     server_.data = this;
 }
 
-SignalingServer::~SignalingServer() = default;
+SignalingServer::~SignalingServer() {
+    // P0-4: Close all client connections before destroying server
+    // This prevents use-after-free in on_close callback
+    {
+        std::lock_guard<std::mutex> lock(client_map_mutex_);
+        for (auto& pair : user_id_to_ctx_) {
+            ClientContext* ctx = pair.second;
+            if (ctx && !uv_is_closing((uv_handle_t*)&ctx->tcp_handle)) {
+                // Clear server pointer to make on_close a no-op for this context
+                ctx->server = nullptr;
+                uv_close((uv_handle_t*)&ctx->tcp_handle, on_close);
+            }
+        }
+        user_id_to_ctx_.clear();
+    }
+    
+    // Close server socket and timers to prevent callbacks on destroyed object
+    if (!uv_is_closing((uv_handle_t*)&server_)) {
+        uv_close((uv_handle_t*)&server_, nullptr);
+    }
+    if (!uv_is_closing((uv_handle_t*)&heartbeat_timer_)) {
+        uv_close((uv_handle_t*)&heartbeat_timer_, nullptr);
+    }
+    if (!uv_is_closing((uv_handle_t*)&room_reaper_timer_)) {
+        uv_close((uv_handle_t*)&room_reaper_timer_, nullptr);
+    }
+}
 
 void SignalingServer::start() {
     user_manager_.set_on_user_remove([](const std::string&, uv_tcp_t* client) {

@@ -19,7 +19,8 @@
 // SPA1 — Simple Packet Audio format (version 1)
 //
 // All fields are in network byte order (big-endian).
-// The header is 44 bytes fixed, followed by variable audio data.
+// The header is 76 bytes fixed, followed by variable audio data.
+// P1-1: userId expanded from 32 to 64 bytes for consistency.
 // ============================================================
 
 #pragma pack(push, 1)
@@ -27,15 +28,15 @@ struct SPA1Packet {
     uint32_t magic;          // 0x53415031 == "SPA1"
     uint16_t sequence;       // packet sequence number
     uint16_t timestamp;      // playback timestamp (ms)
-    uint8_t  userId[32];     // null-terminated user identifier
+    uint8_t  userId[64];     // null-terminated user identifier (P1-1: unified to 64)
     uint8_t  codec;           // 0 = PCM16, 1 = Opus
     uint16_t dataSize;       // size of audio data in bytes
-    uint8_t  reserved;       // padding to make header 44 bytes
+    uint8_t  reserved;       // padding (unused)
     uint8_t  data[];         // variable-length payload
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SPA1Packet) == 44, "SPA1Packet header must be 44 bytes");
+static_assert(sizeof(SPA1Packet) == 76, "SPA1Packet header must be 76 bytes (P1-1: userId 64 bytes)");
 
 constexpr uint32_t SPA1_MAGIC          = 0x53415031u;
 constexpr uint32_t SPA1_CODEC_PCM16    = 0u;
@@ -120,6 +121,7 @@ private:
     void handle_control_message(uv_stream_t* client, const std::string& msg);
 
     // ── Audio message handling (UDP) ───────────────────────
+    static void  on_udp_alloc(uv_handle_t*, size_t suggested_size, uv_buf_t* buf);
     static void  on_udp_recv(uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf,
                              const struct sockaddr* addr, unsigned flags);
     void handle_udp_audio(const uint8_t* data, size_t len, const struct sockaddr_in& client_addr);

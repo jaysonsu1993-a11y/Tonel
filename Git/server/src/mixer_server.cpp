@@ -235,7 +235,7 @@ void MixerServer::start() {
     uv_ip4_addr("0.0.0.0", udp_port_, &udp_addr);
     uv_udp_bind(&udp_server_, (const struct sockaddr*)&udp_addr, UV_UDP_REUSEADDR);
     r = uv_udp_recv_start(&udp_server_,
-                          &MixerServer::on_tcp_alloc,   // re-use alloc callback
+                          &MixerServer::on_udp_alloc,
                           &MixerServer::on_udp_recv);
     if (r < 0) {
         std::cerr << "[MixerServer] UDP recv start error: " << uv_strerror(r) << std::endl;
@@ -301,9 +301,15 @@ void MixerServer::on_tcp_new_connection(uv_stream_t* server, int status) {
 }
 
 void MixerServer::on_tcp_alloc(uv_handle_t*, size_t, uv_buf_t* buf) {
-    static thread_local char slab[4096];
-    buf->base = slab;
-    buf->len = static_cast<unsigned int>(sizeof(slab));
+    static thread_local char tcp_slab[4096];
+    buf->base = tcp_slab;
+    buf->len = static_cast<unsigned int>(sizeof(tcp_slab));
+}
+
+void MixerServer::on_udp_alloc(uv_handle_t*, size_t, uv_buf_t* buf) {
+    static thread_local char udp_slab[4096];
+    buf->base = udp_slab;
+    buf->len = static_cast<unsigned int>(sizeof(udp_slab));
 }
 
 void MixerServer::on_tcp_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
@@ -450,9 +456,9 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
     // P0-5: validate dataSize before use
     if (dataSize > MAX_PAYLOAD_SIZE) return;
 
-    // Extract null-terminated userId from fixed 32-byte field
-    char uid_buf[33] = {0};
-    std::memcpy(uid_buf, pkt->userId, 32);
+    // P1-1: Extract null-terminated userId from fixed 64-byte field
+    char uid_buf[65] = {0};
+    std::memcpy(uid_buf, pkt->userId, 64);
     std::string user_id(uid_buf);
     if (user_id.empty()) return;
 
@@ -505,10 +511,13 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
             }
         }
         if (!ue_ptr) return;
+        // P0-3: Must validate return value BEFORE using float_buf
+        // opus_decode_packet returns negative on error, leaving float_buf uninitialized
         int decoded = opus_decode_packet(ue_ptr, pkt->data, dataSize,
                                          float_buf.data());
-        if (decoded < 0) {
-            std::cerr << "[MixerServer] Opus decode error for " << user_id << std::endl;
+        if (decoded <= 0) {
+            // decoded <= 0 means error or no frames - skip processing entirely
+            std::cerr << "[MixerServer] Opus decode error (code " << decoded << ") for " << user_id << std::endl;
             return;
         }
     } else if (codec == SPA1_CODEC_PCM16) {
@@ -617,8 +626,9 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         out_pkt->timestamp  = htons(timestamp);
         // Write recipient's "roomId:userId" so the web proxy can route by userId.
         const std::string uid_key = room->id + ":" + kv.first;
-        std::memset(out_pkt->userId, 0, 32);
-        std::strncpy(reinterpret_cast<char*>(out_pkt->userId), uid_key.c_str(), 31);
+        // P1-1: userId is now 64 bytes
+        std::memset(out_pkt->userId, 0, 64);
+        std::strncpy(reinterpret_cast<char*>(out_pkt->userId), uid_key.c_str(), 63);
         out_pkt->codec      = codec;
         out_pkt->dataSize   = htons(static_cast<uint16_t>(audio_bytes));
         memcpy(out_pkt->data, audio_data, audio_bytes);

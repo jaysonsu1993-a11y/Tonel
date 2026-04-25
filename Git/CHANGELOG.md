@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-04-25
+
+### Fixed (Web Client P0 Issues)
+- **P0-1**: `initPlayback()` 异步无 await → 播放无声问题
+- **P0-2**: `audioContextPlay` 未调用 `resume()` → 浏览器 autoplay 策略阻止播放
+- **P0-3**: `useAudio` 创建独立 AudioContext 与 `audioService` 冲突 → 麦克风占用冲突
+- **P0-4**: `parseSpa1Header` 缺少 dataSize 上限检查 → 潜在内存溢出风险
+
+### Security
+- SPA1 packet dataSize 现在限制为 1356 字节（与服务端 MAX_PAYLOAD_SIZE 一致）
+
 ## [0.3.4] - 2026-04-24
 
 ### Fixed

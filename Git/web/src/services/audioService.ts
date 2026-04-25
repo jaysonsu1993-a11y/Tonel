@@ -15,7 +15,7 @@
 
 // Magic: 'SPA1' as big-endian uint32 = 0x53415031
 const SPA1_MAGIC         = 0x53415031
-const SPA1_HEADER_SIZE   = 44   // bytes before audio data
+const SPA1_HEADER_SIZE   = 76   // bytes before audio data (P1-1: userId 64 bytes)
 const SPA1_CODEC_PCM16   = 0
 const SPA1_CODEC_OPUS    = 1
 const SPA1_CODEC_HANDSHAKE = 0xFF  // special codec for UDP address registration
@@ -35,7 +35,7 @@ const FRAME_SAMPLES = Math.floor(SAMPLE_RATE * 5 / 1000)  // 240 samples @ 48kHz
  *  - magic:     u32 BE  (0x53415031)
  *  - sequence:  u16 BE
  *  - timestamp: u16 BE  (100ms units on server side)
- *  - userId:    char[32] (room_id:user_id, null-terminated)
+ *  - userId:    char[64] (room_id:user_id, null-terminated) [P1-1]
  *  - codec:     u8
  *  - dataSize:  u16 BE
  *  - reserved:  u8
@@ -59,17 +59,17 @@ function buildSpa1Packet(
   view.setUint16(4, sequence & 0xFFFF, false)
   // timestamp (BE, u16) — server uses 100ms units
   view.setUint16(6, timestamp & 0xFFFF, false)
-  // userId (32 bytes, "room_id:user_id" format, null-terminated)
+  // userId (64 bytes, "room_id:user_id" format, null-terminated) [P1-1]
   const uidStr = `${userId}`
-  for (let i = 0; i < 32; i++) {
+  for (let i = 0; i < 64; i++) {
     u8[8 + i] = i < uidStr.length ? uidStr.charCodeAt(i) : 0
   }
   // codec (u8)
-  u8[40] = codec
+  u8[72] = codec
   // dataSize (BE, u16) — audio data byte length
-  view.setUint16(41, data.byteLength, false)
+  view.setUint16(73, data.byteLength, false)
   // reserved
-  u8[43] = 0
+  u8[75] = 0
   // audio payload
   u8.set(data, SPA1_HEADER_SIZE)
 
@@ -79,6 +79,9 @@ function buildSpa1Packet(
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA1 Header Parser
 // ─────────────────────────────────────────────────────────────────────────────
+
+// P0-4 fix: Maximum allowed dataSize to prevent memory overflow
+const MAX_DATA_SIZE = 1356  // Matches server's MAX_PAYLOAD_SIZE
 
 function parseSpa1Header(buf: ArrayBuffer): {
   sequence: number; timestamp: number; userId: string;
@@ -91,12 +94,18 @@ function parseSpa1Header(buf: ArrayBuffer): {
   const magic = view.getUint32(0, false)  // BE
   if (magic !== SPA1_MAGIC) return null
 
-  // Layout matches mixer_server.h: userId is 32 bytes at offset 8-39
+  // Layout matches mixer_server.h: userId is 64 bytes at offset 8-71 [P1-1]
   const sequence  = view.getUint16(4, false)
   const timestamp = view.getUint16(6, false)
-  const userId = String.fromCharCode(...u8.slice(8, 40)).replace(/\0.*$/, '')
-  const codec    = u8[40]
-  const dataSize = view.getUint16(41, false)
+  const userId = String.fromCharCode(...u8.slice(8, 72)).replace(/\0.*$/, '')
+  const codec    = u8[72]
+  const dataSize = view.getUint16(73, false)
+
+  // P0-4 fix: Validate dataSize to prevent memory overflow attacks
+  if (dataSize > MAX_DATA_SIZE) {
+    console.warn('[Audio] SPA1 dataSize exceeds limit:', dataSize)
+    return null
+  }
 
   return { sequence, timestamp, userId, codec, dataSize }
 }
@@ -209,7 +218,7 @@ class AudioService {
       this.source.connect(this.analyser)
 
       this.startLevelMonitoring()
-      this.initPlayback()
+      await this.initPlayback()  // P0-1 fix: await async initPlayback
 
       return this.mediaStream
     } catch (err) {
@@ -221,12 +230,14 @@ class AudioService {
   // Playback worklet node for ring-buffer based playback
   private playbackWorklet: AudioWorkletNode | null = null
 
-  private initPlayback(): void {
+  private async initPlayback(): Promise<void> {
     this.audioContextPlay = new AudioContext({ sampleRate: SAMPLE_RATE })
+    // P0-2 fix: Resume AudioContext to unfreeze from browser autoplay policy
+    await this.audioContextPlay.resume()
     this.masterGain = this.audioContextPlay.createGain()
     this.masterGain.gain.value = 1.0
     this.masterGain.connect(this.audioContextPlay.destination)
-    this.initPlaybackWorklet()
+    await this.initPlaybackWorklet()
   }
 
   private initPlaybackWorklet(): void {
@@ -323,7 +334,9 @@ class AudioService {
         // FIX: Normalize level to 0–1 range instead of 0–100 for consistency.
         const level = Math.min(1.0, rms / 128)
         this.currentLevel = level
-        this.levelCallback?.(level)
+        if (this.levelCallback) {
+          this.levelCallback(level)
+        }
       }
       this.animationFrameId = requestAnimationFrame(update)
     }
