@@ -736,6 +736,22 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
 .ch-meter .led-segment {
   height: auto !important;
   flex: 1;
+  background: rgba(40, 40, 40, 0.5);
+}
+
+.ch-meter .led-segment.active.green {
+  background: #22c55e;
+  box-shadow: 0 0 4px #22c55e;
+}
+
+.ch-meter .led-segment.active.yellow {
+  background: #eab308;
+  box-shadow: 0 0 4px #eab308;
+}
+
+.ch-meter .led-segment.active.red {
+  background: #ef4444;
+  box-shadow: 0 0 4px #ef4444;
 }
 
 /* Vertical fader (range input rotated via transform) */
