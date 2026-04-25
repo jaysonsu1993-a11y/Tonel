@@ -670,7 +670,7 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
-  width: 80px;
+  width: 100px;
   min-height: 280px;
   transition: border-color 0.15s;
 }
@@ -697,6 +697,29 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   align-items: stretch;
   flex: 1;
   min-height: 140px;
+}
+
+/* dB scale marks next to meter */
+.ch-db-scale {
+  position: relative;
+  width: 24px;
+  font-size: 8px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.ch-db-mark {
+  position: absolute;
+  right: 2px;
+  transform: translateY(-50%);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ch-db-mark.clip {
+  color: #ff4444;
+  font-weight: 600;
 }
 
 .ch-meter {
