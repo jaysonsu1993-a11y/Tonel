@@ -574,8 +574,10 @@ class AudioService {
         reject(new Error('WebRTC 连接超时'))
       }, 15000)
 
+      let answered = false
       this.signalUnsub = signalService.onMessage((msg) => {
-        if (msg.type === 'MIXER_ANSWER') {
+        if (msg.type === 'MIXER_ANSWER' && !answered) {
+          answered = true
           this.pc?.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
             .then(() => {
               clearTimeout(timer)

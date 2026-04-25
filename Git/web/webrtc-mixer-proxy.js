@@ -198,19 +198,6 @@ function createPeer(userId, offerSdp, sendSignaling) {
   // ── Set remote offer ────────────────────────────────────────────────────
   console.log(`[WebRTC-Proxy] Setting remote description for ${userId}`)
   pc.setRemoteDescription(offerSdp, 'offer')
-
-  // Fallback: if localDescription is already available synchronously
-  const answer = pc.localDescription()
-  if (answer) {
-    console.log(`[WebRTC-Proxy] Got sync answer for ${userId}, len=${answer.sdp.length}`)
-    const msg = {
-      type: 'MIXER_ANSWER',
-      target_user_id: userId,
-      sdp: answer.sdp,
-    }
-    sendSignaling(JSON.stringify(msg))
-    console.log(`[WebRTC-Proxy] Sent sync answer to ${userId}`)
-  }
 }
 
 function cleanupPeer(userId) {
