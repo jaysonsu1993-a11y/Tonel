@@ -129,10 +129,16 @@ function createPeer(userId, offerSdp, sendSignaling) {
       tcpClient.setKeepAlive(true)
       peerState.tcpClient = tcpClient
 
-      // TCP → DataChannel
+      // TCP → DataChannel (split newline-delimited JSON before forwarding)
+      let tcpBuffer = ''
       tcpClient.on('data', (data) => {
-        if (dc.isOpen()) {
-          dc.sendMessage(data.toString())
+        if (!dc.isOpen()) return
+        tcpBuffer += data.toString()
+        const lines = tcpBuffer.split('\n')
+        tcpBuffer = lines.pop()  // keep incomplete trailing line
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (trimmed) dc.sendMessage(trimmed)
         }
       })
       tcpClient.on('close', () => {

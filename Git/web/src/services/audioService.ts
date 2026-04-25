@@ -591,9 +591,34 @@ class AudioService {
 
   private handleMixerMessage(data: ArrayBuffer | string): void {
     if (typeof data === 'string') {
+      // Handle possible multi-line JSON (newline-delimited from TCP)
+      const lines = data.split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed) this.handleJsonMessage(trimmed)
+      }
+      return
+    }
+
+    // Binary SPA1 packet from mixer server (mixed audio response)
+    const header = parseSpa1Header(data)
+    if (!header) return
+
+    switch (header.codec) {
+      case SPA1_CODEC_PCM16:
+        this.playPcm16(data)
+        break
+      case SPA1_CODEC_OPUS:
+        // Opus decode requires opus.js — not included in this build
+        break
+      default:
+        console.warn(`[Mixer] Unknown SPA1 codec: ${header.codec}`)
+    }
+  }
+
+  private handleJsonMessage(data: string): void {
       try {
         const msg = JSON.parse(data)
-        console.log('[Mixer] JSON:', msg)
         if (msg.type === 'MIXER_JOIN_ACK') {
           console.log('[Mixer] MIXER_JOIN_ACK received, starting capture')
           this.startCapture()
@@ -620,23 +645,6 @@ class AudioService {
       } catch (_) {
         console.warn('[Mixer] Non-JSON string:', data)
       }
-      return
-    }
-
-    // Binary SPA1 packet from mixer server (mixed audio response)
-    const header = parseSpa1Header(data)
-    if (!header) return
-
-    switch (header.codec) {
-      case SPA1_CODEC_PCM16:
-        this.playPcm16(data)
-        break
-      case SPA1_CODEC_OPUS:
-        // Opus decode requires opus.js — not included in this build
-        break
-      default:
-        console.warn(`[Mixer] Unknown SPA1 codec: ${header.codec}`)
-    }
   }
 
   // ── Audio playback ─────────────────────────────────────────────────────────
