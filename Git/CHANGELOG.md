@@ -7,14 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.5] - 2026-04-25
 
-### Fixed (Web Client P0 Issues)
+### Fixed (Web Client)
 - **P0-1**: `initPlayback()` 异步无 await → 播放无声问题
+- **P0-1 追加**: `initPlaybackWorklet()` 返回 `void` 而非 `Promise` → await 未真正等待 worklet 加载
 - **P0-2**: `audioContextPlay` 未调用 `resume()` → 浏览器 autoplay 策略阻止播放
 - **P0-3**: `useAudio` 创建独立 AudioContext 与 `audioService` 冲突 → 麦克风占用冲突
 - **P0-4**: `parseSpa1Header` 缺少 dataSize 上限检查 → 潜在内存溢出风险
 
+### Fixed (Server)
+- **P0-1**: UDP/TCP 缓冲区竞争 — 分离为独立的 `tcp_slab` 和 `udp_slab`
+- **P0-3**: Opus 解码未验证返回值 — `decoded <= 0` 时直接 return，避免使用未初始化数据
+- **P0-4**: TCP 连接关闭后 use-after-free — 断开时清除所有 `UserEndpoint.tcp_client` 指针，防止 `broadcast_levels` 写入已关闭连接
+
 ### Security
-- SPA1 packet dataSize 现在限制为 1356 字节（与服务端 MAX_PAYLOAD_SIZE 一致）
+- SPA1 packet dataSize 限制为 1356 字节（客户端+服务端双向校验）
 
 ## [0.3.4] - 2026-04-24
 

@@ -115,10 +115,10 @@ private:
     static void  on_tcp_new_connection(uv_stream_t* server, int status);
     static void  on_tcp_alloc(uv_handle_t*, size_t suggested_size, uv_buf_t* buf);
     static void  on_tcp_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
-    static void  on_tcp_close(uv_handle_t* handle);
 
     void handle_tcp_read(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
     void handle_control_message(uv_stream_t* client, const std::string& msg);
+    void clear_tcp_client(uv_stream_t* client);
 
     // ── Audio message handling (UDP) ───────────────────────
     static void  on_udp_alloc(uv_handle_t*, size_t suggested_size, uv_buf_t* buf);

@@ -315,15 +315,16 @@ void MixerServer::on_udp_alloc(uv_handle_t*, size_t, uv_buf_t* buf) {
 void MixerServer::on_tcp_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     auto* self = static_cast<MixerServer*>(stream->data);
     if (nread < 0) {
-        uv_close((uv_handle_t*)stream, nullptr);
+        // Clear all UserEndpoint.tcp_client pointers referencing this connection
+        // before closing, to prevent use-after-free in broadcast_levels.
+        self->clear_tcp_client(stream);
+        uv_close((uv_handle_t*)stream, [](uv_handle_t* h) {
+            delete reinterpret_cast<uv_tcp_t*>(h);
+        });
         return;
     }
     if (nread == 0) return;
     self->handle_tcp_read(stream, nread, buf);
-}
-
-void MixerServer::on_tcp_close(uv_handle_t*) {
-    // Nothing persistent to clean up
 }
 
 // ============================================================
@@ -710,6 +711,21 @@ void MixerServer::handle_mix_timer() {
 
         if (send_levels) {
             broadcast_levels(room);
+        }
+    }
+}
+
+// ============================================================
+// TCP client cleanup — nullify dangling pointers on disconnect
+// ============================================================
+
+void MixerServer::clear_tcp_client(uv_stream_t* client) {
+    std::lock_guard<std::mutex> lock(rooms_mutex_);
+    for (auto& room_kv : rooms_) {
+        for (auto& user_kv : room_kv.second->users) {
+            if (user_kv.second.tcp_client == client) {
+                user_kv.second.tcp_client = nullptr;
+            }
         }
     }
 }

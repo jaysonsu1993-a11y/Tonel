@@ -240,7 +240,7 @@ class AudioService {
     await this.initPlaybackWorklet()
   }
 
-  private initPlaybackWorklet(): void {
+  private async initPlaybackWorklet(): Promise<void> {
     if (!this.audioContextPlay || !this.masterGain) return
 
     // Adaptive ring buffer: max 8 frames (80ms), target starts at 2 frames (20ms)
@@ -311,15 +311,16 @@ class AudioService {
     `
     const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))
 
-    this.audioContextPlay.audioWorklet.addModule(url).then(() => {
+    try {
+      await this.audioContextPlay.audioWorklet.addModule(url)
       if (!this.audioContextPlay || !this.masterGain) return
       this.playbackWorklet = new AudioWorkletNode(this.audioContextPlay, 'playback-processor')
       this.playbackWorklet.connect(this.masterGain)
-      URL.revokeObjectURL(url)
-    }).catch(err => {
+    } catch (err) {
       console.warn('[Audio] Playback worklet failed, using legacy mode:', err)
+    } finally {
       URL.revokeObjectURL(url)
-    })
+    }
   }
 
   private startLevelMonitoring(): void {
