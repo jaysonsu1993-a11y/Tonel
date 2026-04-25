@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { audioService } from '../services/audioService'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
@@ -6,13 +6,16 @@ import { ChannelStrip } from '../components/ChannelStrip'
 interface Props {
   roomId: string
   userId: string
+  userProfile?: import('../types').UserProfile | null
   password?: string
   peers: PeerInfo[]
   onLeave: () => void
 }
 
-export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
+export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props) {
   const [selfLevel, setSelfLevel] = useState(0)
+  const [peerLevels, setPeerLevels] = useState<Record<string, number>>({})
+  const [soloId, setSoloId] = useState<string | null>(null)  // null = no solo active
   const [isMuted, setIsMuted] = useState(false)
   const [copied, setCopied] = useState(false)
   const [inputDevices, setInputDevices] = useState<MediaDeviceInfo[]>([])
@@ -45,6 +48,9 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
       try {
         await audioService.init()
         audioService.onLevel((l) => setSelfLevel(l))
+        audioService.onPeerLevel((uid, level) => {
+          setPeerLevels(prev => ({ ...prev, [uid]: level }))
+        })
         await audioService.connectMixer(userId, roomId)
         await audioService.startCapture()
       } catch (err) {
@@ -81,6 +87,30 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
       setTimeout(() => setCopied(false), 2000)
     })
   }
+
+  // Solo logic: when a channel is soloed, mute master gain unless it's the solo channel
+  // Since mixer sends a single mixed stream, solo only works for self (mute others vs mute self)
+  const handleSolo = useCallback((channelId: string, solo: boolean) => {
+    setSoloId(solo ? channelId : null)
+  }, [])
+
+  // When solo changes, adjust master gain: if solo is on self, keep playing; if solo is on peer, mute (can't isolate in mix)
+  useEffect(() => {
+    if (soloId === null) {
+      // No solo: restore normal gain
+      audioService.setMasterGain(1.0)
+    } else if (soloId === userId) {
+      // Solo on self: mute mixer output (only hear own monitoring)
+      audioService.setMasterGain(0)
+    } else {
+      // Solo on a peer: in mixer mode we can't isolate, keep playing
+      audioService.setMasterGain(1.0)
+    }
+  }, [soloId, userId])
+
+  const handleVolume = useCallback((gain: number) => {
+    audioService.setMasterGain(gain)
+  }, [])
 
   const selfPeak = selfLevel > 0 ? selfLevel * 1.1 : 0
 
@@ -140,26 +170,37 @@ export function RoomPage({ roomId, userId, peers, onLeave }: Props) {
           <div className="mixer-channels">
             <ChannelStrip
               peerId={userId}
-              name="YOU"
+              name={userProfile?.nickname || 'YOU'}
+              avatarUrl={userProfile?.avatarUrl}
               level={selfLevel}
               peak={selfPeak}
               isSelf
               isMuted={isMuted}
+              isSolo={soloId === userId}
               onMute={(muted) => {
                 if (muted) audioService.mute()
                 else audioService.unmute()
                 setIsMuted(muted)
               }}
+              onSolo={(solo) => handleSolo(userId, solo)}
+              onVolume={handleVolume}
             />
-            {peers.map(p => (
-              <ChannelStrip
-                key={p.user_id}
-                peerId={p.user_id}
-                name={p.user_id.slice(0, 8)}
-                level={0}
-                peak={0}
-              />
-            ))}
+            {peers.map(p => {
+              const pl = peerLevels[`${roomId}:${p.user_id}`] ?? 0
+              return (
+                <ChannelStrip
+                  key={p.user_id}
+                  peerId={p.user_id}
+                  name={p.nickname || p.user_id.slice(0, 8)}
+                  avatarUrl={p.avatar_url}
+                  level={pl}
+                  peak={pl > 0 ? pl * 1.1 : 0}
+                  isSolo={soloId === p.user_id}
+                  onSolo={(solo) => handleSolo(p.user_id, solo)}
+                  onVolume={handleVolume}
+                />
+              )
+            })}
             {peers.length === 0 && (
               <p className="empty-hint">等待其他乐手加入…</p>
             )}

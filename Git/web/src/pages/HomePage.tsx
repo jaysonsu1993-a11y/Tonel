@@ -3,6 +3,7 @@ import type { PeerInfo } from '../types'
 
 interface Props {
   isLoggedIn: boolean
+  userProfile?: import('../types').UserProfile | null
   onCreateRoom: (roomId: string, password?: string) => Promise<void>
   onJoinRoom: (roomId: string, password?: string) => Promise<void>
   onClearJoinError: () => void
@@ -11,7 +12,7 @@ interface Props {
   createError?: string | null
 }
 
-export function HomePage({ isLoggedIn, onCreateRoom, onJoinRoom, onClearJoinError, peers, joinError, createError }: Props) {
+export function HomePage({ isLoggedIn, userProfile: _userProfile, onCreateRoom, onJoinRoom, onClearJoinError, peers, joinError, createError }: Props) {
   const [isJoining, setIsJoining] = useState(false)
   const [isCreating, setIsCreating] = useState(false)
 

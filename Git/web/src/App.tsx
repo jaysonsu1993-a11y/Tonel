@@ -3,13 +3,17 @@ import { HomePage } from './pages/HomePage'
 import { RoomPage } from './pages/RoomPage'
 import { useSignal } from './hooks/useSignal'
 import { MusicBackground } from './components/MusicBackground'
-import type { PageState } from './types'
+import { WechatLogin } from './components/WechatLogin'
+import type { PageState, UserProfile } from './types'
 import './index.css'
 
 // 生成免费用户 ID
 function generateGuestId(): string {
   return `Guest_${Math.random().toString(36).slice(2, 6).toUpperCase()}`
 }
+
+// 用户服务 API 地址
+const USER_API_BASE = import.meta.env.VITE_USER_API_URL || 'https://api.tonel.io'
 
 export default function App() {
   const [page, setPage] = useState<PageState>('home')
@@ -19,16 +23,59 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [joinError, setJoinError] = useState<string | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [showLoginModal, setShowLoginModal] = useState(false)
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
+  const [token, setToken] = useState(localStorage.getItem('tonel_token') || '')
   const { peers, connect, createRoom, joinRoom, leaveRoom } = useSignal()
 
-  // 默认免费用户模式
+  // 初始化：检查登录状态
   useEffect(() => {
     const guestId = generateGuestId()
     setUserId(guestId)
     connect()
+
+    // 如果有 token，验证并获取用户信息
+    if (token) {
+      fetchUserProfile(token)
+    }
   }, [])
 
+  // 获取用户信息
+  const fetchUserProfile = async (authToken: string) => {
+    try {
+      const res = await fetch(`${USER_API_BASE}/api/user/profile`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setUserProfile(data)
+        setUserId(data.nickname || data.unionId)
+        setIsLoggedIn(true)
+      } else {
+        // Token 无效，清除
+        localStorage.removeItem('tonel_token')
+        setToken('')
+      }
+    } catch (err) {
+      console.error('Failed to fetch user profile:', err)
+    }
+  }
+
+  // 处理微信登录成功
+  const handleLoginSuccess = useCallback((newToken: string, profile: UserProfile) => {
+    localStorage.setItem('tonel_token', newToken)
+    setToken(newToken)
+    setUserProfile(profile)
+    setUserId(profile.nickname || profile.unionId)
+    setIsLoggedIn(true)
+    setShowLoginModal(false)
+  }, [])
+
+  // 退出登录
   const handleLogout = useCallback(() => {
+    localStorage.removeItem('tonel_token')
+    setToken('')
+    setUserProfile(null)
     const guestId = generateGuestId()
     setUserId(guestId)
     setIsLoggedIn(false)
@@ -73,7 +120,7 @@ export default function App() {
   return (
     <div className="app-root">
       <MusicBackground />
-      {/* 导航栏 - Hermes 风格 */}
+      {/* 导航栏 */}
       <nav className="nav">
         <div className="nav-left">
           <a href="/" className="nav-brand">
@@ -88,25 +135,47 @@ export default function App() {
         <div className="nav-right">
           <div className="user-badge">
             <span className="dot" />
-            <span>{isLoggedIn ? 'PRO' : 'FREE'}</span>
+            <span>{isLoggedIn ? (userProfile?.membershipType === 'pro' ? 'PRO' : 'BASIC') : 'FREE'}</span>
           </div>
           {isLoggedIn ? (
-            <button className="btn btn-ghost btn-sm" onClick={handleLogout}>
-              退出
-            </button>
+            <div className="user-info">
+              {userProfile?.avatarUrl && (
+                <img 
+                  src={userProfile.avatarUrl} 
+                  alt="avatar" 
+                  className="user-avatar"
+                  style={{ width: 28, height: 28, borderRadius: '50%', marginRight: 8 }}
+                />
+              )}
+              <span className="user-nickname" style={{ marginRight: 12, fontSize: 14 }}>
+                {userProfile?.nickname || userId}
+              </span>
+              <button className="btn btn-ghost btn-sm" onClick={handleLogout}>
+                退出
+              </button>
+            </div>
           ) : (
-            <button className="btn btn-primary btn-sm">
+            <button className="btn btn-primary btn-sm" onClick={() => setShowLoginModal(true)}>
               登录
             </button>
           )}
         </div>
       </nav>
 
+      {/* 微信登录弹窗 */}
+      {showLoginModal && (
+        <WechatLogin 
+          onSuccess={handleLoginSuccess}
+          onClose={() => setShowLoginModal(false)}
+        />
+      )}
+
       {/* 页面内容 */}
       <main className="main-content">
         {page === 'home' && (
           <HomePage
             isLoggedIn={isLoggedIn}
+            userProfile={userProfile}
             onCreateRoom={handleCreateRoom}
             onJoinRoom={handleJoinRoom}
             onClearJoinError={() => setJoinError(null)}
@@ -119,6 +188,7 @@ export default function App() {
           <RoomPage
             roomId={roomId}
             userId={userId}
+            userProfile={userProfile}
             password={roomPassword}
             peers={peers}
             onLeave={handleLeaveRoom}

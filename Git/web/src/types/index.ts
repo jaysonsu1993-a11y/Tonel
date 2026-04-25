@@ -3,6 +3,8 @@ export interface PeerInfo {
   user_id: string
   ip: string
   port: number
+  nickname?: string
+  avatar_url?: string
 }
 
 export interface SignalingMessage {
@@ -54,6 +56,16 @@ export interface LoginInfo {
   phone?: string
   wechat?: string
   userId: string
+}
+
+// 用户资料（微信登录后）
+export interface UserProfile {
+  id: number
+  unionId: string
+  nickname: string
+  avatarUrl: string
+  membershipType: 'free' | 'basic' | 'pro'
+  membershipExpiresAt?: number
 }
 
 // 页面状态

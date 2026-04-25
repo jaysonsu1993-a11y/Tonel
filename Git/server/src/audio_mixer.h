@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 // ============================================================
 // AudioMixer — multi-track audio mixer
@@ -42,6 +43,9 @@ public:
     // Returns true if the given user is in the mix
     bool hasTrack(const std::string& userId) const;
 
+    // Compute RMS level (0.0 - 1.0) for a specific track
+    float getTrackLevel(const std::string& userId) const;
+
 private:
     static constexpr int MAX_FRAME_COUNT = 480;  // 10ms @ 48kHz (max for 5ms x2 safety)
 
@@ -75,6 +79,17 @@ inline void AudioMixer::addTrack(const std::string& userId, const float* audio, 
 
 inline void AudioMixer::removeTrack(const std::string& userId) {
     tracks_.erase(userId);
+}
+
+inline float AudioMixer::getTrackLevel(const std::string& userId) const {
+    auto it = tracks_.find(userId);
+    if (it == tracks_.end() || it->second.frameCount == 0) return 0.0f;
+    const Track& t = it->second;
+    float sum = 0.0f;
+    for (int i = 0; i < t.frameCount; ++i) {
+        sum += t.audio[i] * t.audio[i];
+    }
+    return std::sqrt(sum / t.frameCount);
 }
 
 inline void AudioMixer::setWeight(const std::string& userId, float weight) {

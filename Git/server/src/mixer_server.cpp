@@ -356,6 +356,7 @@ void MixerServer::handle_control_message(uv_stream_t* client,
             ue.user_id = j.user_id;
             ue.addr_valid = false;
             ue.preferred_codec = SPA1_CODEC_PCM16;
+            ue.tcp_client = client;
             opus_state_init(&ue.opus, 48000, 2, audio_frames_);
             room->users[j.user_id] = ue;
             user_room_index_[j.user_id] = j.room_id;
@@ -643,6 +644,32 @@ void MixerServer::broadcast_mixed_audio(Room* room,
 }
 
 // ============================================================
+// Per-user level broadcast (via TCP control channel)
+// ============================================================
+
+void MixerServer::broadcast_levels(Room* room) {
+    // Build JSON: {"type":"LEVELS","levels":{"user1":0.42,"user2":0.15,...}}
+    std::string json = "{\"type\":\"LEVELS\",\"levels\":{";
+    bool first = true;
+    for (const auto& kv : room->users) {
+        float rms = room->mixer.getTrackLevel(kv.first);
+        // Scale for visual sensitivity and clamp to 0-1
+        float level = std::min(1.0f, rms * 2.5f);
+        if (!first) json += ",";
+        json += "\"" + kv.first + "\":" + std::to_string(level);
+        first = false;
+    }
+    json += "}}";
+
+    // Send to all users in the room who have a TCP connection
+    for (const auto& kv : room->users) {
+        if (kv.second.tcp_client) {
+            send_tcp_response(kv.second.tcp_client, json);
+        }
+    }
+}
+
+// ============================================================
 // Timed mixing — 5ms periodic mixer to unify frame boundaries
 // ============================================================
 
@@ -654,6 +681,13 @@ void MixerServer::on_mix_timer(uv_timer_t* handle) {
 void MixerServer::handle_mix_timer() {
     std::lock_guard<std::mutex> lock(rooms_mutex_);
 
+    bool send_levels = false;
+    level_tick_counter_++;
+    if (level_tick_counter_ >= 10) {  // every 10 ticks (50ms) ≈ 20Hz
+        level_tick_counter_ = 0;
+        send_levels = true;
+    }
+
     for (auto& kv : rooms_) {
         Room* room = kv.second.get();
         if (!room || !room->pending_mix) continue;
@@ -661,5 +695,9 @@ void MixerServer::handle_mix_timer() {
         room->pending_mix = false;
         mix_sequence_++;
         broadcast_mixed_audio(room, mix_sequence_, 0);
+
+        if (send_levels) {
+            broadcast_levels(room);
+        }
     }
 }

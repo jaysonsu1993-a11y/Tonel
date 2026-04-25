@@ -93,6 +93,7 @@ private:
         bool addr_valid = false;
         uint8_t preferred_codec = SPA1_CODEC_PCM16;  // 0=PCM16, 1=OPUS
         OpusCodecState opus;                          // opus encode state per client
+        uv_stream_t* tcp_client = nullptr;            // TCP control connection for this user
     };
 
     // ── Room state ──────────────────────────────────────────
@@ -125,6 +126,9 @@ private:
 
     // ── Mixed audio broadcast ─────────────────────────────
     void broadcast_mixed_audio(Room* room, uint16_t sequence, uint16_t timestamp);
+
+    // ── Per-user level broadcast (throttled ~20Hz) ──────
+    void broadcast_levels(Room* room);
 
     // ── Timed mixing ─────────────────────────────────────
     static void on_mix_timer(uv_timer_t* handle);
@@ -171,6 +175,7 @@ private:
     // Timed mixing: 5ms interval for stable frame boundaries
     uv_timer_t mix_timer_;
     uint16_t mix_sequence_ = 0;
+    int level_tick_counter_ = 0;  // throttle level broadcasts to ~20Hz
 
     // Recording
     RecordingManager recording_manager_;

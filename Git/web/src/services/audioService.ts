@@ -91,11 +91,12 @@ function parseSpa1Header(buf: ArrayBuffer): {
   const magic = view.getUint32(0, false)  // BE
   if (magic !== SPA1_MAGIC) return null
 
-  const sequence = view.getUint16(4, false)   // BE
-  const timestamp = view.getUint16(6, false) // BE
+  // Layout matches mixer_server.h: userId is 32 bytes at offset 8-39
+  const sequence  = view.getUint16(4, false)
+  const timestamp = view.getUint16(6, false)
   const userId = String.fromCharCode(...u8.slice(8, 40)).replace(/\0.*$/, '')
-  const codec = u8[40]
-  const dataSize = view.getUint16(41, false) // BE
+  const codec    = u8[40]
+  const dataSize = view.getUint16(41, false)
 
   return { sequence, timestamp, userId, codec, dataSize }
 }
@@ -133,6 +134,7 @@ function pcm16ToFloat32(pcm: Uint8Array): Float32Array {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type AudioLevelCallback = (level: number) => void
+type PeerLevelCallback = (userId: string, level: number) => void
 
 class AudioService {
   private audioContext:     AudioContext | null = null
@@ -151,6 +153,10 @@ class AudioService {
   private signalUnsub:      (() => void) | null = null
   private userId:           string = ''
   private roomId:           string = ''
+
+  // Remote peer level tracking
+  private peerLevelCallback: PeerLevelCallback | null = null
+  private peerLevels: Map<string, number> = new Map()
 
   // Audio latency (RTT via control DataChannel)
   private pingTimer:        ReturnType<typeof setInterval> | null = null
@@ -326,6 +332,23 @@ class AudioService {
 
   onLevel(cb: AudioLevelCallback): void {
     this.levelCallback = cb
+  }
+
+  /** Set master output gain (0-1 linear). Controls playback volume. */
+  setMasterGain(gain: number): void {
+    if (this.masterGain) {
+      this.masterGain.gain.value = Math.max(0, Math.min(1, gain))
+    }
+  }
+
+  /** Subscribe to remote peer level updates. Callback receives (userId, level 0-1). */
+  onPeerLevel(cb: PeerLevelCallback): void {
+    this.peerLevelCallback = cb
+  }
+
+  /** Get last known level for a peer (0-1), or 0 if unknown. */
+  getPeerLevel(userId: string): number {
+    return this.peerLevels.get(userId) ?? 0
   }
 
   // ── Capture: AudioWorklet → 10ms frames → SPA1 encode → send ─────────────
@@ -579,6 +602,14 @@ class AudioService {
           console.log('[Mixer] Handshake ack, starting capture')
           this.startCapture()
           this.startPing()
+        } else if (msg.type === 'LEVELS' && msg.levels) {
+          // Per-user input levels from mixer server: { "user1": 0.42, "user2": 0.15, ... }
+          if (this.peerLevelCallback) {
+            for (const [uid, level] of Object.entries(msg.levels)) {
+              this.peerLevels.set(uid, level as number)
+              this.peerLevelCallback(uid, level as number)
+            }
+          }
         } else if (msg.type === 'PONG') {
           if (this.pingSentAt > 0) {
             this._audioLatency = Math.round(performance.now() - this.pingSentAt)

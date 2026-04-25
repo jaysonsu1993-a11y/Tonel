@@ -6,6 +6,7 @@ const DB_SCALE_MARKS = [0, -6, -12, -18, -24, -36, -48] as const
 interface ChannelStripProps {
   peerId: string
   name: string
+  avatarUrl?: string
   addr?: string
   level: number      // 0-1
   peak: number       // 0-1
@@ -20,6 +21,7 @@ interface ChannelStripProps {
 export function ChannelStrip({
   peerId,
   name,
+  avatarUrl,
   level,
   peak,
   isSelf = false,
@@ -81,9 +83,25 @@ export function ChannelStrip({
 
   return (
     <div className={`ch-strip ${isSelf ? 'ch-self' : ''}`}>
-      {/* Channel name */}
-      <div className="ch-name" title={name}>
-        {name}
+      {/* Channel name + avatar */}
+      <div className="ch-header">
+        {avatarUrl && (
+          <img 
+            src={avatarUrl} 
+            alt={name}
+            className="ch-avatar"
+            style={{ 
+              width: 28, 
+              height: 28, 
+              borderRadius: '50%', 
+              marginRight: 6,
+              border: isSelf ? '2px solid #4CAF50' : '2px solid transparent'
+            }}
+          />
+        )}
+        <div className="ch-name" title={name}>
+          {name}
+        </div>
       </div>
 
       {/* Meter + Fader area */}
