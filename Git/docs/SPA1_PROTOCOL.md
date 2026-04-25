@@ -1,6 +1,6 @@
 # SPA1 — Simple Protocol for Audio v1
 
-> 对应实现头文件：`Tonel-Desktop/spa1.h`
+> 对应实现：`server/src/mixer_server.h`（C++ 结构体）、`web/src/services/audioService.ts`（JS 编解码）
 
 ## 概述
 
@@ -8,50 +8,45 @@ SPA1 是一个为实时排练场景设计的轻量级二进制音频协议。采
 
 ---
 
-## 包格式（44 字节固定头 + payload）
+## 包格式（76 字节固定头 + payload）
+
+> P1-1 变更（2026-04-25）：userId 从 32 扩展至 64 字节，总头长从 44 增至 76 字节。
+> 同时移除了旧版的 `type` 和 `level` 字段，简化头结构。
 
 ```
 偏移  大小  类型       字段         说明
 ──────────────────────────────────────────────────────────────
 0     4     u32 BE    magic       0x53415031 ('SPA1')
 4     2     u16 BE    sequence    包序号（递增）
-6     2     u16 BE    timestamp   播放时间戳（ms，服务器使用）
-8     30    char[]    userId      用户标识符，最大 29 字符 + null 终止
-38    1     u8        type        0=AUDIO, 1=HANDSHAKE
-39    1     u8        codec       0=PCM16, 1=Opus（仅 AUDIO）
-40    1     int8      level       音频电平 dBFS（仅 AUDIO，服务器计算）
-41    2     u16 BE    dataSize    payload 字节数
-43    1     u8        reserved    保留 / 未来扩展标志位
+6     2     u16 BE    timestamp   播放时间戳（100ms 单位，服务器使用）
+8     64    char[64]  userId      用户标识符，null 终止（P1-1: 64 字节）
+72    1     u8        codec       0=PCM16, 1=Opus, 0xFF=Handshake
+73    2     u16 BE    dataSize    payload 字节数（上限 1356）
+75    1     u8        reserved    保留 / 未来扩展标志位
 ──────────────────────────────────────────────────────────────
-44+   N     uint8[]   data        音频数据
+76+   N     uint8[]   data        音频数据
 ──────────────────────────────────────────────────────────────
-      ── 总头长：44 字节 ──
+      ── 总头长：76 字节 ──
 ```
 
 ### 各字段详解
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `magic` | u32 | 固定值 `0x53415031`，用于协议识别与校验 |
-| `sequence` | u16 | 包序号，每包递增，接收端用于检测丢包和排序 |
-| `timestamp` | u16 | 播放时间戳（ms），服务器混音时用于同步 |
-| `userId` | char[30] | 格式 `"roomId:userId"`，null 终止 |
-| `type` | u8 | 消息类型：`0=AUDIO`（音频数据），`1=HANDSHAKE`（地址注册） |
-| `codec` | u8 | 音频编码器：`0=PCM16`（无压缩），`1=Opus`（有损压缩） |
-| `level` | int8 | 服务器计算的当前帧电平，`level_dBFS = (int8_t)level`，范围 -127～0 dBFS |
-| `dataSize` | u16 | `data` payload 的实际字节数 |
-| `reserved` | u8 | 保留字段，置 0 |
+| 字段 | 类型 | 偏移 | 说明 |
+|------|------|------|------|
+| `magic` | u32 BE | 0 | 固定值 `0x53415031`，用于协议识别与校验 |
+| `sequence` | u16 BE | 4 | 包序号，每包递增，接收端用于检测丢包和排序 |
+| `timestamp` | u16 BE | 6 | 播放时间戳，服务器混音时用于同步 |
+| `userId` | char[64] | 8 | 格式 `"roomId:userId"`，null 终止。P1-1 扩展至 64 字节 |
+| `codec` | u8 | 72 | 音频编码器：`0=PCM16`，`1=Opus`，`0xFF=Handshake` |
+| `dataSize` | u16 BE | 73 | `data` payload 的实际字节数，上限 1356 字节 |
+| `reserved` | u8 | 75 | 保留字段，置 0 |
 
-### level 字段电平参考
+### 电平传输
 
-| level 值 | dBFS | 说明 |
-|----------|------|------|
-| 0 | 0 dBFS | 满刻度（ clipping 临界点） |
-| -6 | -6 dBFS | 动态余量充足，信号偏热但干净 |
-| -18 | -18 dBFS | 典型工作电平 |
-| -36 | -36 dBFS | 弱奏段落 |
-| -127 | -127 dBFS | 近静默阈值 |
-| >0 | >0 dBFS | 信号已 clipping，需降低增益 |
+> 旧版 SPA1 在包头内嵌入了 `level` 字段。P1-1 移除了该字段。
+> 电平数据现在通过 TCP 控制通道以 JSON `LEVELS` 消息广播（~20Hz），
+> 格式：`{"type":"LEVELS","levels":{"userId1":0.42,"userId2":0.15,...}}`。
+> 值域 0.0-1.0，由服务器从 AudioMixer track RMS 计算。
 
 ---
 
@@ -65,14 +60,14 @@ SPA1 是一个为实时排练场景设计的轻量级二进制音频协议。采
 
 ### PCM16 帧结构
 
-- 帧长：**20 ms** = 960 samples @ 48kHz
-- 每帧字节数：960 × 2 = **1920 bytes**
-- 这是最大帧长；实际包可能小于此值（如静音段）
+- 帧长：**5 ms** = 240 samples @ 48kHz（默认配置，追求最低延迟）
+- 每帧字节数：240 × 2 = **480 bytes**
+- 服务器 `audio_frames_` 参数可调（如 480=10ms、960=20ms）
 
 ### Opus 帧结构
 
-- 帧长：同样是 **20 ms**
-- 每帧字节数：可变，典型约 **80–120 bytes**（取决于比特率设置）
+- 帧长：同 PCM16 配置（5ms/10ms/20ms）
+- 每帧字节数：可变，典型约 **20-60 bytes**（5ms），**80-120 bytes**（20ms）
 - 相比 PCM16 可节省 >90% 带宽
 
 ---
@@ -98,8 +93,8 @@ SPA1Packet {
 
 ## 帧同步与时序
 
-- 每帧 20 ms，接收端按 `sequence` 序号和 `timestamp` 双重判断顺序
-- 服务器混音模式下，`timestamp` 由服务器统一填写，用于客户端播放同步
+- 默认每帧 5 ms（240 samples），接收端按 `sequence` 序号和 `timestamp` 双重判断顺序
+- 服务器混音模式下，服务器以 5ms 定时器周期触发混音并广播
 - P2P 模式下，`timestamp` 由发送端填写（通常为本地时钟）
 
 ---
@@ -326,26 +321,24 @@ SPA1Packet {
 
 ---
 
-## 与旧版 SPA1 v1.0 的差异
+## 版本历史
 
-| 项目 | v1.0 | 当前版本 |
-|------|------|---------|
-| `userId` 字段大小 | 32 字节 | 30 字节（腾出空间给 type 和 level） |
-| `type` 字段 | 无 | 新增 offset 38，区分 AUDIO / HANDSHAKE |
-| `level` 字段 | 无 | 新增 offset 40，服务器计算 dBFS 电平 |
-| `dataSize` 偏移 | 41-42 | 41-42（不变，但 level 插入了 codec 和 dataSize 之间） |
+| 版本 | 头长 | userId | 变更 |
+|------|------|--------|------|
+| v1.0 | 44 字节 | 32 字节 | 初始版本 |
+| v1.0a | 44 字节 | 30 字节 | 新增 type、level 字段（已废弃） |
+| **P1-1** | **76 字节** | **64 字节** | userId 扩展至 64 字节，移除 type/level 字段，电平改为 TCP LEVELS 消息 |
 
 ---
 
 ## 实现参考
 
-- **头文件**：`Tonel-Desktop/spa1.h`
-- **C++ 结构体**：`struct SPA1Packet`
+- **服务端头文件**：`server/src/mixer_server.h` — `struct SPA1Packet`
+- **Web 客户端**：`web/src/services/audioService.ts` — `buildSpa1Packet()` / `parseSpa1Header()`
+- **WebRTC 代理**：`web/webrtc-mixer-proxy.js` — SPA1 userId 解析（UDP 路由）
 - **常量定义**：
   - `SPA1_MAGIC = 0x53415031`
   - `SPA1_CODEC_PCM16 = 0`
   - `SPA1_CODEC_OPUS = 1`
-  - `SPA1_TYPE_AUDIO = 0`
-  - `SPA1_TYPE_HANDSHAKE = 1`
-  - `SPA1_PCM16_FRAME_SIZE = 1920`
-  - `SPA1_HEADER_SIZE = 44`
+  - `SPA1_HEADER_SIZE = 76`（P1-1）
+  - `MAX_PAYLOAD_SIZE = 1356`（dataSize 上限）

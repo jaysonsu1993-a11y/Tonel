@@ -1,7 +1,7 @@
-# Tonel Server Mixing Architecture — Implementation v1.1
+# Tonel Server Mixing Architecture — Implementation v1.2
 
-> 日期：2026-04-22
-> 状态：已实施（取代 Design v1.0）
+> 日期：2026-04-25
+> 状态：已实施（P1-1: SPA1 76 字节头，5ms 帧，LEVELS 广播）
 
 ---
 
@@ -40,10 +40,12 @@ Tonel 已完成客户端音频引擎和服务器混音架构，当前支持 3-8 
   Vocal   →───────┘
 ```
 
-- 所有客户端发送 UDP 音频流到 Mixer Server（端口 9001/9002）
+- 所有客户端发送 UDP 音频流到 Mixer Server（UDP:9003）
 - Mixer Server 混音后通过 UDP 广播到每个客户端
-- Signaling Server（TCP 9003）负责房间管理、用户认证、混音控制信令
-- WebSocket Proxy（9004/9005）为 Web 客户端提供兼容层
+- Mixer 控制通道（TCP:9002）处理 MIXER_JOIN/LEAVE 和 LEVELS 广播
+- Signaling Server（TCP:9001）负责房间管理、WebRTC SDP 中继
+- WebSocket Proxy（9004）为 Web 客户端提供信令兼容层
+- WebRTC Mixer Proxy 为 Web 客户端桥接 DataChannel ↔ TCP/UDP
 - 优点：客户端简单，无需混音逻辑
 - 缺点：服务器上行带宽随客户端数量线性增长
 
@@ -53,38 +55,28 @@ Tonel 已完成客户端音频引擎和服务器混音架构，当前支持 3-8 
 
 ## 3. 数据包格式
 
-### 3.1 客户端 → 服务器（SPA1 协议）
+### 3.1 SPA1 协议（客户端 ↔ 服务器双向使用）
 
 ```cpp
-struct AudioPacket {
-    static constexpr uint32_t MAGIC = 0x53415031;  // 'SPA1'
-    uint32_t magic;
-    uint16_t version;
-    uint16_t frame_count;   // 帧数（128或256）
-    uint32_t sequence;      // 序列号
-    uint64_t timestamp;     // 采集时间戳（μs）
-    uint16_t client_id;     // 客户端唯一标识（由 signaling 分配）
-    float payload[];        // 交错 stereo: L R L R ...
+// P1-1: 76 字节固定头（server/src/mixer_server.h）
+#pragma pack(push, 1)
+struct SPA1Packet {
+    uint32_t magic;          // 0x53415031 == "SPA1" (BE)
+    uint16_t sequence;       // 包序号 (BE)
+    uint16_t timestamp;      // 播放时间戳 (BE)
+    uint8_t  userId[64];     // "roomId:userId", null 终止
+    uint8_t  codec;          // 0=PCM16, 1=Opus, 0xFF=Handshake
+    uint16_t dataSize;       // payload 字节数 (BE), 上限 1356
+    uint8_t  reserved;       // 保留
+    uint8_t  data[];         // 音频数据
 };
+#pragma pack(pop)
+static_assert(sizeof(SPA1Packet) == 76);
 ```
 
-> **设计变更**：原始设计文档使用 `0x53410001`，实际实现统一为 `0x53415031`（SPA1）。
-
-### 3.2 服务器 → 客户端（混音后）
-
-```cpp
-struct MixedAudioPacket {
-    static constexpr uint32_t MAGIC = 0x53425031;  // 'SBP1' — Server Broadcast Protocol v1
-    uint32_t magic;
-    uint16_t version;
-    uint16_t frame_count;
-    uint32_t sequence;         // 混音包序列号
-    uint64_t timestamp;        // 服务器混音完成时间戳
-    uint16_t num_sources;      // 当前混音的源数量
-    uint16_t server_latency_us;// 服务器处理延迟（μs）
-    float payload[];           // 混音后音频
-};
-```
+> 客户端和服务器使用相同的 SPA1 格式。服务器混音后回传的包也是 SPA1，userId 填写接收者的 "roomId:userId"。
+>
+> **电平数据**通过 TCP 控制通道 JSON `LEVELS` 消息广播（~20Hz），不在 SPA1 头中。
 
 ---
 
@@ -127,17 +119,17 @@ void mixAudio(float* out, const std::vector<ClientStream>& streams, int frames, 
 
 ```
 uv_loop_t
-├── uv_udp_t serverRecv      (接收所有客户端音频，端口 9001/9002)
-├── uv_timer_t mixTimer      (定时触发混音，~2ms间隔)
-└── uv_udp_t clientSend[]    (每个客户端一个发送 socket)
+├── uv_tcp_t tcp_server_      (TCP:9002, 控制通道 — MIXER_JOIN/LEAVE/LEVELS)
+├── uv_udp_t udp_server_      (UDP:9003, SPA1 音频收发)
+└── uv_timer_t mix_timer_     (5ms 定时混音 + 每 50ms LEVELS 广播)
 ```
 
 ### 5.2 混音触发策略
 
-**数据包触发 + 频率限制**
-- 收到任意客户端音频包即检查是否需要混音
-- 限制最高频率（每 2ms 最多一次）
-- 避免空转和过度触发
+**定时器驱动（5ms 周期）**
+- `mix_timer_` 每 5ms 触发一次 `handle_mix_timer()`
+- 仅在 `room->pending_mix = true`（有新音频到达）时执行混音
+- 每 10 个 tick（50ms ≈ 20Hz）广播一次 LEVELS 消息
 
 ### 5.3 数据结构
 
@@ -312,8 +304,9 @@ server/
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v1.0 | 2026-04-10 | 初始设计文档（UDP 扩展信令，magic=0x53410001）|
-| v1.1 | 2026-04-22 | 更新为实际实现（TCP JSON 信令，SPA1 magic=0x53415031，SBP1 magic=0x53425031）|
+| v1.1 | 2026-04-22 | TCP JSON 信令，SPA1 magic=0x53415031 |
+| v1.2 | 2026-04-25 | P1-1: SPA1 头扩至 76 字节（userId 64B），5ms 帧，LEVELS 广播，dataSize 上限，TCP UAF 修复 |
 
 ---
 
-*文档版本：v1.1 | 作者：Niko | 2026-04-22*
+*文档版本：v1.2 | 作者：Niko | 2026-04-25*

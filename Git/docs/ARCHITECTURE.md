@@ -42,10 +42,11 @@ Every architectural decision in this project serves one metric: **minimizing end
 
 S1 uses a custom binary protocol called **SPA1 (Simple Protocol for Audio v1)**.
 
-- 44-byte fixed header, network byte order (big-endian)
+- 76-byte fixed header (P1-1: userId 64 bytes), network byte order (big-endian)
 - Magic: `0x53415031` ('SPA1')
 - Supports PCM16 (uncompressed, low latency) and Opus (compressed, bandwidth-efficient)
-- Frame size: 20ms = 960 samples @ 48kHz (PCM16: 1920 bytes, Opus: ~80-120 bytes)
+- Frame size: 5ms = 240 samples @ 48kHz (PCM16: 480 bytes, Opus: ~20-60 bytes)
+- dataSize upper bound: 1356 bytes (prevents memory overflow)
 
 Full specification: [SPA1_PROTOCOL.md](./SPA1_PROTOCOL.md)
 
@@ -145,7 +146,7 @@ Automatic: P2P is preferred, switches to Mixer when:
 
 ## Latency Optimizations
 
-1. **20ms frames** -- smallest practical frame size for good audio quality
+1. **5ms frames** -- 240 samples @ 48kHz, ultra-low latency (server configurable)
 2. **PCM16 by default** -- zero encode/decode latency (no Opus compression)
 3. **P2P first** -- server is not in the audio path for small groups
 4. **UDP transport** -- connectionless, no TCP handshake latency
@@ -241,8 +242,8 @@ Automatic: P2P is preferred, switches to Mixer when:
    - connectMixer() cleans up any existing PC before creating new one
 2. Browser sends SDP offer via signaling WS -> CF Tunnel -> signaling:9001
 3. Signaling server relays offer to webrtc-mixer-proxy (registered as __mixer__)
-4. Proxy uses onLocalDescription callback (node-datachannel) to ensure answer SDP
-   includes ICE candidates before sending back via signaling relay
+4. Proxy uses onLocalDescription callback (node-datachannel) to send answer SDP
+   (single answer only — no sync fallback, prevents duplicate setRemoteDescription)
 5. Browser <- -> Server: direct DTLS/SCTP over UDP (port 10000-10100)
 6. "control" DataChannel (reliable) -> TCP:9002 (MIXER_JOIN, etc.)
 7. "audio" DataChannel (unreliable, maxRetransmits=0) -> UDP:9003 (SPA1 packets)
