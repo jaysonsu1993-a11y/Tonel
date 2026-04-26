@@ -87,18 +87,23 @@ static void audioDataCallback(ma_device* dev, void* output,
 
     // ── Playback ──────────────────────────────────────────────────────────
     if (output) {
-        if (mixerActive) {
-            // Read mixed audio from server (mono float) → stereo output
-            float monoBuf[1024];
-            int got = [mixer readMixedAudio:monoBuf maxSamples:static_cast<int>(frameCount)];
-            float vol = s->outputVolume.load();
-            for (ma_uint32 i = 0; i < frameCount; i++) {
-                float sample = (static_cast<int>(i) < got) ? monoBuf[i] * vol : 0.0f;
-                out[i * ch]     = sample;
-                out[i * ch + 1] = sample;
+        if (mixer != nil) {
+            // Mixer bridge is set (in-room mode): play server audio or silence
+            if (mixerActive) {
+                float monoBuf[1024];
+                int got = [mixer readMixedAudio:monoBuf maxSamples:static_cast<int>(frameCount)];
+                float vol = s->outputVolume.load();
+                for (ma_uint32 i = 0; i < frameCount; i++) {
+                    float sample = (static_cast<int>(i) < got) ? monoBuf[i] * vol : 0.0f;
+                    out[i * ch]     = sample;
+                    out[i * ch + 1] = sample;
+                }
+            } else {
+                // Mixer not yet connected — output silence (no local loopback)
+                std::memset(out, 0, frameCount * ch * sizeof(float));
             }
         } else {
-            // Loopback fallback when not connected to mixer
+            // No mixer bridge (home screen) — local loopback for mic test
             if (!s->muted.load() && input) {
                 float vol = s->outputVolume.load();
                 for (ma_uint32 i = 0; i < frameCount * ch; ++i) {
