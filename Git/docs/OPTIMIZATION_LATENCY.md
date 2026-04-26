@@ -25,10 +25,15 @@
 ### 1.2 数据流全链路
 
 ```
-[Web/Desktop 采集]
+[AppKit 客户端采集]
+  -> miniaudio duplex callback (128帧 stereo f32)
+  -> stereo f32 → mono PCM16 → 累积 240 样本 (5ms)
+  -> SPA1 UDP包 (MixerBridge) -> 服务器 UDP:9003
+
+[Web 客户端采集]
   -> AudioWorklet (5ms块)
   -> float32 -> PCM16/Opus 编码
-  -> SPA1 UDP包 -> 服务器
+  -> SPA1 -> WebRTC DataChannel -> webrtc-proxy -> 服务器 UDP:9003
 
 [服务器 MixerServer]
   -> UDP接收 -> SPA1解码 -> float32
@@ -36,10 +41,15 @@
   -> [5ms定时器触发] AudioMixer.mix() (累加+硬限幅)
   -> Opus/PCM16编码 -> UDP广播给房间内所有人
 
-[Web/Desktop 播放]
-  -> UDP接收 -> SPA1解码
-  -> 自适应抖动缓冲 (Web: 10-40ms动态, Desktop: 10-80ms动态)
-  -> AudioWorklet/音频回调播放
+[AppKit 客户端播放]
+  -> UDP接收 -> SPA1解码 -> mono float
+  -> SPSC ring buffer (lock-free)
+  -> miniaudio duplex callback 读取 -> mono → stereo -> 扬声器
+
+[Web 客户端播放]
+  -> WebRTC DataChannel 接收 -> SPA1解码
+  -> 自适应抖动缓冲 (10-40ms动态)
+  -> AudioWorklet 播放
 ```
 
 ### 1.3 优化后延迟预算（估算）

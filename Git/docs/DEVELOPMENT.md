@@ -209,7 +209,8 @@ npm install && npm run dev
 ### SPA1 packet parsing errors
 - Verify network byte order (big-endian) is preserved
 - Check magic bytes: `0x53415031`
-- Verify header size = 44 bytes
+- Verify header size = 76 bytes (P1-1; legacy spa1.h uses 44 bytes)
+- Verify dataSize ≤ 1356 bytes
 ### WebRTC connection issues
 
 - Ensure UDP 10000-10100 is open in both ufw AND Alibaba Cloud security group

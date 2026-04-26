@@ -200,20 +200,41 @@ class AudioMixer {
 
 ### 6.2 连接流程
 
+#### AppKit 客户端（直连）
+
 ```
-Client                          Signaling Server              Mixer Server
+AppKit Client                   Signaling Server              Mixer Server
   │                                │                              │
-  │───── CREATE_ROOM ─────────────▶│                              │
-  │◀──── ack (room_id) ────────────│                              │
+  │── CREATE_ROOM (WS) ──────────▶│                              │
+  │◀─ CREATE_ROOM_ACK ────────────│                              │
   │                                │                              │
-  │───── MIXER_JOIN ──────────────▶│───── TCP JSON ─────────────▶│  注册客户端
-  │                                │                              │  分配 client_id
+  │── MIXER_JOIN (TCP:9002) ──────────────────────────────────────▶│  注册客户端
+  │◀─ MIXER_JOIN_ACK {udp_port} ──────────────────────────────────│
   │                                │                              │
-  │═════ Audio Stream (UDP 9001) ════════════════════════════════▶│
+  │══ SPA1 HANDSHAKE (UDP:9003) ══════════════════════════════════▶│  注册 UDP 地址
+  │══ SPA1 Audio (UDP:9003) ══════════════════════════════════════▶│
+  │◀═ SPA1 Mixed Audio (UDP) ════════════════════════════════════│
   │                                │                              │
-  │◀════ Mixed Audio (UDP) ══════════════════════════════════════│
+  │── MIXER_LEAVE (TCP:9002) ─────────────────────────────────────▶│  注销客户端
+```
+
+> AppKit 客户端直连 mixer server，不经过 signaling 中继。信令（房间管理）走 WebSocket，音频走 TCP+UDP 直连。
+
+#### Web 客户端（经 WebRTC proxy）
+
+```
+Web Client                      Signaling Server              Mixer Server
   │                                │                              │
-  │───── MIXER_LEAVE ─────────────▶│───── TCP JSON ─────────────▶│  注销客户端
+  │── CREATE_ROOM (WS) ──────────▶│                              │
+  │◀─ CREATE_ROOM_ACK ────────────│                              │
+  │                                │                              │
+  │── MIXER_OFFER (WS) ──────────▶│── relay ──▶ webrtc-proxy     │
+  │◀─ MIXER_ANSWER (WS) ─────────│◀── relay ──│                  │
+  │                                │                              │
+  │══ DataChannel (DTLS/SCTP) ════════════════▶ webrtc-proxy     │
+  │                                │           │── TCP:9002 ─────▶│
+  │                                │           │══ UDP:9003 ═════▶│
+  │◀═ Mixed Audio (DataChannel) ══════════════│◀═ UDP ═══════════│
 ```
 
 ### 6.3 NAT 穿透
