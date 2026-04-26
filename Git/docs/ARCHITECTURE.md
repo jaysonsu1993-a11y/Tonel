@@ -79,12 +79,14 @@ Automatic: P2P is preferred, switches to Mixer when:
 │                                                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  │
 │  │  miniaudio  │  │   AppKit    │  │  SPA1 Codec  │  │
-│  │  (Audio I/O)│  │  (UI/Views) │  │  Encoder     │  │
+│  │  (Audio I/O)│  │  (UI/Views) │  │  (PCM16)     │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬───────┘  │
 │         │                 │                │          │
 │  ┌──────┴─────────────────┴────────────────┴───────┐  │
 │  │              Bridge Layer                        │  │
-│  │  AudioBridge  |  NetworkBridge  |  Signaling     │  │
+│  │  AudioBridge | MixerBridge | NetworkBridge       │  │
+│  │  (capture/   | (TCP ctrl + | (WS signaling)     │  │
+│  │   playback)  |  UDP audio) |                     │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                      │
 │     License: MIT only (zero licensing risk)          │

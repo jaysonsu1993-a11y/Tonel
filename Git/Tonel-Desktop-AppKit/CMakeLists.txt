@@ -25,6 +25,7 @@ set(SOURCES
     src/bridge/AudioBridge.mm
     src/bridge/NetworkBridge.mm
     src/bridge/S1SignalingClient.mm
+    src/bridge/MixerBridge.mm
 )
 
 # ── App bundle ────────────────────────────────────────────────────────────────

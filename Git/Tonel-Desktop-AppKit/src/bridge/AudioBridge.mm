@@ -7,6 +7,7 @@
 
 #define MINIAUDIO_IMPLEMENTATION
 #import "AudioBridge.h"
+#import "MixerBridge.h"
 #include <miniaudio.h>
 #include "../AppState.h"
 #include <atomic>
@@ -16,6 +17,8 @@
 #include <vector>
 
 // ── Internal state ────────────────────────────────────────────────────────────
+
+static constexpr int kSendFrameSize = 240;  // 5ms @ 48kHz mono — matches server audio_frames_
 
 struct AudioBridgeState {
     ma_context  context;
@@ -30,6 +33,13 @@ struct AudioBridgeState {
     int inputDeviceIndex  = -1;   // -1 = system default
     int outputDeviceIndex = -1;
 
+    // Accumulation buffer: stereo f32 → mono int16, send when 240 samples ready
+    int16_t accumBuf[kSendFrameSize];
+    int     accumCount = 0;
+
+    // MixerBridge for network audio (not retained — caller manages lifetime)
+    __unsafe_unretained MixerBridge* mixerBridge = nil;
+
     // Weak ref back to the ObjC object (not retained — bridge owns state)
     __unsafe_unretained id owner = nil;
 };
@@ -43,37 +53,60 @@ static void audioDataCallback(ma_device* dev, void* output,
     if (!s) return;
 
     const int ch = 2;
+    const float* in = static_cast<const float*>(input);
+    float* out = static_cast<float*>(output);
+    MixerBridge* mixer = s->mixerBridge;
+    bool mixerActive = (mixer != nil && [mixer isConnected]);
 
-    // ── Input level metering (RMS with smoothing, no sqrt per-sample) ─────
+    // ── Input level metering (RMS with smoothing) ─────────────────────────
     if (input) {
-        const float* in = static_cast<const float*>(input);
         float sumSq = 0.0f;
         ma_uint32 totalSamples = frameCount * ch;
         for (ma_uint32 i = 0; i < totalSamples; ++i) {
-            float v = in[i];
-            sumSq += v * v;
+            sumSq += in[i] * in[i];
         }
-        // Only compute sqrt once per callback, not per-sample
         float rms = sumSq > 0.0f ? std::sqrt(sumSq / static_cast<float>(totalSamples)) : 0.0f;
-
-        // Fast exponential moving average: level = prev*alpha + rms*(1-alpha)
-        // Use multiplication-only form (faster on real-time thread)
         float prev = s->inputLevel.load(std::memory_order_relaxed);
-        float smoothed = prev * 0.8f + rms * 0.2f;
-        s->inputLevel.store(smoothed, std::memory_order_release);
+        s->inputLevel.store(prev * 0.8f + rms * 0.2f, std::memory_order_release);
     }
 
-    // ── Playback: pass-through (loopback) or silence ──────────────────────
+    // ── Send mic audio to mixer server ────────────────────────────────────
+    if (input && !s->muted.load() && mixerActive) {
+        for (ma_uint32 i = 0; i < frameCount; i++) {
+            // Stereo f32 → mono int16
+            float mono = (in[i * ch] + in[i * ch + 1]) * 0.5f;
+            mono = std::max(-1.0f, std::min(1.0f, mono));
+            s->accumBuf[s->accumCount++] = static_cast<int16_t>(mono * 32767.0f);
+
+            if (s->accumCount >= kSendFrameSize) {
+                [mixer sendAudioSamples:s->accumBuf count:kSendFrameSize];
+                s->accumCount = 0;
+            }
+        }
+    }
+
+    // ── Playback ──────────────────────────────────────────────────────────
     if (output) {
-        float* out = static_cast<float*>(output);
-        if (!s->muted.load() && input) {
+        if (mixerActive) {
+            // Read mixed audio from server (mono float) → stereo output
+            float monoBuf[1024];
+            int got = [mixer readMixedAudio:monoBuf maxSamples:static_cast<int>(frameCount)];
             float vol = s->outputVolume.load();
-            const float* in = static_cast<const float*>(input);
-            for (ma_uint32 i = 0; i < frameCount * ch; ++i) {
-                out[i] = in[i] * vol;
+            for (ma_uint32 i = 0; i < frameCount; i++) {
+                float sample = (static_cast<int>(i) < got) ? monoBuf[i] * vol : 0.0f;
+                out[i * ch]     = sample;
+                out[i * ch + 1] = sample;
             }
         } else {
-            std::memset(out, 0, frameCount * ch * sizeof(float));
+            // Loopback fallback when not connected to mixer
+            if (!s->muted.load() && input) {
+                float vol = s->outputVolume.load();
+                for (ma_uint32 i = 0; i < frameCount * ch; ++i) {
+                    out[i] = in[i] * vol;
+                }
+            } else {
+                std::memset(out, 0, frameCount * ch * sizeof(float));
+            }
         }
     }
 }
@@ -309,6 +342,13 @@ static void audioDataCallback(ma_device* dev, void* output,
     if ([d respondsToSelector:@selector(audioBridgeInputLevelChanged:)]) {
         [d audioBridgeInputLevelChanged:level];
     }
+}
+
+// ── Mixer bridge ──────────────────────────────────────────────────────────────
+
+- (void)setMixerBridge:(MixerBridge*)bridge {
+    _state->mixerBridge = bridge;
+    _state->accumCount  = 0;
 }
 
 // ── Private helper ────────────────────────────────────────────────────────────

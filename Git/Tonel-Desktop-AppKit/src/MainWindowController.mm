@@ -4,6 +4,7 @@
 #import "ui/S1Theme.h"
 #import "bridge/NetworkBridge.h"
 #import "bridge/AudioBridge.h"
+#import "bridge/MixerBridge.h"
 #import "ui/HomeViewController.h"
 #import "ui/CreateRoomViewController.h"
 #import "ui/JoinRoomViewController.h"
@@ -173,6 +174,8 @@ typedef NS_ENUM(NSInteger, PendingRoomAction) {
 }
 
 - (void)handleLeaveRoom {
+    // Disconnect mixer first, then stop audio
+    [self disconnectMixer];
     [[AudioBridge shared] stop];
     // Send leave_room to server before clearing state
     AppState& state = AppState::shared();
@@ -263,6 +266,8 @@ typedef NS_ENUM(NSInteger, PendingRoomAction) {
     // Add self as participant
     AppState::shared().clearParticipants();
     AppState::shared().addParticipant({0, AppState::shared().getRoomOwner(), "🎸", 1.0f, false, true});
+    // Connect to mixer server for audio transport
+    [self connectMixer];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self showRoomReload:YES];
     });
@@ -274,6 +279,8 @@ typedef NS_ENUM(NSInteger, PendingRoomAction) {
     // Add self as participant; peers will arrive via peer_list / peer_joined
     AppState::shared().clearParticipants();
     AppState::shared().addParticipant({0, AppState::shared().getRoomOwner(), "🎸", 1.0f, false, true});
+    // Connect to mixer server for audio transport
+    [self connectMixer];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self showRoomReload:YES];
     });
@@ -332,6 +339,24 @@ typedef NS_ENUM(NSInteger, PendingRoomAction) {
         }
         [self.roomVC refresh];
     });
+}
+
+// ── Mixer connection ───────────────────────────────────────────────────────
+
+- (void)connectMixer {
+    NSString* roomCode = [NSString stringWithUTF8String:AppState::shared().getRoomCode().c_str()];
+    NSString* userId   = [NSString stringWithUTF8String:AppState::shared().getRoomOwner().c_str()];
+
+    // Wire MixerBridge into AudioBridge so the audio thread can send/receive
+    [[AudioBridge shared] setMixerBridge:[MixerBridge shared]];
+    [[MixerBridge shared] connectToRoom:roomCode userId:userId];
+    NSLog(@"[App] Connecting to mixer: room=%@ user=%@", roomCode, userId);
+}
+
+- (void)disconnectMixer {
+    [[AudioBridge shared] setMixerBridge:nil];
+    [[MixerBridge shared] disconnect];
+    NSLog(@"[App] Disconnected from mixer");
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

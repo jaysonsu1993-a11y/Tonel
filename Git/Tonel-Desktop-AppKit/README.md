@@ -45,8 +45,9 @@ Tonel-Desktop-AppKit/src/
 ├── AppState.h / .mm           # Shared application state
 ├── bridge/
 │   ├── AudioBridge.h / .mm    # Audio device capture/playback (miniaudio)
-│   ├── NetworkBridge.h / .mm  # SPA1 packet send/receive
-│   └── S1SignalingClient.cpp  # TCP signaling client (JSON)
+│   ├── MixerBridge.h / .mm    # Mixer server transport (TCP control + UDP SPA1 audio)
+│   ├── NetworkBridge.h / .mm  # Signaling bridge (ObjC wrapper)
+│   └── S1SignalingClient.mm   # WebSocket signaling client
 └── ui/
     ├── HomeViewController.h/.mm        # Home screen
     ├── CreateRoomViewController.h/.mm  # Create room form
@@ -55,6 +56,25 @@ Tonel-Desktop-AppKit/src/
     ├── SettingsViewController.h/.mm    # Settings
     └── S1RoundedButton.h/.mm           # Custom UI component
 ```
+
+## Audio Transport
+
+The client uses the **Mixer mode** for audio transport:
+
+1. After creating/joining a room, `MixerBridge` connects to the mixer server (TCP:9002 for control, UDP:9003 for audio)
+2. Sends `MIXER_JOIN` via TCP, receives `MIXER_JOIN_ACK` with UDP port
+3. Sends SPA1 HANDSHAKE packet via UDP to register the client's address
+4. `AudioBridge` captures mic audio (stereo f32 48kHz), converts to mono PCM16, accumulates 240 samples (5ms), and sends as SPA1 packets via UDP
+5. Server mixes all participants' audio and returns mixed SPA1 packets via UDP
+6. `AudioBridge` reads mixed audio from a lock-free ring buffer and plays it through speakers
+
+```
+Mic → AudioBridge → stereo f32 → mono PCM16 → SPA1 packet → UDP → Mixer Server
+                                                                        ↓ (mix)
+Speaker ← AudioBridge ← mono float ← ring buffer ← SPA1 packet ← UDP ←┘
+```
+
+When not connected to the mixer (e.g. before joining a room), AudioBridge falls back to local loopback mode.
 
 ## Historical Note
 

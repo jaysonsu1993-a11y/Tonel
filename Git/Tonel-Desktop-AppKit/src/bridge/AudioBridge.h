@@ -20,6 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL       isDefault;
 @end
 
+@class MixerBridge;  // forward declaration for setMixerBridge:
+
 // ── AudioBridge ───────────────────────────────────────────────────────────────
 
 @interface AudioBridge : NSObject
@@ -41,6 +43,9 @@ NS_ASSUME_NONNULL_BEGIN
 // ── Volume & mute ─────────────────────────────────────────────────────────────
 - (void)setOutputVolume:(float)volume;   // 0.0 – 1.0
 - (void)setMuted:(BOOL)muted;
+
+// ── Mixer bridge (audio thread sends/receives via this) ──────────────────────
+- (void)setMixerBridge:(nullable MixerBridge*)bridge;
 
 // ── Level meter ───────────────────────────────────────────────────────────────
 @property (atomic, readonly) float inputLevel;  // 0.0 – 1.0, updated each callback
