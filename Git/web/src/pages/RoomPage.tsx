@@ -35,12 +35,15 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     if (outputs.length > 0 && !selectedOutput) setSelectedOutput(outputs[0].deviceId)
   }, [selectedInput, selectedOutput])
 
-  // Poll audio levels and latency via setInterval (more reliable than RAF/callbacks)
+  const [dbg, setDbg] = useState('')
+  // Poll audio levels, latency, and debug info
   useEffect(() => {
     const id = setInterval(() => {
-      setSelfLevel(audioService.currentLevel)
+      const lvl = audioService.currentLevel
+      setSelfLevel(lvl)
       setLatency(audioService.audioLatency)
-    }, 50)
+      setDbg(`lvl=${lvl.toFixed(4)} tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ws=${audioService.audioWsState}`)
+    }, 50)  // 50ms = 20fps, matches AppKit level poll rate
     return () => clearInterval(id)
   }, [])
 
@@ -190,6 +193,12 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
 
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
       </header>
+      <div style={{fontSize:'11px',color:'#0f0',padding:'4px 24px',background:'#000',fontFamily:'monospace'}}>
+        {dbg} | selfLvl={selfLevel.toFixed(4)} peak={selfPeak.toFixed(4)}
+        <span style={{display:'inline-block',width:100,height:10,background:'#333',marginLeft:8,position:'relative'}}>
+          <span style={{display:'block',height:'100%',width:`${Math.min(100,selfLevel*100*30)}%`,background:selfLevel>0.7?'red':selfLevel>0.3?'yellow':'#0f0'}}/>
+        </span>
+      </div>
 
       <div className="room-content">
         {/* 调音台区域 */}

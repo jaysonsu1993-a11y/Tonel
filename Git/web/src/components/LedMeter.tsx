@@ -8,9 +8,9 @@ interface LedMeterProps {
 }
 
 export function LedMeter({ level, peak = 0, segments = 20, direction = 'vertical' }: LedMeterProps) {
-  // Map linear RMS (0-1) to dB-scaled meter position for visibility
-  // -48dB → 0 segments, 0dB → full scale (matches pro audio meter behavior)
-  const dbRange = 48
+  // Map linear RMS (0-1) to dB-scaled meter position
+  // -60dB → 0 segments, 0dB → full scale (wide range for web mic sensitivity)
+  const dbRange = 60
   const toMeterPos = (v: number) => {
     if (v <= 0) return 0
     const db = 20 * Math.log10(v)

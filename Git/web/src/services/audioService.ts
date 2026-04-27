@@ -180,7 +180,12 @@ class AudioService {
   // Debug counters
   public rxCount = 0   // received SPA1 audio packets from server
   public txCount = 0   // sent SPA1 audio packets to server
-  public playCount = 0 // packets sent to playback worklet
+  public playCount = 0 // packets sent to playback
+  get audioWsState(): string {
+    const ws = this.audioWs
+    if (!ws) return 'null'
+    return ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] || String(ws.readyState)
+  }
   public cbCount = 0   // level callback invocations
 
   // Capture pipeline
@@ -264,36 +269,28 @@ class AudioService {
   private async initPlaybackWorklet(): Promise<void> {
     if (!this.audioContext || !this.masterGain) return
 
-    // Adaptive ring buffer: max 8 frames (80ms), target starts at 2 frames (20ms)
-    // Target is updated dynamically based on network jitter measurements.
-    const maxBufSize = FRAME_SAMPLES * 8
-    const initialTarget = this.targetBufferFrames * FRAME_SAMPLES
+    // Ring buffer: 48000 samples = 1 second (matches AppKit MixerBridge._rxRing)
+    // Simple write/read — no adaptive skip, just overflow drops oldest
+    const RING_SIZE = 48000
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
         constructor() {
           super()
-          this.buf = new Float32Array(${maxBufSize})
+          this.buf = new Float32Array(${RING_SIZE})
           this.writePos = 0
           this.readPos = 0
           this.count = 0
-          this.targetCount = ${initialTarget}
           this.port.onmessage = (ev) => {
-            if (ev.data && ev.data.type === 'setTarget') {
-              this.targetCount = ev.data.samples
-              return
-            }
             const samples = ev.data
+            if (!samples || !samples.length) return
             const len = samples.length
             for (let i = 0; i < len; i++) {
-              if (this.count < ${maxBufSize}) {
-                this.buf[this.writePos] = samples[i]
-                this.writePos = (this.writePos + 1) % ${maxBufSize}
+              this.buf[this.writePos] = samples[i]
+              this.writePos = (this.writePos + 1) % ${RING_SIZE}
+              if (this.count < ${RING_SIZE}) {
                 this.count++
               } else {
-                // overflow: drop oldest
-                this.buf[this.writePos] = samples[i]
-                this.writePos = (this.writePos + 1) % ${maxBufSize}
-                this.readPos = (this.readPos + 1) % ${maxBufSize}
+                this.readPos = (this.readPos + 1) % ${RING_SIZE}
               }
             }
           }
@@ -301,28 +298,13 @@ class AudioService {
         process(inputs, outputs) {
           const out = outputs[0][0]
           if (!out) return true
-          // Adaptive playback: try to maintain target buffer depth
-          // If buffer is too full (> target + 1 frame), skip some samples to drain
-          // If buffer is below target, output silence and let it fill
-          const target = this.targetCount
-          const frameSize = ${FRAME_SAMPLES}
-          let skip = 0
-          if (this.count > target + frameSize) {
-            skip = Math.min(frameSize, this.count - target) // skip up to 1 frame
-          }
-          // Apply skip (drop oldest samples)
-          while (skip-- > 0 && this.count > 0) {
-            this.readPos = (this.readPos + 1) % ${maxBufSize}
-            this.count--
-          }
-          // Output audio
           for (let i = 0; i < out.length; i++) {
             if (this.count > 0) {
               out[i] = this.buf[this.readPos]
-              this.readPos = (this.readPos + 1) % ${maxBufSize}
+              this.readPos = (this.readPos + 1) % ${RING_SIZE}
               this.count--
             } else {
-              out[i] = 0  // underrun: silence
+              out[i] = 0
             }
           }
           return true
@@ -403,16 +385,15 @@ class AudioService {
   }
 
   private smoothedLevel = 0
-  private nextPlayTime = 0
 
   private onAudioFrame(f32: Float32Array): void {
-    // Input level: linear RMS + EMA smoothing (matches AppKit AudioBridge)
-    // AppKit: prev * 0.8 + rms * 0.2, no extra scaling, 0-1 linear range
+    // Input level: linear RMS + EMA smoothing (AppKit AudioBridge pattern)
+    // Web mics typically output much lower levels than native, so we boost 5x
     let sum = 0
     for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i]
     const rms = Math.sqrt(sum / f32.length)
     this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
-    this.currentLevel = this.smoothedLevel
+    this.currentLevel = Math.min(1.0, this.smoothedLevel * 5)
 
     this.frameBuffer.push(f32)
     let total = 0
@@ -437,8 +418,9 @@ class AudioService {
         const frame = this.concatenate(parts)
         const pcm16 = float32ToPcm16(frame)
         // FIX #2: use correct SPA1 format (BE, with userId field)
-        // Embed wall-clock ms (low 16 bits) as timestamp for RTT measurement
-        const nowMs = Math.floor(performance.now()) & 0xFFFF
+        // Embed wall-clock ms (low 16 bits) for RTT — use Date.now() for absolute time
+        // (matches AppKit's mach_absolute_time → ms conversion)
+        const nowMs = Date.now() & 0xFFFF
         const spa1 = buildSpa1Packet(
           pcm16,
           SPA1_CODEC_PCM16,
@@ -605,7 +587,7 @@ class AudioService {
     // RTT from SPA1 timestamp — matches AppKit MixerBridge exactly:
     // Server echoes client's ms-low-16 timestamp back in mixed audio
     if (header.timestamp > 0) {
-      const now16 = Math.floor(performance.now()) & 0xFFFF
+      const now16 = Date.now() & 0xFFFF
       const rtt = (now16 - header.timestamp) & 0xFFFF  // unsigned 16-bit subtract
       if (rtt < 10000) {  // discard wrap-around glitches (>10s)
         const prev = this._audioLatency
@@ -675,24 +657,19 @@ class AudioService {
     const pcm = parseSpa1Body(data, header.dataSize)
     const f32 = pcm16ToFloat32(pcm)
 
-    // Direct buffer playback (simpler, more reliable than worklet ring buffer)
     this.playCount++
-    const buffer = this.audioContext.createBuffer(
-      CHANNELS,
-      f32.length,
-      SAMPLE_RATE
-    )
+    // Worklet ring buffer path (handles jitter, matches AppKit's ring buffer approach)
+    if (this.playbackWorklet) {
+      this.playbackWorklet.port.postMessage(f32, [f32.buffer])
+      return
+    }
+    // Legacy fallback
+    const buffer = this.audioContext.createBuffer(CHANNELS, f32.length, SAMPLE_RATE)
     buffer.getChannelData(0).set(f32)
-
     const src = this.audioContext.createBufferSource()
     src.buffer = buffer
     src.connect(this.masterGain)
-    // Schedule playback to maintain continuous stream without gaps/overlaps
-    const frameDuration = f32.length / SAMPLE_RATE
-    const ctxNow = this.audioContext.currentTime
-    if (this.nextPlayTime < ctxNow) this.nextPlayTime = ctxNow
-    src.start(this.nextPlayTime)
-    this.nextPlayTime += frameDuration
+    src.start(0)
   }
 
   /**
