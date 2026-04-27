@@ -19,16 +19,24 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const [isMuted, setIsMuted] = useState(false)
   const [copied, setCopied] = useState(false)
   const [inputDevices, setInputDevices] = useState<MediaDeviceInfo[]>([])
-  const [selectedDevice, setSelectedDevice] = useState<string>('')
+  const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([])
+  const [selectedInput, setSelectedInput] = useState<string>('')
+  const [selectedOutput, setSelectedOutput] = useState<string>('')
   const [latency, setLatency] = useState<number>(-1)
   const joinedRef = useRef(false)
 
-  // Load available audio input devices
+  // Load available audio devices (input + output)
   useEffect(() => {
     audioService.getAudioInputDevices().then(devs => {
       setInputDevices(devs)
-      if (devs.length > 0 && !selectedDevice) {
-        setSelectedDevice(devs[0].deviceId)
+      if (devs.length > 0 && !selectedInput) {
+        setSelectedInput(devs[0].deviceId)
+      }
+    })
+    audioService.getAudioOutputDevices().then(devs => {
+      setOutputDevices(devs)
+      if (devs.length > 0 && !selectedOutput) {
+        setSelectedOutput(devs[0].deviceId)
       }
     })
   }, [])
@@ -72,12 +80,21 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     setIsMuted(!isMuted)
   }
 
-  const handleDeviceChange = async (deviceId: string) => {
-    setSelectedDevice(deviceId)
+  const handleInputChange = async (deviceId: string) => {
+    setSelectedInput(deviceId)
     try {
       await audioService.setInputDevice(deviceId)
     } catch (err) {
-      console.error('[RoomPage] Failed to switch device:', err)
+      console.error('[RoomPage] Failed to switch input device:', err)
+    }
+  }
+
+  const handleOutputChange = async (deviceId: string) => {
+    setSelectedOutput(deviceId)
+    try {
+      await audioService.setOutputDevice(deviceId)
+    } catch (err) {
+      console.error('[RoomPage] Failed to switch output device:', err)
     }
   }
 
@@ -127,19 +144,36 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           </button>
         </div>
 
-        {/* 音频输入设备选择 */}
+        {/* 音频设备选择 */}
         <div className="device-selector">
-          <select
-            value={selectedDevice}
-            onChange={e => handleDeviceChange(e.target.value)}
-            className="device-select"
-          >
-            {inputDevices.map(d => (
-              <option key={d.deviceId} value={d.deviceId}>
-                {d.label || `Input ${d.deviceId.slice(0, 8)}`}
-              </option>
-            ))}
-          </select>
+          <div className="device-row">
+            <label className="device-label">输入</label>
+            <select
+              value={selectedInput}
+              onChange={e => handleInputChange(e.target.value)}
+              className="device-select"
+            >
+              {inputDevices.map(d => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label || `Input ${d.deviceId.slice(0, 8)}`}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="device-row">
+            <label className="device-label">输出</label>
+            <select
+              value={selectedOutput}
+              onChange={e => handleOutputChange(e.target.value)}
+              className="device-select"
+            >
+              {outputDevices.map(d => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label || `Output ${d.deviceId.slice(0, 8)}`}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* 麦克风静音 */}

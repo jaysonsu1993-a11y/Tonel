@@ -753,6 +753,16 @@ class AudioService {
     }
   }
 
+  /** Enumerate all available audio output devices */
+  async getAudioOutputDevices(): Promise<MediaDeviceInfo[]> {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      return devices.filter(d => d.kind === 'audiooutput')
+    } catch {
+      return []
+    }
+  }
+
   /** Switch to a different audio input device by its deviceId */
   async setInputDevice(deviceId: string): Promise<void> {
     // Stop existing tracks
@@ -771,11 +781,24 @@ class AudioService {
       },
       video: false,
     })
-    // Reconnect source to analyser
-    if (this.source && this.analyser) {
-      this.source.disconnect()
-      this.source = this.audioContext!.createMediaStreamSource(this.mediaStream)
+    // Reconnect source → analyser
+    if (this.audioContext && this.analyser) {
+      if (this.source) this.source.disconnect()
+      this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
       this.source.connect(this.analyser)
+      // Reconnect source → capture processor so audio actually flows
+      if (this.processor) {
+        this.source.connect(this.processor)
+      }
+    }
+  }
+
+  /** Switch audio output device (speaker/headphones) */
+  async setOutputDevice(deviceId: string): Promise<void> {
+    // Use setSinkId on the playback AudioContext (Chrome 110+, Edge, Opera)
+    const ctx = this.audioContextPlay as any
+    if (ctx && typeof ctx.setSinkId === 'function') {
+      await ctx.setSinkId(deviceId)
     }
   }
 
