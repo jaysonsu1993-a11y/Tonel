@@ -386,13 +386,13 @@ class AudioService {
 
   private startCaptureWithScriptProcessor(): void {
     if (!this.audioContext) return
-    // Use small buffer (256 samples ≈ 5.3ms) to match server's 5ms mix timer.
-    // Large buffers cause frame bursts where server drops all but the last frame.
-    const node = this.audioContext.createScriptProcessor(256, 1, 1)
+    // 1024 samples ≈ 21ms — balance between packet frequency and latency
+    const node = this.audioContext.createScriptProcessor(1024, 1, 1)
     node.onaudioprocess = (ev) => {
-      if (!this.muted) {
-        this.onAudioFrame(new Float32Array(ev.inputBuffer.getChannelData(0)))
-      }
+      // Always send frames (even silence when muted) to keep server mixer alive
+      // AppKit: audio callback always runs, mute just zeros the data
+      const input = ev.inputBuffer.getChannelData(0)
+      this.onAudioFrame(this.muted ? new Float32Array(input.length) : new Float32Array(input))
     }
     // Connect source → processor so it receives mic audio
     if (this.source) {
@@ -554,7 +554,29 @@ class AudioService {
         this.handleMixerMessage(evt.data)
       }
       this.audioWs.onclose = () => {
-        console.log('[Mixer] Audio WebSocket closed')
+        console.log('[Mixer] Audio WebSocket closed, reconnecting...')
+        // Auto-reconnect audio WS (matches AppKit's persistent UDP socket)
+        setTimeout(() => {
+          if (!this.audioWs || this.audioWs.readyState > 1) {
+            this.audioWs = new WebSocket(audioUrl)
+            this.audioWs.binaryType = 'arraybuffer'
+            this.audioWs.onopen = () => {
+              console.log('[Mixer] Audio WebSocket reconnected')
+              // Re-send handshake to re-register UDP return path
+              const pkt = buildSpa1Packet(
+                new Uint8Array(0), SPA1_CODEC_HANDSHAKE, 0, 0,
+                `${this.roomId}:${this.userId}`
+              )
+              this.audioWs?.send(pkt)
+            }
+            this.audioWs.onmessage = (evt) => this.handleMixerMessage(evt.data)
+            this.audioWs.onclose = () => {
+              console.log('[Mixer] Audio WebSocket closed again, will retry...')
+              setTimeout(() => this.audioWs?.onclose?.(new CloseEvent('close')), 3000)
+            }
+            this.audioWs.onerror = () => {}
+          }
+        }, 1000)
       }
       this.audioWs.onerror = (evt) => {
         console.error('[Mixer] Audio WebSocket error:', evt)
@@ -788,13 +810,13 @@ class AudioService {
     }
   }
 
-  /** Switch to a different audio input device by its deviceId */
+  /** Switch to a different audio input device by its deviceId.
+   *  Matches AppKit pattern: stop → uninit → reinit → restart */
   async setInputDevice(deviceId: string): Promise<void> {
     try {
-      // Re-acquire with the chosen device (prefer over exact to handle device changes)
       const newStream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          deviceId: { ideal: deviceId },
+          deviceId: { exact: deviceId },
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl:  false,
@@ -803,20 +825,38 @@ class AudioService {
         },
         video: false,
       })
-      // Stop old tracks only after new stream is ready
+      // Stop old tracks after new stream is ready
       if (this.mediaStream) {
         this.mediaStream.getAudioTracks().forEach(t => t.stop())
       }
       this.mediaStream = newStream
-      // Reconnect source → analyser + processor
+      // Reset capture state
+      this.frameBuffer = []
+      this.smoothedLevel = 0
+      // Reconnect source → processor chain
       if (this.audioContext) {
         if (this.source) try { this.source.disconnect() } catch (_) {}
         this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
-        if (this.analyser) this.source.connect(this.analyser)
         if (this.processor) this.source.connect(this.processor)
       }
+      console.log('[Audio] Switched input to:', newStream.getAudioTracks()[0]?.label)
     } catch (err) {
       console.error('[Audio] setInputDevice failed:', err)
+      // Fallback: try without exact constraint
+      try {
+        const fallback = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { ideal: deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: SAMPLE_RATE, channelCount: CHANNELS },
+          video: false,
+        })
+        if (this.mediaStream) this.mediaStream.getAudioTracks().forEach(t => t.stop())
+        this.mediaStream = fallback
+        this.frameBuffer = []
+        if (this.audioContext) {
+          if (this.source) try { this.source.disconnect() } catch (_) {}
+          this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
+          if (this.processor) this.source.connect(this.processor)
+        }
+      } catch (_) { /* give up silently */ }
     }
   }
 
