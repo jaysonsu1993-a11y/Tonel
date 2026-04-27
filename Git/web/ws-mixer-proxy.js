@@ -88,42 +88,43 @@ wss.on('connection', (ws, req) => {
   let closing = false
   let uid = null  // "roomId:userId" for this browser session
 
-  // ── TCP → WebSocket ────────────────────────────────────────────────────────
-  tcpClient = net.createConnection({ host: TCP_HOST, port: TCP_PORT }, () => {
-    console.log(`[WS-Mixer-Proxy] Connected to mixer TCP ${TCP_HOST}:${TCP_PORT}`)
-  })
+  // ── TCP → WebSocket (only for /mixer-tcp path) ─────────────────────────────
+  if (path === '/mixer-tcp') {
+    tcpClient = net.createConnection({ host: TCP_HOST, port: TCP_PORT }, () => {
+      console.log(`[WS-Mixer-Proxy] Connected to mixer TCP ${TCP_HOST}:${TCP_PORT}`)
+    })
 
-  tcpClient.setTimeout(0)
-  tcpClient.setKeepAlive(true)
+    tcpClient.setTimeout(0)
+    tcpClient.setKeepAlive(true)
 
-  tcpClient.on('data', (data) => {
-    if (ws.readyState !== 1 /* OPEN */) return
-    try {
-      const firstByte = data[0]
-      if (firstByte === 0x7B || firstByte === 0x7D) {
-        ws.send(data.toString())  // JSON text
-      } else {
-        ws.send(Buffer.from(data), { binary: true })  // SPA1 binary
+    tcpClient.on('data', (data) => {
+      if (ws.readyState !== 1 /* OPEN */) return
+      try {
+        const firstByte = data[0]
+        if (firstByte === 0x7B || firstByte === 0x7D) {
+          ws.send(data.toString())  // JSON text
+        } else {
+          ws.send(Buffer.from(data), { binary: true })  // SPA1 binary
+        }
+      } catch (e) {
+        console.error('[WS-Mixer-Proxy] Send to WS error:', e.message)
       }
-    } catch (e) {
-      console.error('[WS-Mixer-Proxy] Send to WS error:', e.message)
-    }
-  })
+    })
 
-  tcpClient.on('close', () => {
-    if (ws.readyState === 1 /* OPEN */) ws.close()
-  })
+    tcpClient.on('close', () => {
+      if (ws.readyState === 1 /* OPEN */) ws.close()
+    })
 
-  tcpClient.on('error', (err) => {
-    console.error('[WS-Mixer-Proxy] TCP error:', err.message)
-    closing = true
-    ws.close()
-  })
+    tcpClient.on('error', (err) => {
+      console.error('[WS-Mixer-Proxy] TCP error:', err.message)
+      closing = true
+      ws.close()
+    })
+  }
 
   // ── WebSocket → Server ──────────────────────────────────────────────────────
   ws.on('message', (msg) => {
     if (closing) return
-    const path = req.url || ''
 
     if (path === '/mixer-udp') {
       // Browser sends SPA1 binary → forward to server via UDP

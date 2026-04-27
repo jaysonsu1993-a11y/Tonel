@@ -23,23 +23,18 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const [selectedInput, setSelectedInput] = useState<string>('')
   const [selectedOutput, setSelectedOutput] = useState<string>('')
   const [latency, setLatency] = useState<number>(-1)
+  const [audioDebug, setAudioDebug] = useState<string>('')
   const joinedRef = useRef(false)
 
-  // Load available audio devices (input + output)
-  useEffect(() => {
-    audioService.getAudioInputDevices().then(devs => {
-      setInputDevices(devs)
-      if (devs.length > 0 && !selectedInput) {
-        setSelectedInput(devs[0].deviceId)
-      }
-    })
-    audioService.getAudioOutputDevices().then(devs => {
-      setOutputDevices(devs)
-      if (devs.length > 0 && !selectedOutput) {
-        setSelectedOutput(devs[0].deviceId)
-      }
-    })
-  }, [])
+  // Load available audio devices AFTER init (needs permission for labels)
+  const refreshDevices = useCallback(async () => {
+    const inputs = await audioService.getAudioInputDevices()
+    setInputDevices(inputs)
+    if (inputs.length > 0 && !selectedInput) setSelectedInput(inputs[0].deviceId)
+    const outputs = await audioService.getAudioOutputDevices()
+    setOutputDevices(outputs)
+    if (outputs.length > 0 && !selectedOutput) setSelectedOutput(outputs[0].deviceId)
+  }, [selectedInput, selectedOutput])
 
   // Subscribe to audio latency updates (via WebRTC DataChannel, not signaling)
   useEffect(() => {
@@ -54,14 +49,27 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     // 初始化音频并连接混音服务器
     ;(async () => {
       try {
+        setAudioDebug('init...')
         await audioService.init()
+        refreshDevices()  // enumerate devices after mic permission granted
         audioService.onLevel((l) => setSelfLevel(l))
         audioService.onPeerLevel((uid, level) => {
           setPeerLevels(prev => ({ ...prev, [uid]: level }))
         })
+        setAudioDebug('connecting mixer...')
         await audioService.connectMixer(userId, roomId)
-        await audioService.startCapture()
+        setAudioDebug('starting capture...')
+        audioService.startCapture()
+        // Wait for worklet to load, then show final state
+        setTimeout(() => {
+          setAudioDebug(`FINAL: ${audioService.debugState()} | lvl=${audioService.currentLevel.toFixed(3)}`)
+        }, 2000)
+        // Keep updating level in debug every 2s
+        setInterval(() => {
+          setAudioDebug(`${audioService.debugState()} | lvl=${audioService.currentLevel.toFixed(3)}`)
+        }, 2000)
       } catch (err) {
+        setAudioDebug(`ERROR: ${err}`)
         console.error('[RoomPage] Audio init failed:', err)
       }
     })()
@@ -149,10 +157,11 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           <div className="device-row">
             <label className="device-label">输入</label>
             <select
-              value={selectedInput}
+              value={selectedInput || undefined}
               onChange={e => handleInputChange(e.target.value)}
               className="device-select"
             >
+              {inputDevices.length === 0 && <option value="">--</option>}
               {inputDevices.map(d => (
                 <option key={d.deviceId} value={d.deviceId}>
                   {d.label || `Input ${d.deviceId.slice(0, 8)}`}
@@ -163,10 +172,11 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           <div className="device-row">
             <label className="device-label">输出</label>
             <select
-              value={selectedOutput}
+              value={selectedOutput || undefined}
               onChange={e => handleOutputChange(e.target.value)}
               className="device-select"
             >
+              {outputDevices.length === 0 && <option value="">--</option>}
               {outputDevices.map(d => (
                 <option key={d.deviceId} value={d.deviceId}>
                   {d.label || `Output ${d.deviceId.slice(0, 8)}`}
@@ -192,6 +202,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         </div>
 
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
+        {audioDebug && <div style={{fontSize:'10px',color:'#888',position:'absolute',bottom:2,left:8}}>{audioDebug}</div>}
       </header>
 
       <div className="room-content">

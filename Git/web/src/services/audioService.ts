@@ -743,11 +743,37 @@ class AudioService {
     return this.muted
   }
 
+  /** Debug: return current audio pipeline state */
+  debugState(): string {
+    const ctx = this.audioContext
+    const stream = this.mediaStream
+    const tracks = stream?.getAudioTracks() ?? []
+    return [
+      ctx ? `state=${ctx.state}` : 'no-ctx',
+      stream ? `stream=${tracks.length}tr` : 'no-stream',
+      tracks[0] ? `track=${tracks[0].readyState}` : '',
+      this.analyser ? 'analyser' : 'no-analyser',
+      this.source ? 'source' : 'no-source',
+      this.masterGain ? 'gain' : 'no-gain',
+      this.playbackWorklet ? 'pb-worklet' : 'no-pb-worklet',
+      this.processor ? 'mic-proc' : 'no-mic-proc',
+      this.controlWs ? `ctrl=${this.controlWs.readyState}` : 'no-ctrl',
+      this.audioWs ? `audio=${this.audioWs.readyState}` : 'no-audio',
+    ].filter(Boolean).join(' ')
+  }
+
   /** Enumerate all available audio input devices */
   async getAudioInputDevices(): Promise<MediaDeviceInfo[]> {
     try {
-      // Request permission first so device labels are visible
-      await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      // If init() already acquired permission, just enumerate directly
+      if (this.mediaStream) {
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        return devices.filter(d => d.kind === 'audioinput')
+      }
+      // Otherwise request permission first so device labels are visible,
+      // then STOP the temporary stream to avoid holding the mic
+      const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      tempStream.getAudioTracks().forEach(t => t.stop())
       const devices = await navigator.mediaDevices.enumerateDevices()
       return devices.filter(d => d.kind === 'audioinput')
     } catch {
