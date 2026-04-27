@@ -54,12 +54,12 @@ udpRecv.on('message', (msg, rinfo) => {
   // SPA1 binary audio from server → forward to the browser WS that owns this user
   // The server sends SPA1 with userId="MIXER" in the header for mixed audio.
   // Parse the SPA1 header to get the target userId.
-  if (msg.length < 44) return
+  if (msg.length < 76) return
   const magic = msg.readUInt32BE(0)
   if (magic !== 0x53415031) return  // Not 'SPA1' — ignore
 
-  // Extract userId from offset 8 (32 bytes, null-terminated)
-  const uidBuf = msg.slice(8, 40)
+  // Extract userId from offset 8 (64 bytes, null-terminated) — P1-1 format
+  const uidBuf = msg.slice(8, 72)
   let uid = ''
   for (let i = 0; i < uidBuf.length; i++) {
     if (uidBuf[i] === 0) break
@@ -128,10 +128,10 @@ wss.on('connection', (ws, req) => {
     if (path === '/mixer-udp') {
       // Browser sends SPA1 binary → forward to server via UDP
       // On first message (handshake), record the uid so we can route responses
-      if (uid === null && msg.length >= 44) {
+      if (uid === null && msg.length >= 76) {
         const magic = msg.readUInt32BE(0)
         if (magic === 0x53415031) {
-          const uidBuf = msg.slice(8, 40)
+          const uidBuf = msg.slice(8, 72)
           let rawUid = ''
           for (let i = 0; i < uidBuf.length; i++) {
             if (uidBuf[i] === 0) break
