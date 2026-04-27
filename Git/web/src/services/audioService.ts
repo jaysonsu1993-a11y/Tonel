@@ -3,10 +3,10 @@
  *
  * Implements:
  *   1. Audio capture via AudioWorklet (fallback ScriptProcessorNode)
- *   2. PCM16 SPA1 packet assembly & WebRTC DataChannel send
+ *   2. PCM16 SPA1 packet assembly & WebSocket send
  *   3. SPA1 packet receive → PCM16 decode → Web Audio API playback
- *   4. MIXER_JOIN handshake with the mixer TCP server (via reliable DataChannel)
- *   5. UDP-like audio relay via unreliable DataChannel (direct DTLS to server)
+ *   4. MIXER_JOIN handshake with the mixer TCP server (via /mixer-tcp WebSocket)
+ *   5. Audio relay via /mixer-udp WebSocket (→ proxy → UDP 9003)
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -155,11 +155,9 @@ class AudioService {
   private muted:            boolean = false
   public  currentLevel:     number = 0
 
-  // WebRTC DataChannel connection to mixer (replaces WebSocket)
-  private pc:               RTCPeerConnection | null = null
-  private controlChannel:   RTCDataChannel | null = null
-  private audioChannel:     RTCDataChannel | null = null
-  private signalUnsub:      (() => void) | null = null
+  // WebSocket connections to mixer (via ws-proxy → ws-mixer-proxy)
+  private controlWs:        WebSocket | null = null
+  private audioWs:          WebSocket | null = null
   private userId:           string = ''
   private roomId:           string = ''
 
@@ -167,7 +165,7 @@ class AudioService {
   private peerLevelCallback: PeerLevelCallback | null = null
   private peerLevels: Map<string, number> = new Map()
 
-  // Audio latency (RTT via control DataChannel)
+  // Audio latency (RTT via control WebSocket PING/PONG)
   private pingTimer:        ReturnType<typeof setInterval> | null = null
   private pingSentAt:       number = 0
   private _audioLatency:    number = -1
@@ -458,9 +456,9 @@ class AudioService {
           `${this.roomId}:${this.userId}`
         )
         this.timestamp += FRAME_SAMPLES
-        // Send via unreliable DataChannel (browser → DTLS → proxy → UDP 9003)
-        if (this.audioChannel?.readyState === 'open') {
-          this.audioChannel.send(spa1)
+        // Send via WebSocket (browser → ws-proxy → ws-mixer-proxy → UDP 9003)
+        if (this.audioWs?.readyState === WebSocket.OPEN) {
+          this.audioWs.send(spa1)
         }
         total -= this.FRAME_WANT_SAMPLES
         const newBuf: Float32Array[] = []
@@ -481,127 +479,96 @@ class AudioService {
     return out
   }
 
-  // ── Mixer WebRTC DataChannel (replaces WebSocket) ─────────────────────────
+  // ── Mixer WebSocket connection (control + audio) ───────────────────────────
 
   public async connectMixer(userId: string, roomId: string): Promise<void> {
     this.userId = userId
     this.roomId = roomId
 
-    // Clean up any existing PeerConnection before creating a new one
-    // This handles signal reconnect scenarios where the old PC is still alive
-    if (this.pc) {
-      console.log('[Mixer] Cleaning up existing PeerConnection before reconnect')
-      this.signalUnsub?.()
-      this.signalUnsub = null
-      this.controlChannel = null
-      this.audioChannel = null
-      try { this.pc.close() } catch (_) {}
-      this.pc = null
+    // Clean up any existing WebSockets before reconnecting
+    if (this.controlWs || this.audioWs) {
+      console.log('[Mixer] Cleaning up existing WebSockets before reconnect')
+      try { this.controlWs?.close() } catch (_) {}
+      try { this.audioWs?.close() } catch (_) {}
+      this.controlWs = null
+      this.audioWs = null
     }
 
-    // Lazy import to avoid circular dependency at module level
-    const { signalService } = await import('./signalService')
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = 'api.tonel.io'
+    const controlUrl = `${protocol}//${host}/mixer-tcp`
+    const audioUrl   = `${protocol}//${host}/mixer-udp`
 
-    this.pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.qq.com:3478' },
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun.miwifi.com:3478' },
-      ],
-    })
-
-    // Create DataChannels (browser is the offerer)
-    this.controlChannel = this.pc.createDataChannel('control', {
-      ordered: true,
-    })
-    this.audioChannel = this.pc.createDataChannel('audio', {
-      ordered: false,
-      maxRetransmits: 0,  // unreliable, UDP-like
-    })
-
-    // ── Control channel handlers ──────────────────────────────────────────
-    this.controlChannel.onopen = () => {
-      console.log('[Mixer] Control DataChannel open, sending MIXER_JOIN')
-      this.controlChannel?.send(JSON.stringify({
-        type:    'MIXER_JOIN',
-        room_id: this.roomId,
-        user_id: this.userId,
-      }) + '\n')
-    }
-    this.controlChannel.onmessage = (evt) => {
-      this.handleMixerMessage(evt.data)
-    }
-    this.controlChannel.onclose = () => {
-      console.log('[Mixer] Control DataChannel closed')
-      this.stopCapture()
-    }
-
-    // ── Audio channel handlers ────────────────────────────────────────────
-    this.audioChannel.binaryType = 'arraybuffer'
-    this.audioChannel.onopen = () => {
-      console.log('[Mixer] Audio DataChannel open, sending SPA1 handshake')
-      const pkt = buildSpa1Packet(
-        new Uint8Array(0),
-        SPA1_CODEC_HANDSHAKE,
-        0, 0,
-        `${this.roomId}:${this.userId}`
-      )
-      this.audioChannel?.send(pkt)
-    }
-    this.audioChannel.onmessage = (evt) => {
-      this.handleMixerMessage(evt.data)
-    }
-
-    // ── ICE candidates → relay to proxy via signaling ─────────────────────
-    this.pc.onicecandidate = (evt) => {
-      if (evt.candidate) {
-        signalService.sendMixerIce(
-          evt.candidate.candidate,
-          evt.candidate.sdpMid || '0',
-          this.userId
-        )
-      }
-    }
-
-    this.pc.onconnectionstatechange = () => {
-      console.log(`[Mixer] WebRTC state: ${this.pc?.connectionState}`)
-    }
-
-    // ── Listen for MIXER_ANSWER / MIXER_ICE_RELAY from proxy ──────────────
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.signalUnsub?.()
-        reject(new Error('WebRTC 连接超时'))
+        reject(new Error('Mixer WebSocket 连接超时'))
       }, 15000)
 
-      let answered = false
-      this.signalUnsub = signalService.onMessage((msg) => {
-        if (msg.type === 'MIXER_ANSWER' && !answered) {
-          answered = true
-          this.pc?.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
-            .then(() => {
-              clearTimeout(timer)
-              console.log('[Mixer] Remote description set')
-              resolve()
-            })
-            .catch(reject)
-        } else if (msg.type === 'MIXER_ICE_RELAY') {
-          this.pc?.addIceCandidate(new RTCIceCandidate({
-            candidate: msg.candidate,
-            sdpMid: msg.sdpMid,
-          })).catch(e => console.warn('[Mixer] ICE error:', e))
+      let controlReady = false
+      let audioReady = false
+      const checkBothReady = () => {
+        if (controlReady && audioReady) {
+          clearTimeout(timer)
+          // Send MIXER_JOIN via control channel
+          console.log('[Mixer] Both WebSockets open, sending MIXER_JOIN')
+          this.controlWs?.send(JSON.stringify({
+            type:    'MIXER_JOIN',
+            room_id: this.roomId,
+            user_id: this.userId,
+          }) + '\n')
+          // Send SPA1 handshake via audio channel to register UDP return path
+          console.log('[Mixer] Sending SPA1 handshake on audio WebSocket')
+          const pkt = buildSpa1Packet(
+            new Uint8Array(0),
+            SPA1_CODEC_HANDSHAKE,
+            0, 0,
+            `${this.roomId}:${this.userId}`
+          )
+          this.audioWs?.send(pkt)
+          resolve()
         }
-      })
+      }
 
-      // Create and send offer
-      this.pc!.createOffer()
-        .then(offer => this.pc!.setLocalDescription(offer))
-        .then(() => {
-          const sdp = this.pc!.localDescription!.sdp
-          signalService.sendMixerOffer(sdp, this.userId)
-          console.log('[Mixer] SDP offer sent via signaling')
-        })
-        .catch(reject)
+      // ── Control WebSocket (/mixer-tcp) ──────────────────────────────────
+      this.controlWs = new WebSocket(controlUrl)
+      this.controlWs.binaryType = 'arraybuffer'
+      this.controlWs.onopen = () => {
+        console.log('[Mixer] Control WebSocket open')
+        controlReady = true
+        checkBothReady()
+      }
+      this.controlWs.onmessage = (evt) => {
+        this.handleMixerMessage(evt.data)
+      }
+      this.controlWs.onclose = () => {
+        console.log('[Mixer] Control WebSocket closed')
+        this.stopCapture()
+      }
+      this.controlWs.onerror = (evt) => {
+        console.error('[Mixer] Control WebSocket error:', evt)
+        clearTimeout(timer)
+        reject(new Error('Control WebSocket 连接失败'))
+      }
+
+      // ── Audio WebSocket (/mixer-udp) ────────────────────────────────────
+      this.audioWs = new WebSocket(audioUrl)
+      this.audioWs.binaryType = 'arraybuffer'
+      this.audioWs.onopen = () => {
+        console.log('[Mixer] Audio WebSocket open')
+        audioReady = true
+        checkBothReady()
+      }
+      this.audioWs.onmessage = (evt) => {
+        this.handleMixerMessage(evt.data)
+      }
+      this.audioWs.onclose = () => {
+        console.log('[Mixer] Audio WebSocket closed')
+      }
+      this.audioWs.onerror = (evt) => {
+        console.error('[Mixer] Audio WebSocket error:', evt)
+        clearTimeout(timer)
+        reject(new Error('Audio WebSocket 连接失败'))
+      }
     })
   }
 
@@ -825,14 +792,14 @@ class AudioService {
     this.setMuted(false)
   }
 
-  // ── Audio latency measurement (via control DataChannel PING/PONG) ─────────
+  // ── Audio latency measurement (via control WebSocket PING/PONG) ───────────
 
   private startPing(): void {
     this.stopPing()
     this.pingTimer = setInterval(() => {
-      if (this.controlChannel?.readyState === 'open') {
+      if (this.controlWs?.readyState === WebSocket.OPEN) {
         this.pingSentAt = performance.now()
-        this.controlChannel.send(JSON.stringify({ type: 'PING' }) + '\n')
+        this.controlWs.send(JSON.stringify({ type: 'PING' }) + '\n')
       }
     }, 3000)
   }
@@ -844,7 +811,7 @@ class AudioService {
     }
   }
 
-  /** Subscribe to audio latency updates (ms RTT via DataChannel). Returns unsubscribe. */
+  /** Subscribe to audio latency updates (ms RTT via WebSocket). Returns unsubscribe. */
   onLatency(callback: (ms: number) => void): () => void {
     this.latencyCallbacks.push(callback)
     if (this._audioLatency >= 0) callback(this._audioLatency)
@@ -870,19 +837,15 @@ class AudioService {
     this.mediaStream?.getAudioTracks().forEach(t => t.stop())
     this.audioContext?.close()
     this.audioContextPlay?.close()
-    this.signalUnsub?.()
-    this.controlChannel?.close()
-    this.audioChannel?.close()
-    this.pc?.close()
+    this.controlWs?.close()
+    this.audioWs?.close()
     this.mediaStream       = null
     this.audioContext      = null
     this.audioContextPlay  = null
     this.analyser          = null
     this.source            = null
-    this.pc                = null
-    this.controlChannel    = null
-    this.audioChannel      = null
-    this.signalUnsub       = null
+    this.controlWs         = null
+    this.audioWs           = null
     this.masterGain        = null
   }
 }

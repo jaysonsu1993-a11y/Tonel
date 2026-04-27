@@ -444,9 +444,33 @@
 }
 
 - (void)timerTick:(NSTimer*)timer {
-    // Update only the level meter at 20 Hz to avoid full UI refresh overhead
-    float level = AppState::shared().getInputLevel();
-    _levelMeter.level = level;
+    AppState& state = AppState::shared();
+
+    // Level meter
+    _levelMeter.level = state.getInputLevel();
+
+    // Latency
+    int lat = state.getEstimatedLatencyMs();
+    _latencyLabel.stringValue = [NSString stringWithFormat:@"%d ms", lat];
+
+    // Connection state
+    switch (state.getConnectionState()) {
+        case AppState::ConnectionState::Connected:
+            _connStateLabel.stringValue = @"● 已连接";
+            _connStateLabel.textColor = S1ThemeAccentGreen();
+            break;
+        case AppState::ConnectionState::Connecting:
+            _connStateLabel.stringValue = @"● 连接中…";
+            _connStateLabel.textColor = [NSColor colorWithRed:250/255.0 green:204/255.0 blue:21/255.0 alpha:1];
+            break;
+        case AppState::ConnectionState::Error:
+            _connStateLabel.stringValue = @"● 错误";
+            _connStateLabel.textColor = S1ThemeAccentRed();
+            break;
+        default:
+            _connStateLabel.stringValue = @"● 未连接";
+            _connStateLabel.textColor = S1ThemeTextMuted();
+    }
 }
 
 - (void)updateMuteButtonAppearance:(BOOL)muted {

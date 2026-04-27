@@ -175,6 +175,13 @@ static const int   kMixerUDPPort = 9003;
     size_t dataSize = count * sizeof(int16_t);
     if (dataSize > kMaxPayload) return;
 
+    // DEBUG
+    static int sendCount = 0;
+    if (sendCount < 5 || sendCount % 1000 == 0) {
+        NSLog(@"[MixerBridge] sendAudio #%d count=%d dataSize=%zu", sendCount, count, dataSize);
+    }
+    sendCount++;
+
     uint8_t pkt[kSPA1HeaderSize + kMaxPayload];
     SPA1Header* h = reinterpret_cast<SPA1Header*>(pkt);
 
@@ -346,6 +353,13 @@ static const int   kMixerUDPPort = 9003;
             for (int i = 0; i < sampleCount; i++) {
                 floatBuf[i] = pcm[i] / 32768.0f;
             }
+            // DEBUG
+            static int rxCount = 0;
+            if (rxCount < 5 || rxCount % 1000 == 0) {
+                NSLog(@"[MixerBridge] UDP rx #%d samples=%d ringAvail=%d", rxCount, sampleCount, strongSelf->_rxRing.available());
+            }
+            rxCount++;
+
             if (strongSelf->_rxRing.space() >= sampleCount) {
                 strongSelf->_rxRing.write(floatBuf, sampleCount);
             }

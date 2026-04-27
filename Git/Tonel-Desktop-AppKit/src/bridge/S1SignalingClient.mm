@@ -3,6 +3,7 @@
 
 #import <Foundation/Foundation.h>
 #include "S1SignalingClient.h"
+#include <mach/mach_time.h>
 
 // ── WebSocket delegate ──────────────────────────────────────────────────────
 
@@ -122,6 +123,7 @@ bool S1SignalingClient::connect(const std::string& host, int port) {
 }
 
 void S1SignalingClient::disconnect() {
+    stopHeartbeat();
     connected_.store(false, std::memory_order_release);
     if (!pimpl_) return;
     WSClientPimpl* p = pimpl_;
@@ -136,6 +138,7 @@ void S1SignalingClient::disconnect() {
 
 void S1SignalingClient::createRoom(const std::string& roomId, const std::string& userId,
                                     const std::string& password) {
+    userId_ = userId;
     std::string m = "{\"type\":\"CREATE_ROOM\"," + jsonString("room_id",roomId) + ","
                   + jsonString("user_id",userId);
     if (!password.empty()) m += "," + jsonString("password",password);
@@ -146,6 +149,7 @@ void S1SignalingClient::createRoom(const std::string& roomId, const std::string&
 void S1SignalingClient::joinRoom(const std::string& roomId, const std::string& userId,
                                   const std::string& localIp, int localPort,
                                   const std::string& password) {
+    userId_ = userId;
     std::string m = "{\"type\":\"JOIN_ROOM\"," + jsonString("room_id",roomId) + ","
                   + jsonString("user_id",userId) + ","
                   + jsonString("ip",localIp.empty()?"0.0.0.0":localIp) + ","
@@ -175,6 +179,7 @@ void S1SignalingClient::onDisconnect() {
 void S1SignalingClient::onSignalingConnected() {
     NSLog(@"[S1Signaling] connected!");
     connected_.store(true, std::memory_order_release);
+    startHeartbeat();
     if (callback_) callback_->onSignalingConnected();
 }
 
@@ -216,6 +221,17 @@ void S1SignalingClient::processLine(const std::string& json) {
         if (callback_) callback_->onPeerJoined(pi);
     } else if (type == "PEER_LEFT") {
         if (callback_) callback_->onPeerLeft(extractStr(json,"user_id"));
+    } else if (type == "HEARTBEAT_ACK") {
+        if (heartbeatSentAt_ != 0) {
+            uint64_t now = mach_absolute_time();
+            mach_timebase_info_data_t tb;
+            mach_timebase_info(&tb);
+            uint64_t elapsed = (now - heartbeatSentAt_) * tb.numer / tb.denom;
+            int rtt = (int)(elapsed / 1000000);  // ns → ms
+            NSLog(@"[S1Signaling] HEARTBEAT_ACK rtt=%dms", rtt);
+            heartbeatSentAt_ = 0;
+            if (callback_) callback_->onLatencyMeasured(rtt);
+        }
     } else if (type == "ERROR") {
         if (callback_) callback_->onSignalingError(extractStr(json,"message"));
     }
@@ -251,6 +267,45 @@ int S1SignalingClient::extractInt(const std::string& json, const std::string& ke
     while (p < json.size() && json[p]>='0' && json[p]<='9') { v = v*10 + (json[p]-'0'); ++p; }
     return neg ? -v : v;
 }
+
+// ── Heartbeat ──────────────────────────────────────────────────────────────
+
+void S1SignalingClient::startHeartbeat() {
+    stopHeartbeat();
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+    dispatch_source_set_timer(timer,
+        dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+        5 * NSEC_PER_SEC, NSEC_PER_SEC);
+    S1SignalingClient* raw = this;
+    dispatch_source_set_event_handler(timer, ^{
+        raw->sendHeartbeat();
+    });
+    dispatch_resume(timer);
+    heartbeatTimer_ = (__bridge_retained void*)timer;
+    NSLog(@"[S1Signaling] heartbeat started (5s interval)");
+}
+
+void S1SignalingClient::stopHeartbeat() {
+    if (heartbeatTimer_) {
+        dispatch_source_t timer = (__bridge_transfer dispatch_source_t)heartbeatTimer_;
+        dispatch_source_cancel(timer);
+        heartbeatTimer_ = nullptr;
+        NSLog(@"[S1Signaling] heartbeat stopped");
+    }
+}
+
+void S1SignalingClient::sendHeartbeat() {
+    if (!connected_.load(std::memory_order_acquire)) return;
+    heartbeatSentAt_ = mach_absolute_time();
+    std::string msg = "{\"type\":\"HEARTBEAT\"";
+    if (!userId_.empty()) msg += ",\"user_id\":\"" + userId_ + "\"";
+    msg += "}";
+    send(msg);
+}
+
+// ── Peer list parsing ──────────────────────────────────────────────────────
 
 std::vector<S1PeerInfo> S1SignalingClient::extractPeers(const std::string& json) const {
     std::vector<S1PeerInfo> out;

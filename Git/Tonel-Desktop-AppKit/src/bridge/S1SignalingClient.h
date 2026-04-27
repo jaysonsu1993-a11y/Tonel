@@ -6,6 +6,7 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <mach/mach_time.h>
 
 struct S1PeerInfo {
     std::string user_id;
@@ -76,8 +77,15 @@ private:
     int         extractInt(const std::string& json, const std::string& key) const;
     std::vector<S1PeerInfo> extractPeers(const std::string& json)       const;
 
+    void startHeartbeat();
+    void stopHeartbeat();
+    void sendHeartbeat();
+
     WSClientPimpl* pimpl_ = nullptr;
     std::atomic<bool>    connected_{ false };
     std::mutex           sendMutex_;
     S1SignalingCallback* callback_ = nullptr;
+    std::string          userId_;
+    uint64_t             heartbeatSentAt_ = 0;
+    void*                heartbeatTimer_ = nullptr;  // dispatch_source_t
 };

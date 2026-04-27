@@ -458,10 +458,29 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
     if (dataSize > MAX_PAYLOAD_SIZE) return;
 
     // P1-1: Extract null-terminated userId from fixed 64-byte field
+    // Format is "roomId:userId" — split to get pure userId for room/user lookups
     char uid_buf[65] = {0};
     std::memcpy(uid_buf, pkt->userId, 64);
-    std::string user_id(uid_buf);
-    if (user_id.empty()) return;
+    std::string full_user_id(uid_buf);
+    if (full_user_id.empty()) return;
+
+    // DEBUG: log first few audio packets
+    {
+        static int udp_audio_count = 0;
+        if (udp_audio_count < 5 || udp_audio_count % 1000 == 0) {
+            std::cout << "[MixerServer] UDP audio #" << udp_audio_count
+                      << " from " << full_user_id
+                      << " codec=" << (int)pkt->codec
+                      << " len=" << len << " dataSize=" << dataSize << std::endl;
+        }
+        udp_audio_count++;
+    }
+
+    std::string user_id = full_user_id;
+    size_t colon = full_user_id.find(':');
+    if (colon != std::string::npos) {
+        user_id = full_user_id.substr(colon + 1);
+    }
 
     if (len < sizeof(SPA1Packet) + dataSize) return;
 
