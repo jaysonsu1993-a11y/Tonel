@@ -195,8 +195,7 @@ class AudioService {
   private isCapturing:    boolean = false
   private sequence:       number = 0
   // timestamp removed — now using wall-clock ms in SPA1 header for RTT
-  private frameBuffer:    Float32Array[] = []
-  private readonly FRAME_WANT_SAMPLES = FRAME_SAMPLES  // 480 @ 48kHz = 10ms
+  // frameBuffer removed — onAudioFrame sends directly from ScriptProcessor data
 
   // Playback adaptive jitter buffer: tracks arrival intervals and adjusts target depth
   private targetBufferFrames = 2  // Start with 2 frames (20ms), will adapt
@@ -363,8 +362,6 @@ class AudioService {
     if (this.isCapturing || !this.audioContext) return
     this.isCapturing = true
     this.sequence     = 0
-    this.frameBuffer   = []
-
     // Use ScriptProcessorNode for capture — AudioWorklet has known issues
     // with MediaStreamAudioSourceNode producing zeros in some browsers.
     this.startCaptureWithScriptProcessor()
@@ -393,64 +390,26 @@ class AudioService {
 
   private onAudioFrame(f32: Float32Array): void {
     // Input level: linear RMS + EMA smoothing (AppKit AudioBridge pattern)
-    // Web mics typically output much lower levels than native, so we boost 5x
     let sum = 0
     for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i]
     const rms = Math.sqrt(sum / f32.length)
     this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
     this.currentLevel = Math.min(1.0, this.smoothedLevel * 5)
 
-    this.frameBuffer.push(f32)
-    let total = 0
-    for (const b of this.frameBuffer) total += b.length
-
-    while (total >= this.FRAME_WANT_SAMPLES) {
-      const parts: Float32Array[] = []
-      let used = 0
-      for (const b of this.frameBuffer) {
-        if (used + b.length <= this.FRAME_WANT_SAMPLES) {
-          parts.push(b)
-          used += b.length
-        } else {
-          const split = this.FRAME_WANT_SAMPLES - used
-          parts.push(b.slice(0, split))
-          this.frameBuffer[this.frameBuffer.indexOf(b)] = b.slice(split)
-          used += split
-          break
-        }
-      }
-      if (used >= this.FRAME_WANT_SAMPLES) {
-        const frame = this.concatenate(parts)
-
-        const pcm16 = float32ToPcm16(frame)
-        const spa1 = buildSpa1Packet(
-          pcm16,
-          SPA1_CODEC_PCM16,
-          this.sequence++,
-          0,
-          `${this.roomId}:${this.userId}`
-        )
-        if (this.audioWs?.readyState === WebSocket.OPEN) {
-          this.audioWs.send(spa1)
-          this.txCount++
-        }
-        total -= this.FRAME_WANT_SAMPLES
-        const newBuf: Float32Array[] = []
-        for (const b of this.frameBuffer) {
-          if (b.length > 0) newBuf.push(b)
-        }
-        this.frameBuffer = newBuf
-      } else {
-        break
-      }
+    // Send audio directly as SPA1 frames — bypass frameBuffer accumulation.
+    // ScriptProcessor gives 1024 samples. Send as 4x 240-sample frames + discard remainder.
+    // This avoids the mysterious zero-data bug in the old frameBuffer extraction.
+    if (this.audioWs?.readyState !== WebSocket.OPEN) return
+    const uid = `${this.roomId}:${this.userId}`
+    let offset = 0
+    while (offset + FRAME_SAMPLES <= f32.length) {
+      const frame = f32.subarray(offset, offset + FRAME_SAMPLES)
+      const pcm16 = float32ToPcm16(frame)
+      const spa1 = buildSpa1Packet(pcm16, SPA1_CODEC_PCM16, this.sequence++, 0, uid)
+      this.audioWs.send(spa1)
+      this.txCount++
+      offset += FRAME_SAMPLES
     }
-  }
-
-  private concatenate(arrays: Float32Array[]): Float32Array {
-    const out = new Float32Array(this.FRAME_WANT_SAMPLES)
-    let off = 0
-    for (const a of arrays) { out.set(a, off); off += a.length }
-    return out
   }
 
   // ── Mixer WebSocket connection (control + audio) ───────────────────────────
@@ -793,7 +752,7 @@ class AudioService {
       }
       this.mediaStream = newStream
       // Reset capture state
-      this.frameBuffer = []
+      // frameBuffer removed
       this.smoothedLevel = 0
       // Reconnect source → processor chain
       if (this.audioContext) {
@@ -812,7 +771,7 @@ class AudioService {
         })
         if (this.mediaStream) this.mediaStream.getAudioTracks().forEach(t => t.stop())
         this.mediaStream = fallback
-        this.frameBuffer = []
+        // frameBuffer removed
         if (this.audioContext) {
           if (this.source) try { this.source.disconnect() } catch (_) {}
           this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
@@ -844,7 +803,6 @@ class AudioService {
       ;(this.processor as ScriptProcessorNode).onaudioprocess = null
       this.processor = null
     }
-    this.frameBuffer = []
   }
 
   mute(): void {
