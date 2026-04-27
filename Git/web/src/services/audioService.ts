@@ -486,7 +486,8 @@ class AudioService {
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = 'api.tonel.io'
+    // Direct connection to Alibaba Cloud server (bypasses Cloudflare Tunnel)
+    const host = 'srv.tonel.io'
     const controlUrl = `${protocol}//${host}/mixer-tcp`
     const audioUrl   = `${protocol}//${host}/mixer-udp`
 

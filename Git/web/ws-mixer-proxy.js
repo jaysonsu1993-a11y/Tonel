@@ -50,15 +50,22 @@ udpRecv.on('error', (err) => {
 // Key: "roomId:userId" → WebSocket
 const wsByUid = new Map()
 
+// Stats for diagnosing packet loss
+let statsUdpRecv = 0, statsWsSent = 0, statsDropped = 0, statsNoMatch = 0
+setInterval(() => {
+  if (statsUdpRecv > 0) {
+    console.log(`[WS-Mixer-Proxy] STATS: udpRecv=${statsUdpRecv} wsSent=${statsWsSent} dropped=${statsDropped} noMatch=${statsNoMatch} mapSize=${wsByUid.size}`)
+    statsUdpRecv = 0; statsWsSent = 0; statsDropped = 0; statsNoMatch = 0
+  }
+}, 5000)
+
 udpRecv.on('message', (msg, rinfo) => {
-  // SPA1 binary audio from server → forward to the browser WS that owns this user
-  // The server sends SPA1 with userId="MIXER" in the header for mixed audio.
-  // Parse the SPA1 header to get the target userId.
   if (msg.length < 76) return
   const magic = msg.readUInt32BE(0)
-  if (magic !== 0x53415031) return  // Not 'SPA1' — ignore
+  if (magic !== 0x53415031) return
 
-  // Extract userId from offset 8 (64 bytes, null-terminated) — P1-1 format
+  statsUdpRecv++
+
   const uidBuf = msg.slice(8, 72)
   let uid = ''
   for (let i = 0; i < uidBuf.length; i++) {
@@ -69,6 +76,11 @@ udpRecv.on('message', (msg, rinfo) => {
   const ws = wsByUid.get(uid)
   if (ws && ws.readyState === 1 /* OPEN */) {
     ws.send(Buffer.from(msg), { binary: true })
+    statsWsSent++
+  } else if (ws) {
+    statsDropped++  // WS exists but not open
+  } else {
+    statsNoMatch++  // No WS for this uid
   }
 })
 
