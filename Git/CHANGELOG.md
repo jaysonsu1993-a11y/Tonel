@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-04-28
+
+### Fixed (Build Tooling)
+- **`Git/scripts/bump-version.sh` BSD-grep incompatibility** — the script used `grep -oP '...\K...'` (GNU-only) wrapped in `|| echo "unknown"`, so on macOS the regex flag was rejected, `CURRENT_VERSION` became `unknown`, all subsequent `sed` substitutions found no match, and the script exited 0 having changed nothing. Verified this had been silently broken since at least v1.0.0 (`Git/config.schema.json` `version.default` was stuck at `0.3.2`). Replaced `grep -oP` with `sed -nE` (BSD+GNU compatible) in both extraction and verification blocks, and added a hard-fail when current version cannot be detected — silent no-op is the worst failure mode for a release script.
+
+### Changed (Repo Policy)
+- **GitHub remote now mirrors only `Git/` + root `.gitignore`** — all other root-level paths (`local_docs/`, `Tonel-Desktop(Legacy)/`, `docs/`, `.claude/`, build artifacts) are local-only. The GitHub repo is purely for code version management of the `Git/` source tree.
+- **Git history rewritten** via `git filter-repo --path Git/ --path .gitignore`: every commit hash from this point backward is new. All historical tags (`v0.1.0` through `v1.0.1`) now point to rewritten commit objects. Existing clones must be re-cloned.
+- `.gitignore` extended with `/local_docs/`, `/Tonel-Desktop(Legacy)/`, `/.claude/` (root anchored) so the local-only paths stay untracked going forward.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/scripts/bump-version.sh` | `grep -oP` → `sed -nE`; hard-fail on undetected version |
+| `.gitignore` | Added `/local_docs/`, `/Tonel-Desktop(Legacy)/`, `/.claude/` |
+| Repo history | One-time rewrite via `git filter-repo`; force-pushed |
+
 ## [1.0.1] - 2026-04-28
 
 ### Fixed (Web Client)

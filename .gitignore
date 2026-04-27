@@ -1,5 +1,8 @@
-# Local sensitive docs (not synced to Git)
+# Local-only paths (per repo policy: GitHub mirrors only Git/ + this .gitignore)
 /docs/
+/local_docs/
+/Tonel-Desktop(Legacy)/
+/.claude/
 
 # Build artifacts (CMake + Unix)
 build/

@@ -21,8 +21,13 @@ if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-# 获取当前版本
-CURRENT_VERSION=$(grep -oP 'project\(Tonel VERSION \K[0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt 2>/dev/null || echo "unknown")
+# 获取当前版本（BSD/macOS + GNU 兼容；用 sed 而不是 grep -oP）
+CURRENT_VERSION=$(sed -nE 's/^project\(Tonel VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt 2>/dev/null | head -1)
+if [ -z "$CURRENT_VERSION" ]; then
+    echo "❌ 无法从 CMakeLists.txt 提取当前版本号"
+    echo "   预期格式: project(Tonel VERSION X.Y.Z ...)"
+    exit 1
+fi
 echo "当前版本: $CURRENT_VERSION"
 echo "目标版本: $NEW_VERSION"
 echo ""
@@ -84,11 +89,11 @@ echo "   ✅ config.schema.json"
 
 echo ""
 echo "🔍 验证:"
-echo "   Root CMake:   $(grep -oP 'project\(Tonel VERSION \K[^\s]+' CMakeLists.txt)"
-echo "   AppKit CMake: $(grep -oP 'VERSION \K[0-9]+\.[0-9]+\.[0-9]+' Tonel-Desktop-AppKit/CMakeLists.txt)"
-echo "   Server CMake: $(grep -oP 'VERSION \K[0-9]+\.[0-9]+\.[0-9]+' server/CMakeLists.txt)"
-echo "   Web package:  $(grep -oP '\"version\": \"\K[^\"]+' web/package.json)"
-echo "   Config schema:$(grep -oP '\"default\": \"\K[0-9]+\.[0-9]+\.[0-9]+' config.schema.json | tail -1)"
+echo "   Root CMake:   $(sed -nE 's/^project\(Tonel VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt | head -1)"
+echo "   AppKit CMake: $(sed -nE 's/^project\(Tonel-Desktop-AppKit VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' Tonel-Desktop-AppKit/CMakeLists.txt | head -1)"
+echo "   Server CMake: $(sed -nE 's/^project\(TonelServer VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' server/CMakeLists.txt | head -1)"
+echo "   Web package:  $(sed -nE 's/.*"version": "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' web/package.json | head -1)"
+echo "   Config schema:$(sed -nE 's/.*"default": "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' config.schema.json | head -1)"
 
 echo ""
 echo "📝 下一步:"
