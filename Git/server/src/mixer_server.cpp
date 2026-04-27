@@ -547,6 +547,19 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
         // Decode PCM16 -> float
         const int16_t* pcm = reinterpret_cast<const int16_t*>(pkt->data);
         pcm16_to_float(pcm, float_buf.data(), frame_count);
+        // Debug: log input RMS every 5000 packets
+        {
+            static int ic = 0;
+            if (ic++ % 5000 == 0) {
+                float rms = 0;
+                for (int i = 0; i < frame_count; i++) rms += float_buf[i] * float_buf[i];
+                rms = std::sqrt(rms / frame_count);
+                int16_t first3[3] = { pcm[0], pcm[1], pcm[2] };
+                std::cout << "[MixerServer] Input RMS=" << rms
+                          << " pcm16[0..2]=" << first3[0] << "," << first3[1] << "," << first3[2]
+                          << " from " << user_id << std::endl;
+            }
+        }
     } else {
         std::cerr << "[MixerServer] Unknown codec " << (int)codec << " from " << user_id << std::endl;
         return;
@@ -596,6 +609,20 @@ void MixerServer::broadcast_mixed_audio(Room* room,
 
     std::vector<float> mixed(frame_count);
     room->mixer.mix(mixed.data(), frame_count);
+
+    // Debug: log mix RMS every 1000 broadcasts
+    {
+        static int bc = 0;
+        if (bc++ % 1000 == 0) {
+            float rms = 0;
+            for (int i = 0; i < frame_count; i++) rms += mixed[i] * mixed[i];
+            rms = std::sqrt(rms / frame_count);
+            std::cout << "[MixerServer] Broadcast #" << bc
+                      << " rms=" << rms
+                      << " tracks=" << room->mixer.trackCount()
+                      << " users=" << room->users.size() << std::endl;
+        }
+    }
 
     // Record the mixed audio if this room is being recorded
     if (room->recording) {
