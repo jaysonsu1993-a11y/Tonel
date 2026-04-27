@@ -121,24 +121,24 @@ function parseSpa1Body(buf: ArrayBuffer, dataSize?: number): Uint8Array {
 // PCM16 Codec
 // ─────────────────────────────────────────────────────────────────────────────
 
+// PCM16 codec — matches AppKit's encoding: mono * 32767, decode / 32768
 function float32ToPcm16(f32: Float32Array): Uint8Array {
   const out  = new Uint8Array(f32.length * 2)
   const view = new DataView(out.buffer)
   for (let i = 0; i < f32.length; i++) {
     const s = Math.max(-1, Math.min(1, f32[i]))
-    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true)
+    view.setInt16(i * 2, Math.round(s * 32767), true)  // LE, matches x86 server
   }
   return out
 }
 
 function pcm16ToFloat32(pcm: Uint8Array): Float32Array {
-  const view = new Float32Array(pcm.length / 2)
-  const dv   = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength)
-  for (let i = 0; i < view.length; i++) {
-    const s = dv.getInt16(i * 2, true)
-    view[i] = s < 0 ? s / 0x8000 : s / 0x7FFF
+  const out = new Float32Array(pcm.length / 2)
+  const dv  = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = dv.getInt16(i * 2, true) / 32768.0  // LE, matches AppKit decode
   }
-  return view
+  return out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -406,13 +406,13 @@ class AudioService {
   private nextPlayTime = 0
 
   private onAudioFrame(f32: Float32Array): void {
-    // Compute input level: linear RMS with exponential smoothing (matches AppKit 80/20)
+    // Input level: linear RMS + EMA smoothing (matches AppKit AudioBridge)
+    // AppKit: prev * 0.8 + rms * 0.2, no extra scaling, 0-1 linear range
     let sum = 0
     for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i]
     const rms = Math.sqrt(sum / f32.length)
     this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
-    // Scale up significantly — typical speech RMS is 0.01-0.05
-    this.currentLevel = Math.min(1.0, this.smoothedLevel * 15)
+    this.currentLevel = this.smoothedLevel
 
     this.frameBuffer.push(f32)
     let total = 0
@@ -579,16 +579,15 @@ class AudioService {
     if (!header) return
     this.rxCount++
 
-    // RTT from SPA1 timestamp (server echoes our ms low-16 back)
+    // RTT from SPA1 timestamp — matches AppKit MixerBridge exactly:
+    // Server echoes client's ms-low-16 timestamp back in mixed audio
     if (header.timestamp > 0) {
-      const nowMs = Math.floor(performance.now()) & 0xFFFF
-      let rtt = (nowMs - header.timestamp) & 0xFFFF
-      if (rtt > 10000) rtt = 0  // discard wrap-around glitches
-      if (rtt > 0 && rtt < 10000) {
-        // EMA smoothing: 80% old + 20% new (matches AppKit)
-        this._audioLatency = this._audioLatency < 0
-          ? rtt
-          : Math.round(this._audioLatency * 0.8 + rtt * 0.2)
+      const now16 = Math.floor(performance.now()) & 0xFFFF
+      const rtt = (now16 - header.timestamp) & 0xFFFF  // unsigned 16-bit subtract
+      if (rtt < 10000) {  // discard wrap-around glitches (>10s)
+        const prev = this._audioLatency
+        // AppKit: (prev * 4 + rtt) / 5  — integer EMA, 80% old + 20% new
+        this._audioLatency = (prev <= 0) ? rtt : Math.floor((prev * 4 + rtt) / 5)
         this.latencyCallbacks.forEach(cb => cb(this._audioLatency))
       }
     }

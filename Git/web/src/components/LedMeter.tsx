@@ -8,8 +8,16 @@ interface LedMeterProps {
 }
 
 export function LedMeter({ level, peak = 0, segments = 20, direction = 'vertical' }: LedMeterProps) {
-  const activeSegments = Math.round(level * segments)
-  const peakSegment = Math.round(peak * segments)
+  // Map linear RMS (0-1) to dB-scaled meter position for visibility
+  // -48dB → 0 segments, 0dB → full scale (matches pro audio meter behavior)
+  const dbRange = 48
+  const toMeterPos = (v: number) => {
+    if (v <= 0) return 0
+    const db = 20 * Math.log10(v)
+    return Math.max(0, Math.min(1, (db + dbRange) / dbRange))
+  }
+  const activeSegments = Math.round(toMeterPos(level) * segments)
+  const peakSegment = Math.round(toMeterPos(peak) * segments)
 
   const getSegmentColor = (idx: number) => {
     const ratio = idx / segments
