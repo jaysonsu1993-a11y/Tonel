@@ -182,6 +182,7 @@ class AudioService {
   public rxCount = 0   // received SPA1 audio packets from server
   public txCount = 0   // sent SPA1 audio packets to server
   public playCount = 0 // packets sent to playback
+  public rxLevel = 0   // RMS of last received audio (0 = silence)
   get audioWsState(): string {
     const ws = this.audioWs
     if (!ws) return 'null'
@@ -388,7 +389,7 @@ class AudioService {
   }
 
   private smoothedLevel = 0
-  private playTime = 0  // next scheduled playback time (AudioContext.currentTime)
+  // playTime removed — using immediate start(0)
 
   private onAudioFrame(f32: Float32Array): void {
     // Input level: linear RMS + EMA smoothing (AppKit AudioBridge pattern)
@@ -643,18 +644,19 @@ class AudioService {
     const pcm = parseSpa1Body(data, header.dataSize)
     const f32 = pcm16ToFloat32(pcm)
 
+    // Compute RMS of received audio for diagnostics
+    let rxSum = 0
+    for (let i = 0; i < f32.length; i++) rxSum += f32[i] * f32[i]
+    this.rxLevel = Math.sqrt(rxSum / f32.length)
+
     this.playCount++
-    // Schedule BufferSource playback — simple and reliable
+    // Play immediately via BufferSource → masterGain → destination
     const buffer = this.audioContext.createBuffer(CHANNELS, f32.length, SAMPLE_RATE)
     buffer.getChannelData(0).set(f32)
     const src = this.audioContext.createBufferSource()
     src.buffer = buffer
     src.connect(this.masterGain)
-    const ctxNow = this.audioContext.currentTime
-    if (this.playTime < ctxNow) this.playTime = ctxNow + 0.01
-    if (this.playTime > ctxNow + 0.5) this.playTime = ctxNow + 0.01
-    src.start(this.playTime)
-    this.playTime += f32.length / SAMPLE_RATE
+    src.start(0)  // play immediately, no scheduling
   }
 
   /**

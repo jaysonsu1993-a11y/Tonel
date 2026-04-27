@@ -22,7 +22,8 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([])
   const [selectedInput, setSelectedInput] = useState<string>('')
   const [selectedOutput, setSelectedOutput] = useState<string>('')
-  const [latency, setLatency] = useState<number>(-1)
+  const [latency, _setLatency] = useState<number>(-1)
+  void _setLatency  // RTT disabled for now
   const joinedRef = useRef(false)
 
   // Load available audio devices AFTER init (needs permission for labels)
@@ -40,11 +41,9 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   useEffect(() => {
     const fast = setInterval(() => {
       setSelfLevel(audioService.currentLevel)
-      const lat = audioService.audioLatency
-      if (lat >= 0 && lat < 5000) setLatency(lat)  // guard against runaway values
-    }, 100)
+    }, 150)
     const slow = setInterval(() => {
-      setDbg(`tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ws=${audioService.audioWsState}`)
+      setDbg(`tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} rxLvl=${audioService.rxLevel.toFixed(4)} ws=${audioService.audioWsState}`)
     }, 2000)
     return () => { clearInterval(fast); clearInterval(slow) }
   }, [])
