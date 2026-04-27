@@ -241,7 +241,34 @@ npm run build && npx wrangler pages deploy dist --project-name=tonel-web
 - Port 9001: signaling_server (TCP)
 - Port 9002: mixer_server TCP control
 - Port 9003: mixer_server UDP audio
-- Port 9004: ws-proxy.js (WebSocket signaling proxy)
+- Port 9004: ws-proxy.js (WebSocket signaling proxy, via CF Tunnel)
+- Port 9005: ws-mixer-proxy.js (WebSocket mixer proxy, direct via srv.tonel.io)
+- Port 9006: ws-mixer-proxy UDP receive (server mixed audio return)
 - Port 9007: webrtc-mixer-proxy UDP receive
 - Port 10000-10100: WebRTC DTLS/SCTP (browser <-> mixer proxy)
-- Check with: `lsof -i :9001 -i :9002 -i :9003 -i :9004 -i :9007`
+- Check with: `lsof -i :9001 -i :9002 -i :9003 -i :9004 -i :9005 -i :9007`
+
+### Deployment paths
+
+**Web frontend** (Cloudflare Pages):
+```bash
+cd Git/web && npm run build && npx wrangler pages deploy dist --project-name=tonel-web
+```
+Requires `CLOUDFLARE_API_TOKEN` env var (configured in ~/.zshrc).
+
+**Server scripts** (PM2 runs from `/opt/tonel-server/`):
+```bash
+# After modifying ws-mixer-proxy.js or ws-proxy.js:
+scp Git/web/ws-mixer-proxy.js root@8.163.21.207:/opt/tonel-server/
+ssh root@8.163.21.207 'pm2 restart tonel-ws-mixer-proxy'
+
+# After modifying mixer_server.cpp:
+ssh root@8.163.21.207 'cd /root/Tonel/Git/server && git pull && cmake --build build --target mixer_server && pm2 stop tonel-mixer && cp build/mixer_server /opt/tonel-server/bin/ && pm2 start tonel-mixer'
+```
+
+### Network architecture
+
+- **Signaling**: browser → Cloudflare Tunnel (api.tonel.io) → ws-proxy → signaling_server
+- **Mixer audio**: browser → **direct** (srv.tonel.io, DNS-only A record) → nginx WSS → ws-mixer-proxy → mixer_server UDP
+- **AppKit audio**: direct TCP/UDP to server IP (no proxy)
+- Audio traffic MUST NOT go through Cloudflare — adds 200-400ms of latency via overseas edge servers

@@ -100,15 +100,15 @@ Automatic: P2P is preferred, switches to Mixer when:
 │                                                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  │
 │  │ Web Audio   │  │  React UI   │  │  SPA1 in JS  │  │
-│  │ API         │  │  (Vite)     │  │  Encoder     │  │
+│  │ API         │  │  (Vite)     │  │  PCM16 Codec │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬───────┘  │
 │         │                 │                │          │
 │  ┌──────┴─────────────────┴────────────────┴───────┐  │
 │  │  Signaling: WebSocket (CF Tunnel → ws-proxy)    │  │
-│  │  Mixer:     WebRTC DataChannel (direct DTLS)    │  │
+│  │  Mixer:     WebSocket (direct → ws-mixer-proxy) │  │
 │  └────────────────────────────────────────────────┘  │
 │                                                      │
-│     ~20-50ms more latency than native client          │
+│  Audio path: srv.tonel.io (direct to server, no CF)  │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -157,6 +157,8 @@ Automatic: P2P is preferred, switches to Mixer when:
 7. **Disabled browser "enhancements"** -- echo cancellation, noise suppression, auto gain all OFF in web client for raw audio
 8. **Big-endian network byte order** -- no endian conversion on ARM server/client
 9. **Browser WebSocket heartbeat** -- 10s interval HEARTBEAT prevents Cloudflare Tunnel idle timeout disconnects
+10. **Direct WebSocket for audio** -- srv.tonel.io bypasses Cloudflare, audio goes straight to domestic server
+11. **SPA1 timestamp RTT** -- client embeds ms-low-16 in SPA1 header, server echoes back, client computes RTT with EMA smoothing
 
 ## Editions (免费版 vs 付费版)
 
@@ -181,35 +183,35 @@ Automatic: P2P is preferred, switches to Mixer when:
 | 9002 | TCP | Mixer control channel |
 | 9003 | UDP | Mixer audio (SPA1 packets) |
 | 9004 | WebSocket | Web signaling proxy (ws-proxy.js) |
+| 9005 | WebSocket | Web mixer proxy (ws-mixer-proxy.js, TCP control + UDP audio relay) |
+| 9006 | UDP | ws-mixer-proxy UDP receive port (server mixed audio return) |
 | 9007 | UDP | WebRTC mixer proxy receive port (webrtc-mixer-proxy.cjs) |
 | 10000-10100 | UDP | WebRTC DTLS/SCTP (browser ↔ mixer proxy) |
 
-## Deployment Architecture (2025-04)
+## Deployment Architecture (2026-04)
 
 ```
                            INTERNET
                               │
-         ┌────────────────────┼────────────────────┐
-         │                    │                    │
-    [Cloudflare]        [Cloudflare]         [Direct DTLS/UDP]
-         │                    │                    │
-   Pages CDN            Tunnel (QUIC)       WebRTC DataChannel
-         │                    │                    │
-    tonel.io          api.tonel.io          8.163.21.207
-   (Web static)      (WS signaling)     (Mixer: UDP 10000-10100)
-         │                    │                    │
-         └────────────────────┼────────────────────┘
+     ┌────────────────────────┼───────────────────────┐
+     │                        │                       │
+[Cloudflare Pages]    [Cloudflare Tunnel]     [Direct WSS/UDP]
+     │                        │                       │
+  tonel.io             api.tonel.io            srv.tonel.io
+ (Web static)        (WS signaling)      (Mixer audio: WSS 443)
+     │                        │                       │
+     └────────────────────────┼───────────────────────┘
                               │
                     ┌─────────┴─────────┐
                     │  Alibaba Cloud CN  │
                     │  (Debian 12)       │
                     │                    │
-                    │  nginx (localhost) │
+                    │  nginx :443 (SSL)  │
                     │  signaling :9001   │
                     │  mixer     :9002   │
                     │  audio     :9003   │
                     │  ws-proxy  :9004   │
-                    │  webrtc-proxy      │
+                    │  ws-mixer  :9005   │
                     │  cloudflared       │
                     └────────────────────┘
 ```
@@ -217,24 +219,25 @@ Automatic: P2P is preferred, switches to Mixer when:
 ### Why this architecture?
 
 - **Web on Cloudflare Pages**: No ICP filing needed. Global CDN, zero cost.
-- **Signaling via Cloudflare Tunnel**: WebSocket traffic goes through QUIC tunnel to domestic server. Domain stays on 443 (no exposed ports). Beaver (ICP check) only sees Cloudflare IPs, not domestic server.
-- **Mixer audio via WebRTC DataChannel**: Browsers connect directly to the server IP via DTLS/SCTP. Self-signed certs with fingerprints exchanged through signaling — no domain or CA cert needed. Bypasses the `.io` domain ICP filing restriction entirely.
-- **Mixer on domestic server**: Critical for ultra-low latency for Chinese users. No hairpin through overseas Cloudflare edges.
+- **Signaling via Cloudflare Tunnel**: Low-bandwidth control traffic goes through QUIC tunnel. Domain stays on 443. Beaver (ICP check) only sees Cloudflare IPs.
+- **Mixer audio via direct WSS**: Web client connects to `srv.tonel.io` (DNS-only A record, grey cloud, not proxied by Cloudflare). Audio traffic goes directly to the Alibaba Cloud server via nginx WSS → ws-mixer-proxy → UDP mixer. **No Cloudflare in the audio path** — critical for low latency.
+- **AppKit uses direct UDP**: Native client connects directly to server IP for both TCP control and UDP audio. Lowest possible latency.
 
 ### DNS Records
 
 | Record | Type | Target | Proxy |
 |---|---|---|---|
-| tonel.io | CNAME | tonel-web.pages.dev | Orange (Proxied) |
-| api.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (Proxied) |
+| tonel.io | CNAME | tonel-web.pages.dev | Orange (Proxied by CF Pages) |
+| api.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel) |
+| srv.tonel.io | A | 8.163.21.207 | **Grey (DNS only, direct)** |
 
 ### Client Connection Points
 
 | Client | Web URL | Signaling | Audio (Mixer) |
 |---|---|---|---|
-| AppKit (Production) | https://tonel.io | wss://tonel.io/signaling (port 443 → nginx → ws-proxy:9004) | Direct UDP 9003 |
-| Web (Trial) | https://tonel.io | wss://api.tonel.io/signaling | WebRTC DataChannel (direct DTLS to server IP) |
-| JUCE (Legacy) | - | TCP direct to config host | Direct UDP/TCP |
+| AppKit (Production) | — | TCP direct 8.163.21.207:9002 | Direct UDP :9003 |
+| Web (Trial) | https://tonel.io | wss://api.tonel.io/signaling (CF Tunnel) | **wss://srv.tonel.io/mixer-tcp + /mixer-udp (direct)** |
+| JUCE (Legacy) | — | TCP direct to config host | Direct UDP/TCP |
 
 ### WebRTC Mixer Connection Flow (Web Client)
 
