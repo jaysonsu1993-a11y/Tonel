@@ -23,7 +23,7 @@ export function ChannelStrip({
   name,
   avatarUrl,
   level,
-  peak,
+  peak: _peak,
   isSelf = false,
   isMuted = false,
   isSolo = false,

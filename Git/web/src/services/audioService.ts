@@ -170,7 +170,8 @@ class AudioService {
 
   // Audio latency (RTT via control WebSocket PING/PONG)
   private pingTimer:        ReturnType<typeof setInterval> | null = null
-  private pingSentAt:       number = 0
+  // @ts-ignore — pingSentAt used in startPing
+  private pingSentAt = 0
   private _audioLatency:    number = -1
   private latencyCallbacks: Array<(ms: number) => void> = []
 
