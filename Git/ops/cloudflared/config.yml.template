@@ -1,0 +1,17 @@
+# Cloudflare Tunnel config template — applied to /root/.cloudflared/config.yml.
+# Substitute ${TUNNEL_ID} from .env.deploy at apply time (deploy/server-ops.sh).
+#
+# Tunnel currently routes only api.tonel.io (signaling). The previous mixer.tonel.io
+# entry was removed in v1.0.3 — mixer audio now goes via srv.tonel.io (DNS-only,
+# direct to nginx, bypassing Cloudflare entirely).
+
+tunnel: ${TUNNEL_ID}
+credentials-file: /root/.cloudflared/${TUNNEL_ID}.json
+
+ingress:
+  - hostname: api.tonel.io
+    service: http://localhost:9004
+    originRequest:
+      noTLSVerify: true
+
+  - service: http_status:404

@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-04-28
+
+### Added (Deploy Infrastructure)
+- **`Git/deploy/`** — imperative deploy scripts (`web.sh`, `server.sh`, `health.sh`, `rollback.sh`, `bootstrap.sh`) plus `lib/common.sh` (logging, dry-run, drift detection, remote backups). All read configuration from `Git/deploy/.env.deploy` (gitignored). Replaces the manual `scp` / `pm2 restart` workflow that was previously documented inline in `DEVELOPMENT.md`.
+- **`Git/ops/`** — declarative production configuration entered into source control: `pm2/ecosystem.config.cjs` (process definitions), `nginx/srv.tonel.io.conf` + `nginx/tonel.io.conf`, `cloudflared/config.yml.template`, `scripts/start-mixer.sh` + `scripts/start-signaling.sh`. Production now reflects the repo, not the other way around.
+- **`Git/scripts/release.sh`** — release orchestrator: `release.sh <version>` runs the full pipeline (bump → CHANGELOG verify → commit → tag → push → server deploy → web deploy → health check). Modes: `--skip-deploy`, `--skip-push`, `deploy-only`.
+- **`Git/docs/DEPLOYMENT.md`** — production topology, filesystem layout (`/opt/tonel/`, `/var/lib/tonel/`, `/var/log/tonel/`), port map, DNS, TLS, toolchain, drift policy, disaster recovery.
+- **`Git/docs/RELEASE.md`** — canonical release flow, semver rules, CHANGELOG format, partial flows, hotfix workflow.
+
+### Changed (Production Layout)
+- **Migrated `/opt/tonel-server/` → `/opt/tonel/`** with clean separation:
+  - `bin/` — compiled C++ servers
+  - `proxy/` — Node.js WebSocket bridges
+  - `scripts/` — PM2 launchers
+  - `ops/ecosystem.config.cjs` — PM2 process definitions
+  - `VERSION` + `DEPLOY_LOG` for "what's running right now?" lookups
+  - Runtime data moved to `/var/lib/tonel/recordings/`
+  - PM2 logs moved to `/var/log/tonel/`
+- The legacy `/opt/tonel-server/` is preserved at `/opt/_archive/tonel-server-pre-bootstrap/` as a fallback, deletable after one week of stable operation.
+- **PM2 process exec paths normalized to `bin/`** — previously `tonel-signaling` ran `/opt/tonel-server/signaling_server` (root) while `start-signaling.sh` referenced `bin/`, causing silent drift between manual restarts and binary swaps.
+
+### Removed
+- **`webrtc-mixer-proxy.js` (file + `tonel-webrtc-mixer` PM2 process)** — v1.0.0 changelog announced its removal but the file lingered in the repo and the process was still running on production. Cleaned up properly this release.
+- **`mixer.tonel.io` cloudflared route** — dead since v1.0.0 (mixer audio uses `srv.tonel.io` direct, no Cloudflare).
+
+### Fixed (Drift Reflow)
+- **`Git/web/ws-proxy.js`** updated to match production version (HTTP server with upgrade routing for `/mixer-tcp` + `/mixer-udp`, noServer-mode `WebSocketServer`). The repo had been carrying a stale single-WS variant since v1.0.0 — every deploy from the repo would have downgraded the proxy.
+- **`Git/scripts/bump-version.sh`** now respects `YES=1` env var to skip the interactive confirm prompt — required for `release.sh` orchestration.
+
+### Repo policy
+- Added `Git/.gitignore` rule for `deploy/.env.deploy` (SSH host / Cloudflare token / tunnel id) — these values stay local. The committed `.env.deploy.example` documents required keys.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/deploy/{web,server,health,rollback,bootstrap}.sh` | New deploy scripts, all `--dry-run` capable |
+| `Git/deploy/lib/common.sh` | Shared helpers: logging, drift check, SSH wrappers, deploy log |
+| `Git/deploy/.env.deploy.example` | Documented config keys (gitignored real `.env.deploy`) |
+| `Git/ops/pm2/ecosystem.config.cjs` | PM2 single source of truth, replaces ad-hoc `pm2 start` flags |
+| `Git/ops/nginx/{srv,tonel}.io.conf` | nginx site configs, applied by `server.sh --component=ops` |
+| `Git/ops/cloudflared/config.yml.template` | Cloudflared tunnel config (only `api.tonel.io` ingress; mixer route removed) |
+| `Git/ops/scripts/start-{mixer,signaling}.sh` | PM2 launchers, mixer cd's into `/var/lib/tonel/` for recordings |
+| `Git/scripts/release.sh` | Release orchestrator |
+| `Git/docs/DEPLOYMENT.md`, `Git/docs/RELEASE.md` | New canonical docs |
+| `Git/docs/DEVELOPMENT.md` | Replaced inline deploy snippets with pointers to RELEASE.md / DEPLOYMENT.md |
+| `Git/web/ws-proxy.js` | Reflow from production (HTTP+upgrade routing) |
+| `Git/web/webrtc-mixer-proxy.js` | Deleted |
+| `Git/scripts/bump-version.sh` | `YES=1` env var skips interactive prompt |
+| `Git/.gitignore` | `+ /deploy/.env.deploy` |
+
 ## [1.0.2] - 2026-04-28
 
 ### Fixed (Build Tooling)

@@ -51,3 +51,6 @@ web/node_modules/
 
 # Environment files
 .env
+
+# Deploy secrets (SSH host, CF token, tunnel id)
+deploy/.env.deploy

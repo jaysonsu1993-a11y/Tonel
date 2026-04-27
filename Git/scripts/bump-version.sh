@@ -57,7 +57,12 @@ for f in "${FILES[@]}"; do
 done
 echo ""
 
-read -rp "确认更新? (y/N) " confirm
+if [ "${YES:-0}" = "1" ]; then
+    confirm="y"
+    echo "确认更新? (y/N) y  [auto via YES=1]"
+else
+    read -rp "确认更新? (y/N) " confirm
+fi
 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
     echo "已取消"
     exit 0

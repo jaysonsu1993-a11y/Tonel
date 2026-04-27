@@ -248,25 +248,28 @@ npm run build && npx wrangler pages deploy dist --project-name=tonel-web
 - Port 9006: ws-mixer-proxy UDP receive (server mixed audio return)
 - Check with: `lsof -i :9001 -i :9002 -i :9003 -i :9004 -i :9005 -i :9006`
 
-### Deployment paths
+### Deployment
 
-**Web frontend** (Cloudflare Pages):
+The manual `scp` / `pm2 restart` workflow that used to live here is gone.
+Deploys go through the scripts in [`Git/deploy/`](../deploy/), orchestrated by
+[`Git/scripts/release.sh`](../scripts/release.sh). See:
+
+- [RELEASE.md](RELEASE.md) — the canonical release flow (`release.sh <version>`)
+- [DEPLOYMENT.md](DEPLOYMENT.md) — production topology, filesystem layout, ports
+
+Quick reference:
+
 ```bash
-cd Git/web && npm run build && npx wrangler pages deploy dist --project-name=tonel-web
-```
-Requires `CLOUDFLARE_API_TOKEN` env var (configured in ~/.zshrc).
+# Full release (bump → CHANGELOG → tag → push → deploy → verify)
+Git/scripts/release.sh 1.0.4
 
-**Server scripts** (PM2 runs from `/opt/tonel-server/` -- must cp scripts there after updating):
-```bash
-# After modifying ws-mixer-proxy.js or ws-proxy.js:
-scp Git/web/ws-mixer-proxy.js root@8.163.21.207:/opt/tonel-server/
-ssh root@8.163.21.207 'pm2 restart tonel-ws-mixer-proxy'
+# Just redeploy current HEAD without bumping
+Git/scripts/release.sh deploy-only
 
-# After modifying mixer_server.cpp (build on server, stop→cp→start):
-ssh root@8.163.21.207 'cd /root/Tonel/Git/server && git pull && cmake --build build --target mixer_server && pm2 stop tonel-mixer && cp build/mixer_server /opt/tonel-server/bin/ && pm2 start tonel-mixer'
-
-# start-mixer.sh uses exec to prevent zombie processes
-# PM2 scripts must be copied to /opt/tonel-server/ before pm2 restart
+# Hot-fix one component
+Git/deploy/server.sh --component=binary   # C++ servers
+Git/deploy/server.sh --component=proxy    # ws-proxy / ws-mixer-proxy
+Git/deploy/web.sh                         # Cloudflare Pages
 ```
 
 ### Network architecture
