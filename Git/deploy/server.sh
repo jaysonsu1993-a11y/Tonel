@@ -139,7 +139,11 @@ deploy_ops() {
     log "[ops] apply cloudflared config"
     [ -n "${TONEL_CF_TUNNEL_ID:-}" ] || die "TONEL_CF_TUNNEL_ID not set in .env.deploy"
     local tmp; tmp=$(mktemp)
-    sed "s/\${TUNNEL_ID}/$TONEL_CF_TUNNEL_ID/g" "$GIT_DIR/ops/cloudflared/config.yml.template" > "$tmp"
+    # Substitute ${TUNNEL_ID} only on non-comment lines (preserves docs/examples).
+    awk -v id="$TONEL_CF_TUNNEL_ID" '
+        /^[[:space:]]*#/ { print; next }
+        { gsub(/\$\{TUNNEL_ID\}/, id); print }
+    ' "$GIT_DIR/ops/cloudflared/config.yml.template" > "$tmp"
     rsync_to_remote "$tmp" "/root/.cloudflared/config.yml"
     rm -f "$tmp"
     ssh_exec "systemctl restart cloudflared"

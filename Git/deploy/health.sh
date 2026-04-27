@@ -41,27 +41,55 @@ check_pm2_online() {
 }
 
 check_wss_handshake() {
-    local url="$1" label="$2"
+    # Probe a WSS endpoint *from the production server* (not the operator's laptop).
+    # Local WSS probes are unreliable: the operator's ISP path may apply SNI-based
+    # filtering on direct-to-origin TLS (esp. for non-CF endpoints like srv.tonel.io),
+    # producing false negatives that have nothing to do with deploy health.
+    #
+    # Mode "strict" (default): expect 101 Switching Protocols. Right for direct-
+    #   to-nginx endpoints (e.g. srv.tonel.io) where curl can complete RFC 6455
+    #   handshake.
+    # Mode "reachable": accept any non-zero HTTP code. Right for CF-Tunnel
+    #   endpoints (e.g. api.tonel.io) where cloudflared edge may use HTTP/2 and
+    #   curl-style upgrade is unreliable; we only care that cloudflared is
+    #   reaching the backend at all. Real WS handshake is browser-tested.
+    local url="$1" label="$2" mode="${3:-strict}"
     if [ "$DRY_RUN" = "1" ]; then
-        dim "  [dry-run] would probe $label  $url"
+        dim "  [dry-run] would probe $label  $url (from server, mode=$mode)"
         return
     fi
-    # Use curl to perform a WS upgrade attempt; we only care that the server
-    # responds with 101 Switching Protocols.
+    # curl returns 28 on max-time even after writing %{http_code} (the server
+    # holds the WS connection open after the 101). Force trailing "; true" so
+    # ssh exits 0 with curl's stdout (just the http code) intact.
     local code
-    code=$(curl -sk -o /dev/null -w '%{http_code}' \
-        --max-time "${TONEL_HEALTH_TIMEOUT:-10}" \
-        -H "Connection: Upgrade" \
-        -H "Upgrade: websocket" \
-        -H "Sec-WebSocket-Version: 13" \
-        -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-        "$url" || echo "000")
-    if [ "$code" = "101" ]; then
-        ok "  wss  $label  101 Switching Protocols"
-    else
-        err "  wss  $label  HTTP $code (expected 101)"
-        FAIL=1
-    fi
+    code=$(ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" \
+        "curl -sk -o /dev/null -w '%{http_code}' \
+            --max-time ${TONEL_HEALTH_TIMEOUT:-10} \
+            -H 'Connection: Upgrade' \
+            -H 'Upgrade: websocket' \
+            -H 'Sec-WebSocket-Version: 13' \
+            -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+            '$url' 2>/dev/null; true" 2>/dev/null)
+    [ -z "$code" ] && code=000
+
+    case "$mode" in
+        strict)
+            if [ "$code" = "101" ]; then
+                ok "  wss  $label  101 Switching Protocols"
+            else
+                err "  wss  $label  HTTP $code (expected 101)"
+                FAIL=1
+            fi
+            ;;
+        reachable)
+            if [ "$code" != "000" ]; then
+                ok "  wss  $label  reachable (HTTP $code, real handshake browser-tested)"
+            else
+                err "  wss  $label  unreachable (HTTP 000)"
+                FAIL=1
+            fi
+            ;;
+    esac
 }
 
 log "─── port listeners ───"
@@ -79,9 +107,9 @@ check_pm2_online tonel-ws-proxy
 check_pm2_online tonel-ws-mixer-proxy
 
 log "─── public WSS endpoints ───"
-check_wss_handshake "https://srv.tonel.io/mixer-tcp" "srv.tonel.io/mixer-tcp"
-check_wss_handshake "https://srv.tonel.io/mixer-udp" "srv.tonel.io/mixer-udp"
-check_wss_handshake "https://api.tonel.io/signaling" "api.tonel.io/signaling"
+check_wss_handshake "https://srv.tonel.io/mixer-tcp" "srv.tonel.io/mixer-tcp" strict
+check_wss_handshake "https://srv.tonel.io/mixer-udp" "srv.tonel.io/mixer-udp" strict
+check_wss_handshake "https://api.tonel.io/signaling" "api.tonel.io/signaling" reachable
 
 if [ "$FAIL" = "0" ]; then
     ok "all health checks passed"

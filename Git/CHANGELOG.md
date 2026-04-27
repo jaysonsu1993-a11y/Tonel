@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-04-28
+
+### Fixed (Deploy Tooling)
+- **`Git/deploy/health.sh` WSS probe runs from server, not laptop.** The previous version curled WSS endpoints from wherever the deploy script was invoked, which meant a single ISP path issue between the operator and the production IP could mark a perfectly healthy deploy as failed (TLS reset by peer on `srv.tonel.io` / SNI-based filtering on direct-to-origin hosts). Now `check_wss_handshake` SSH-runs `curl` *on the server* — same network as nginx — so it tests the deploy, not the operator's connectivity. Added `strict` / `reachable` modes: direct endpoints (srv.tonel.io) require `101 Switching Protocols`; CF-Tunnel endpoints (api.tonel.io) only require any non-zero HTTP code, since `curl`'s RFC 6455 upgrade is unreliable through HTTP/2-speaking edges (real WS handshake is browser-tested). Also fixed a `${...} || echo 000` bug that produced `HTTP 101000` when curl printed the code and then exited non-zero on `--max-time`.
+- **`Git/deploy/server.sh` cloudflared substitution preserves comments.** Used `sed s/.../.../g` globally, which replaced the literal `${TUNNEL_ID}` token in the template's docstring with the real id. Switched to an `awk` rule that skips lines starting with `#`, so the template's documentation stays intact when applied.
+- **`Git/deploy/web.sh` uses `npm ci`, not `npm install`.** Plain `npm install` rewrites `package-lock.json` whenever transitive deps shift, leaving the working tree dirty after every web deploy. `npm ci` honors the lockfile strictly. Also passes `--commit-dirty=true` to silence the wrangler warning about the gitignored `dist/` directory (this is a build output, not actual uncommitted source).
+
+### Context (v1.0.3 retrospective)
+The v1.0.3 deploy infrastructure landed correctly but had three small wrinkles surface during the bootstrap of production: the WSS probe drift above, the cloudflared sed eating its own comment, and `npm install` lockfile drift. None affected runtime correctness (the migration to `/opt/tonel/` succeeded — PM2 stayed online on the new layout, nginx + cloudflared applied cleanly, `srv.tonel.io` and `api.tonel.io` continued to serve traffic). v1.0.4 closes the loop on the deploy tooling itself.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/deploy/health.sh` | WSS probe via SSH; `strict`/`reachable` modes; `100 + 000` concat bug fixed |
+| `Git/deploy/server.sh` | cloudflared template substitution via `awk` (skip comments) |
+| `Git/deploy/web.sh` | `npm ci` + wrangler `--commit-dirty=true` |
+
 ## [1.0.3] - 2026-04-28
 
 ### Added (Deploy Infrastructure)
