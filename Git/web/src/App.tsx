@@ -128,7 +128,7 @@ export default function App() {
           </a>
           <ul className="nav-links">
             <li><a href="#features">功能</a></li>
-            <li><a href="https://github.com/jaysonsu1993-a11y/S1-BandRehearsal" target="_blank" rel="noopener">GitHub</a></li>
+            <li><a href="https://github.com/jaysonsu1993-a11y/Tonel" target="_blank" rel="noopener">GitHub</a></li>
           </ul>
         </div>
 
