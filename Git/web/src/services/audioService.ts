@@ -184,7 +184,7 @@ class AudioService {
   private processor:      AudioWorkletNode | ScriptProcessorNode | null = null
   private isCapturing:    boolean = false
   private sequence:       number = 0
-  private timestamp:      number = 0
+  // timestamp removed — now using wall-clock ms in SPA1 header for RTT
   private frameBuffer:    Float32Array[] = []
   private readonly FRAME_WANT_SAMPLES = FRAME_SAMPLES  // 480 @ 48kHz = 10ms
 
@@ -381,7 +381,6 @@ class AudioService {
     if (this.isCapturing || !this.audioContext) return
     this.isCapturing = true
     this.sequence     = 0
-    this.timestamp     = 0
     this.frameBuffer   = []
 
     // Use ScriptProcessorNode for capture — AudioWorklet has known issues
@@ -391,7 +390,9 @@ class AudioService {
 
   private startCaptureWithScriptProcessor(): void {
     if (!this.audioContext) return
-    const node = this.audioContext.createScriptProcessor(4096, 1, 1)
+    // Use small buffer (256 samples ≈ 5.3ms) to match server's 5ms mix timer.
+    // Large buffers cause frame bursts where server drops all but the last frame.
+    const node = this.audioContext.createScriptProcessor(256, 1, 1)
     node.onaudioprocess = (ev) => {
       if (!this.muted) {
         this.onAudioFrame(new Float32Array(ev.inputBuffer.getChannelData(0)))
@@ -405,14 +406,15 @@ class AudioService {
     this.processor = node
   }
 
+  private smoothedLevel = 0
+
   private onAudioFrame(f32: Float32Array): void {
-    // Compute input level from raw capture data using dB scale for visibility
+    // Compute input level: linear RMS with exponential smoothing (matches AppKit 80/20)
     let sum = 0
     for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i]
     const rms = Math.sqrt(sum / f32.length)
-    // Map RMS to 0-1 using dB scale: -60dB → 0, 0dB → 1
-    const db = rms > 0 ? 20 * Math.log10(rms) : -100
-    this.currentLevel = Math.max(0, Math.min(1.0, (db + 60) / 60))
+    this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
+    this.currentLevel = Math.min(1.0, this.smoothedLevel * 3) // scale for visibility
 
     this.frameBuffer.push(f32)
     let total = 0
@@ -437,14 +439,15 @@ class AudioService {
         const frame = this.concatenate(parts)
         const pcm16 = float32ToPcm16(frame)
         // FIX #2: use correct SPA1 format (BE, with userId field)
+        // Embed wall-clock ms (low 16 bits) as timestamp for RTT measurement
+        const nowMs = Math.floor(performance.now()) & 0xFFFF
         const spa1 = buildSpa1Packet(
           pcm16,
           SPA1_CODEC_PCM16,
           this.sequence++,
-          Math.floor(this.timestamp / 100),  // server uses 100ms units
+          nowMs,
           `${this.roomId}:${this.userId}`
         )
-        this.timestamp += FRAME_SAMPLES
         // Send via WebSocket (browser → ws-proxy → ws-mixer-proxy → UDP 9003)
         if (this.audioWs?.readyState === WebSocket.OPEN) {
           this.audioWs.send(spa1)
@@ -577,6 +580,20 @@ class AudioService {
     const header = parseSpa1Header(data)
     if (!header) return
     this.rxCount++
+
+    // RTT from SPA1 timestamp (server echoes our ms low-16 back)
+    if (header.timestamp > 0) {
+      const nowMs = Math.floor(performance.now()) & 0xFFFF
+      let rtt = (nowMs - header.timestamp) & 0xFFFF
+      if (rtt > 10000) rtt = 0  // discard wrap-around glitches
+      if (rtt > 0 && rtt < 10000) {
+        // EMA smoothing: 80% old + 20% new (matches AppKit)
+        this._audioLatency = this._audioLatency < 0
+          ? rtt
+          : Math.round(this._audioLatency * 0.8 + rtt * 0.2)
+        this.latencyCallbacks.forEach(cb => cb(this._audioLatency))
+      }
+    }
 
     switch (header.codec) {
       case SPA1_CODEC_PCM16:
