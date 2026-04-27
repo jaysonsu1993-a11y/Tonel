@@ -422,36 +422,14 @@ class AudioService {
       if (used >= this.FRAME_WANT_SAMPLES) {
         const frame = this.concatenate(parts)
 
-        // DEBUG: verify frame has non-zero data before encoding
-        if (this.txCount < 5) {
-          let fMax = 0
-          for (let k = 0; k < frame.length; k++) if (Math.abs(frame[k]) > fMax) fMax = Math.abs(frame[k])
-          console.log(`[Audio] frame[0..3]=${frame[0].toFixed(6)},${frame[1].toFixed(6)},${frame[2].toFixed(6)},${frame[3].toFixed(6)} max=${fMax.toFixed(6)}`)
-        }
-
         const pcm16 = float32ToPcm16(frame)
-
-        // DEBUG: verify PCM16 has non-zero data
-        if (this.txCount < 5) {
-          const dv = new DataView(pcm16.buffer)
-          console.log(`[Audio] pcm16[0..3]=${dv.getInt16(0,true)},${dv.getInt16(2,true)},${dv.getInt16(4,true)},${dv.getInt16(6,true)}`)
-        }
-
-        const nowMs = 0
         const spa1 = buildSpa1Packet(
           pcm16,
           SPA1_CODEC_PCM16,
           this.sequence++,
-          nowMs,
+          0,
           `${this.roomId}:${this.userId}`
         )
-
-        // DEBUG: verify SPA1 packet data section at offset 76
-        if (this.txCount < 5) {
-          const pktView = new DataView(spa1)
-          console.log(`[Audio] spa1[76..79]=${pktView.getInt16(76,true)},${pktView.getInt16(78,true)} len=${spa1.byteLength}`)
-        }
-
         if (this.audioWs?.readyState === WebSocket.OPEN) {
           this.audioWs.send(spa1)
           this.txCount++
