@@ -171,8 +171,7 @@ class AudioService {
   private _audioLatency:    number = -1
   private latencyCallbacks: Array<(ms: number) => void> = []
 
-  // Playback
-  private audioContextPlay: AudioContext | null = null
+  // Playback (shares audioContext with capture to avoid autoplay policy issues)
   private masterGain:       GainNode | null = null
 
   // Capture pipeline
@@ -229,17 +228,18 @@ class AudioService {
   private playbackWorklet: AudioWorkletNode | null = null
 
   private async initPlayback(): Promise<void> {
-    this.audioContextPlay = new AudioContext({ sampleRate: SAMPLE_RATE })
-    // P0-2 fix: Resume AudioContext to unfreeze from browser autoplay policy
-    await this.audioContextPlay.resume()
-    this.masterGain = this.audioContextPlay.createGain()
+    // Reuse the capture AudioContext for playback — a single context avoids
+    // browser autoplay policy issues (the capture context is already running
+    // because getUserMedia granted permission).
+    if (!this.audioContext) return
+    this.masterGain = this.audioContext.createGain()
     this.masterGain.gain.value = 1.0
-    this.masterGain.connect(this.audioContextPlay.destination)
+    this.masterGain.connect(this.audioContext.destination)
     await this.initPlaybackWorklet()
   }
 
   private async initPlaybackWorklet(): Promise<void> {
-    if (!this.audioContextPlay || !this.masterGain) return
+    if (!this.audioContext || !this.masterGain) return
 
     // Adaptive ring buffer: max 8 frames (80ms), target starts at 2 frames (20ms)
     // Target is updated dynamically based on network jitter measurements.
@@ -310,9 +310,9 @@ class AudioService {
     const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))
 
     try {
-      await this.audioContextPlay.audioWorklet.addModule(url)
-      if (!this.audioContextPlay || !this.masterGain) return
-      this.playbackWorklet = new AudioWorkletNode(this.audioContextPlay, 'playback-processor')
+      await this.audioContext.audioWorklet.addModule(url)
+      if (!this.audioContext || !this.masterGain) return
+      this.playbackWorklet = new AudioWorkletNode(this.audioContext, 'playback-processor')
       this.playbackWorklet.connect(this.masterGain)
     } catch (err) {
       console.warn('[Audio] Playback worklet failed, using legacy mode:', err)
@@ -641,7 +641,9 @@ class AudioService {
   // ── Audio playback ─────────────────────────────────────────────────────────
 
   private playPcm16(data: ArrayBuffer): void {
-    if (!this.audioContextPlay || !this.masterGain) return
+    if (!this.audioContext || !this.masterGain) return
+    // Ensure AudioContext is running (may be suspended by browser policy)
+    if (this.audioContext.state === 'suspended') this.audioContext.resume()
 
     // Record arrival time and update adaptive buffer depth
     const now = performance.now()
@@ -661,14 +663,14 @@ class AudioService {
     }
 
     // Legacy fallback: create buffer + source per frame
-    const buffer = this.audioContextPlay.createBuffer(
+    const buffer = this.audioContext.createBuffer(
       CHANNELS,
       f32.length,
       SAMPLE_RATE
     )
     buffer.getChannelData(0).set(f32)
 
-    const src = this.audioContextPlay.createBufferSource()
+    const src = this.audioContext.createBufferSource()
     src.buffer = buffer
     src.connect(this.masterGain)
     src.start(0)
@@ -796,7 +798,7 @@ class AudioService {
   /** Switch audio output device (speaker/headphones) */
   async setOutputDevice(deviceId: string): Promise<void> {
     // Use setSinkId on the playback AudioContext (Chrome 110+, Edge, Opera)
-    const ctx = this.audioContextPlay as any
+    const ctx = this.audioContext as any
     if (ctx && typeof ctx.setSinkId === 'function') {
       await ctx.setSinkId(deviceId)
     }
@@ -867,12 +869,12 @@ class AudioService {
     }
     this.mediaStream?.getAudioTracks().forEach(t => t.stop())
     this.audioContext?.close()
-    this.audioContextPlay?.close()
+    this.audioContext?.close()
     this.controlWs?.close()
     this.audioWs?.close()
     this.mediaStream       = null
     this.audioContext      = null
-    this.audioContextPlay  = null
+    this.audioContext  = null
     this.analyser          = null
     this.source            = null
     this.controlWs         = null

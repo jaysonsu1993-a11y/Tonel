@@ -194,9 +194,13 @@ cmake -S . -B build && cmake --build build
 cd Git/server
 cmake -S . -B build && cmake --build build
 
-# Web
+# Web (dev)
 cd Git/web
 npm install && npm run dev
+
+# Web (deploy to Cloudflare Pages)
+cd Git/web
+npm run build && npx wrangler pages deploy dist --project-name=tonel-web
 ```
 
 ## Troubleshooting
