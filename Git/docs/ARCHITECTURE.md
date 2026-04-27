@@ -138,8 +138,8 @@ Automatic: P2P is preferred, switches to Mixer when:
 │  └─────────────────────┘  └───────────────────────┘  │
 │                                                      │
 │  ┌─────────────────────┐  ┌───────────────────────┐  │
-│  │  ws-proxy.js         │  │ webrtc-mixer-proxy.cjs│  │
-│  │  (WS :9004 → TCP)    │  │ (WebRTC DC → TCP/UDP) │  │
+│  │  ws-proxy.js         │  │ ws-mixer-proxy.js     │  │
+│  │  (WS :9004 → TCP)    │  │ (WS :9005 → TCP/UDP) │  │
 │  │  Web client signaling│  │ Web client mixer audio│  │
 │  └─────────────────────┘  └───────────────────────┘  │
 │                                                      │
@@ -185,8 +185,6 @@ Automatic: P2P is preferred, switches to Mixer when:
 | 9004 | WebSocket | Web signaling proxy (ws-proxy.js) |
 | 9005 | WebSocket | Web mixer proxy (ws-mixer-proxy.js, TCP control + UDP audio relay) |
 | 9006 | UDP | ws-mixer-proxy UDP receive port (server mixed audio return) |
-| 9007 | UDP | WebRTC mixer proxy receive port (webrtc-mixer-proxy.cjs) |
-| 10000-10100 | UDP | WebRTC DTLS/SCTP (browser ↔ mixer proxy) |
 
 ## Deployment Architecture (2026-04)
 
@@ -207,6 +205,8 @@ Automatic: P2P is preferred, switches to Mixer when:
                     │  (Debian 12)       │
                     │                    │
                     │  nginx :443 (SSL)  │
+                    │  Let's Encrypt cert│
+                    │  (certbot-dns-cf)  │
                     │  signaling :9001   │
                     │  mixer     :9002   │
                     │  audio     :9003   │
@@ -239,19 +239,21 @@ Automatic: P2P is preferred, switches to Mixer when:
 | Web (Trial) | https://tonel.io | wss://api.tonel.io/signaling (CF Tunnel) | **wss://srv.tonel.io/mixer-tcp + /mixer-udp (direct)** |
 | JUCE (Legacy) | — | TCP direct to config host | Direct UDP/TCP |
 
-### WebRTC Mixer Connection Flow (Web Client)
+### WebSocket Mixer Connection Flow (Web Client)
 
 ```
-1. Browser creates RTCPeerConnection + DataChannels ("control", "audio")
-   - ICE servers: stun.qq.com:3478 (primary), stun.l.google.com:19302 (fallback)
-   - connectMixer() cleans up any existing PC before creating new one
-2. Browser sends SDP offer via signaling WS -> CF Tunnel -> signaling:9001
-3. Signaling server relays offer to webrtc-mixer-proxy (registered as __mixer__)
-4. Proxy uses onLocalDescription callback (node-datachannel) to send answer SDP
-   (single answer only — no sync fallback, prevents duplicate setRemoteDescription)
-5. Browser <- -> Server: direct DTLS/SCTP over UDP (port 10000-10100)
-6. "control" DataChannel (reliable) -> TCP:9002 (MIXER_JOIN, etc.)
-7. "audio" DataChannel (unreliable, maxRetransmits=0) -> UDP:9003 (SPA1 packets)
+1. Browser connects to wss://srv.tonel.io/mixer-tcp (control) and /mixer-udp (audio)
+   - srv.tonel.io: DNS-only A record to 8.163.21.207, Let's Encrypt SSL via certbot-dns-cloudflare
+   - nginx on server terminates WSS and proxies to ws-mixer-proxy on :9005
+2. ws-mixer-proxy creates TCP connection to mixer_server:9002 only for /mixer-tcp
+3. /mixer-tcp WebSocket ↔ TCP:9002 (MIXER_JOIN, PING/PONG, level data)
+4. /mixer-udp WebSocket ↔ UDP:9003 (SPA1 audio packets)
+5. Audio capture: ScriptProcessorNode (AudioWorklet had zero-data issues with MediaStreamAudioSourceNode)
+6. PCM16 codec: encode Math.round(s * 32767) LE, decode getInt16 LE / 32768.0 (matches AppKit)
+7. Direct frame sending from ScriptProcessor (no frameBuffer accumulation - causes zero-data bug)
+8. Playback: BufferSource scheduling with src.start(0) immediate play
+9. Level metering: linear RMS + 80/20 EMA smoothing, single-bar gradient LedMeter with dB scale (-60dB)
+10. Auto-reconnect on audio WebSocket close
 ```
 
 ### Signaling Reliability
@@ -259,8 +261,8 @@ Automatic: P2P is preferred, switches to Mixer when:
 - **Server heartbeat**: signaling_server checks client timeouts every 30s (TIMEOUT = 60s)
 - **Browser heartbeat**: signalService sends HEARTBEAT every 10s to prevent CF Tunnel idle disconnect
 - **Auto-reconnect**: signalService reconnects with 3s delay on WebSocket close
-- **PC cleanup**: connectMixer() closes existing PeerConnection before creating new one,
-  preventing "Called in wrong state: stable" errors during signal reconnect
+- **Mixer PING/PONG**: mixer_server handles PING on TCP control channel, responds with PONG
+- **Audio WS auto-reconnect**: Web client auto-reconnects mixer WebSocket on close
 
 ### Room Lifecycle
 

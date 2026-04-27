@@ -22,7 +22,7 @@ git push origin v0.1.0
 
 ### Current Version
 
-All versions are in sync at `0.3.2`. Update all version numbers together when releasing:
+All versions are in sync at `1.0.0`. Update all version numbers together when releasing:
 
 | Location | File |
 |---|---|
@@ -215,14 +215,16 @@ npm run build && npx wrangler pages deploy dist --project-name=tonel-web
 - Check magic bytes: `0x53415031`
 - Verify header size = 76 bytes (P1-1; legacy spa1.h uses 44 bytes)
 - Verify dataSize ≤ 1356 bytes
-### WebRTC connection issues
+### WebSocket mixer connection issues
 
-- Ensure UDP 10000-10100 is open in both ufw AND Alibaba Cloud security group
-- Check STUN server reachability from China (`stun:stun.qq.com:3478`)
-- Verify webrtc-mixer-proxy is registered: check signaling server logs for `[Mixer] WebRTC mixer proxy registered`
-- Browser DevTools -> `chrome://webrtc-internals` for detailed ICE/DTLS diagnostics
-- **"Called in wrong state: stable"**: Browser's RTCPeerConnection was not cleaned up before receiving new answer. Fixed in connectMixer() -- old PC is closed before creating new one.
-- **"Failed to set remote answer sdp"**: Proxy sent answer before ICE candidates were ready. Fixed by using `onLocalDescription` callback in node-datachannel.
+- Verify srv.tonel.io resolves to 8.163.21.207 (DNS-only A record, grey cloud, NOT proxied by Cloudflare)
+- Check nginx is running and proxying WSS for srv.tonel.io to ws-mixer-proxy on :9005
+- Verify Let's Encrypt SSL cert is valid: `sudo certbot certificates`
+- Check ws-mixer-proxy is running: `pm2 status tonel-ws-mixer-proxy`
+- ws-mixer-proxy only creates TCP connection for /mixer-tcp path (not /mixer-udp)
+- **Zero audio data from ScriptProcessorNode**: Do NOT accumulate frames in a buffer before sending -- send directly from the onaudioprocess callback
+- **AudioWorklet zero-data bug**: MediaStreamAudioSourceNode produces zero-filled buffers in AudioWorklet; use ScriptProcessorNode instead
+- **Input/output device selection**: Use getUserMedia for input, AudioContext.setSinkId for output
 
 ### WebSocket frequent disconnects (every ~13s)
 
@@ -244,9 +246,7 @@ npm run build && npx wrangler pages deploy dist --project-name=tonel-web
 - Port 9004: ws-proxy.js (WebSocket signaling proxy, via CF Tunnel)
 - Port 9005: ws-mixer-proxy.js (WebSocket mixer proxy, direct via srv.tonel.io)
 - Port 9006: ws-mixer-proxy UDP receive (server mixed audio return)
-- Port 9007: webrtc-mixer-proxy UDP receive
-- Port 10000-10100: WebRTC DTLS/SCTP (browser <-> mixer proxy)
-- Check with: `lsof -i :9001 -i :9002 -i :9003 -i :9004 -i :9005 -i :9007`
+- Check with: `lsof -i :9001 -i :9002 -i :9003 -i :9004 -i :9005 -i :9006`
 
 ### Deployment paths
 
@@ -256,14 +256,17 @@ cd Git/web && npm run build && npx wrangler pages deploy dist --project-name=ton
 ```
 Requires `CLOUDFLARE_API_TOKEN` env var (configured in ~/.zshrc).
 
-**Server scripts** (PM2 runs from `/opt/tonel-server/`):
+**Server scripts** (PM2 runs from `/opt/tonel-server/` -- must cp scripts there after updating):
 ```bash
 # After modifying ws-mixer-proxy.js or ws-proxy.js:
 scp Git/web/ws-mixer-proxy.js root@8.163.21.207:/opt/tonel-server/
 ssh root@8.163.21.207 'pm2 restart tonel-ws-mixer-proxy'
 
-# After modifying mixer_server.cpp:
+# After modifying mixer_server.cpp (build on server, stop→cp→start):
 ssh root@8.163.21.207 'cd /root/Tonel/Git/server && git pull && cmake --build build --target mixer_server && pm2 stop tonel-mixer && cp build/mixer_server /opt/tonel-server/bin/ && pm2 start tonel-mixer'
+
+# start-mixer.sh uses exec to prevent zombie processes
+# PM2 scripts must be copied to /opt/tonel-server/ before pm2 restart
 ```
 
 ### Network architecture
