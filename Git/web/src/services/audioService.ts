@@ -387,6 +387,7 @@ class AudioService {
   }
 
   private smoothedLevel = 0
+  private playTime = 0  // next scheduled playback time (AudioContext.currentTime)
 
   private onAudioFrame(f32: Float32Array): void {
     // Input level: linear RMS + EMA smoothing (AppKit AudioBridge pattern)
@@ -633,9 +634,7 @@ class AudioService {
     // Ensure AudioContext is running (may be suspended by browser policy)
     if (this.audioContext.state === 'suspended') this.audioContext.resume()
 
-    // Record arrival time and update adaptive buffer depth
-    const now = performance.now()
-    this.updateAdaptiveBufferDepth(now)
+    this.updateAdaptiveBufferDepth(performance.now())
 
     const header = parseSpa1Header(data)
     if (!header || header.dataSize === 0) return
@@ -644,18 +643,17 @@ class AudioService {
     const f32 = pcm16ToFloat32(pcm)
 
     this.playCount++
-    // Worklet ring buffer path (handles jitter, matches AppKit's ring buffer approach)
-    if (this.playbackWorklet) {
-      this.playbackWorklet.port.postMessage(f32, [f32.buffer])
-      return
-    }
-    // Legacy fallback
+    // Schedule BufferSource playback — simple and reliable
     const buffer = this.audioContext.createBuffer(CHANNELS, f32.length, SAMPLE_RATE)
     buffer.getChannelData(0).set(f32)
     const src = this.audioContext.createBufferSource()
     src.buffer = buffer
     src.connect(this.masterGain)
-    src.start(0)
+    const ctxNow = this.audioContext.currentTime
+    if (this.playTime < ctxNow) this.playTime = ctxNow + 0.01
+    if (this.playTime > ctxNow + 0.5) this.playTime = ctxNow + 0.01
+    src.start(this.playTime)
+    this.playTime += f32.length / SAMPLE_RATE
   }
 
   /**
