@@ -591,11 +591,10 @@ class AudioService {
     if (header.timestamp > 0) {
       const now16 = Date.now() & 0xFFFF
       const rtt = (now16 - header.timestamp) & 0xFFFF  // unsigned 16-bit subtract
-      if (rtt < 10000) {  // discard wrap-around glitches (>10s)
+      if (rtt > 0 && rtt < 5000) {  // discard wrap-around and >5s glitches
         const prev = this._audioLatency
         // AppKit: (prev * 4 + rtt) / 5  — integer EMA, 80% old + 20% new
         this._audioLatency = (prev <= 0) ? rtt : Math.floor((prev * 4 + rtt) / 5)
-        this.latencyCallbacks.forEach(cb => cb(this._audioLatency))
       }
     }
 
@@ -631,11 +630,7 @@ class AudioService {
             }
           }
         } else if (msg.type === 'PONG') {
-          if (this.pingSentAt > 0) {
-            this._audioLatency = Math.round(performance.now() - this.pingSentAt)
-            this.pingSentAt = 0
-            this.latencyCallbacks.forEach(cb => cb(this._audioLatency))
-          }
+          // PONG received — latency is measured via SPA1 timestamps only (matches AppKit)
         }
       } catch (_) {
         console.warn('[Mixer] Non-JSON string:', data)
