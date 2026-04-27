@@ -36,10 +36,16 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     if (outputs.length > 0 && !selectedOutput) setSelectedOutput(outputs[0].deviceId)
   }, [selectedInput, selectedOutput])
 
-  // Subscribe to audio latency updates (via WebRTC DataChannel, not signaling)
+  // Poll audio levels and latency directly from audioService (avoids callback chain issues)
   useEffect(() => {
-    const unsub = audioService.onLatency((ms) => setLatency(ms))
-    return unsub
+    let raf: number
+    const poll = () => {
+      setSelfLevel(audioService.currentLevel)
+      setLatency(audioService.audioLatency)
+      raf = requestAnimationFrame(poll)
+    }
+    raf = requestAnimationFrame(poll)
+    return () => cancelAnimationFrame(raf)
   }, [])
 
   useEffect(() => {
@@ -52,7 +58,6 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         setAudioDebug('init...')
         await audioService.init()
         refreshDevices()  // enumerate devices after mic permission granted
-        audioService.onLevel((l) => setSelfLevel(l))
         audioService.onPeerLevel((uid, level) => {
           setPeerLevels(prev => ({ ...prev, [uid]: level }))
         })

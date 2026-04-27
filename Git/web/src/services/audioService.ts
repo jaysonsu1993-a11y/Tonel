@@ -150,7 +150,7 @@ class AudioService {
   private mediaStream:       MediaStream | null = null
   private analyser:         AnalyserNode | null = null
   private source:           MediaStreamAudioSourceNode | null = null
-  private levelCallback:    AudioLevelCallback | null = null
+  // levelCallback removed — UI polls currentLevel directly via RAF
   private animationFrameId: number | null = null
   private muted:            boolean = false
   public  currentLevel:     number = 0
@@ -343,19 +343,12 @@ class AudioService {
 
   private startLevelMonitoring(): void {
     // Level is computed from ScriptProcessor data in onAudioFrame().
-    // This RAF loop just pushes the latest value to the UI callback at display rate.
-    const update = () => {
-      if (this.levelCallback && this.currentLevel > 0) {
-        this.levelCallback(this.currentLevel)
-      }
-      this.animationFrameId = requestAnimationFrame(update)
-    }
-    this.animationFrameId = requestAnimationFrame(update)
+    // UI polls audioService.currentLevel directly via requestAnimationFrame.
   }
 
   onLevel(cb: AudioLevelCallback): void {
-    this.levelCallback = cb
-    console.log('[Audio] onLevel callback registered')
+    // Legacy: UI now polls currentLevel directly. Kept for compatibility.
+    void cb
   }
 
   /** Set master output gain (0-1 linear). Controls playback volume. */
