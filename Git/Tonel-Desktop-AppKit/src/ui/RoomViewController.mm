@@ -3,6 +3,7 @@
 #import "S1RoundedButton.h"
 #import "S1Theme.h"
 #include "../AppState.h"
+#import "../bridge/MixerBridge.h"
 
 // ── ParticipantCardView ────────────────────────────────────────────────────
 
@@ -449,8 +450,9 @@
     // Level meter
     _levelMeter.level = state.getInputLevel();
 
-    // Latency
-    int lat = state.getEstimatedLatencyMs();
+    // Latency — prefer audio RTT from MixerBridge over signaling heartbeat
+    int audioRtt = [[MixerBridge shared] audioRttMs];
+    int lat = (audioRtt > 0) ? audioRtt : state.getEstimatedLatencyMs();
     _latencyLabel.stringValue = [NSString stringWithFormat:@"%d ms", lat];
 
     // Connection state

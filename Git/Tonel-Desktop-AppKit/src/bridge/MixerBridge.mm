@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstring>
 #include <string>
+#include <mach/mach_time.h>
 
 // ── SPA1 P1-1 header (76 bytes) ─────────────────────────────────────────────
 
@@ -80,6 +81,16 @@ struct RingBuffer {
     }
 };
 
+// ── Timestamp helper (ms low 16 bits) ────────────────────────────────────
+
+static uint16_t currentMsLow16() {
+    static mach_timebase_info_data_t tb = {0, 0};
+    if (tb.denom == 0) mach_timebase_info(&tb);
+    uint64_t ns = mach_absolute_time() * tb.numer / tb.denom;
+    uint64_t ms = ns / 1000000;
+    return static_cast<uint16_t>(ms & 0xFFFF);
+}
+
 // ── Mixer server address ─────────────────────────────────────────────────────
 
 static const char* kMixerHost    = "8.163.21.207";
@@ -104,6 +115,7 @@ static const int   kMixerUDPPort = 9003;
 
     std::atomic<uint16_t> _sequence;
     std::atomic<bool>     _connected;
+    std::atomic<int>      _audioRtt;  // audio round-trip time in ms
 
     struct sockaddr_in _mixerUDPAddr;
 }
@@ -121,6 +133,7 @@ static const int   kMixerUDPPort = 9003;
         _udpSock      = -1;
         _sequence     = 0;
         _connected    = false;
+        _audioRtt     = 0;
         _connectQueue = dispatch_queue_create("com.tonel.mixer.connect", DISPATCH_QUEUE_SERIAL);
         _udpRecvQueue = dispatch_queue_create("com.tonel.mixer.udp.recv", DISPATCH_QUEUE_SERIAL);
     }
@@ -189,7 +202,7 @@ static const int   kMixerUDPPort = 9003;
 
     h->magic     = htonl(kSPA1Magic);
     h->sequence  = htons(seq);
-    h->timestamp = 0;
+    h->timestamp = htons(currentMsLow16());
     std::memset(h->userId, 0, 64);
     std::strncpy(reinterpret_cast<char*>(h->userId), _userIdKey.c_str(), 63);
     h->codec     = 0;   // PCM16
@@ -205,6 +218,10 @@ static const int   kMixerUDPPort = 9003;
 
 - (int)readMixedAudio:(float*)output maxSamples:(int)maxSamples {
     return _rxRing.read(output, maxSamples);
+}
+
+- (int)audioRttMs {
+    return _audioRtt.load(std::memory_order_relaxed);
 }
 
 // ── Internal: connection sequence ────────────────────────────────────────────
@@ -339,8 +356,22 @@ static const int   kMixerUDPPort = 9003;
 
         uint8_t  codec   = h->codec;
         uint16_t dataSz  = ntohs(h->dataSize);
+        uint16_t rxTs    = ntohs(h->timestamp);
 
         if (codec == 0xFF) return;  // handshake echo, ignore
+
+        // Compute audio RTT from timestamp (ms low 16 bits)
+        if (rxTs != 0) {
+            uint16_t now16 = currentMsLow16();
+            int rtt = (int)((now16 - rxTs) & 0xFFFF);
+            // Sanity: discard if > 10s (wrap-around artifact)
+            if (rtt < 10000) {
+                // EMA smoothing: 80% old + 20% new
+                int prev = strongSelf->_audioRtt.load(std::memory_order_relaxed);
+                int smoothed = (prev == 0) ? rtt : (prev * 4 + rtt) / 5;
+                strongSelf->_audioRtt.store(smoothed, std::memory_order_relaxed);
+            }
+        }
         if (static_cast<size_t>(n) < kSPA1HeaderSize + dataSz) return;
 
         const uint8_t* audioData = buf + kSPA1HeaderSize;

@@ -23,6 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)isConnected;
 
+/// Audio round-trip latency in milliseconds (measured via SPA1 timestamp).
+- (int)audioRttMs;
+
 /// Called from audio thread: send mono PCM16 samples to mixer via UDP.
 - (void)sendAudioSamples:(const int16_t*)samples count:(int)count;
 

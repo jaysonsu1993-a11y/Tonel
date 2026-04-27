@@ -151,6 +151,7 @@
 |------|------|-------|
 | 2026-04-23 | 80cc569 | P0: Web + Desktop 自适应抖动缓冲 |
 | 2026-04-23 | (this) | P1+P2: 5ms帧 + 定时混音 + Opus复杂度 + transferable |
+| 2026-04-27 | — | P1-2: 音频 RTT 测量替代信令 heartbeat 延迟显示 |
 
 ---
 
@@ -174,3 +175,38 @@
 - 5ms帧使包率提升至200pps/用户，局域网CPU和网络开销增加约2倍
 - 定时混音引入最多5ms的定时器等待延迟
 - transferable ArrayBuffer 需要浏览器支持（现代浏览器均支持）
+
+---
+
+## 五 音频 RTT 测量（P1-2）
+
+> 日期: 2026-04-27
+
+### 问题
+
+UI 延迟显示基于信令 WebSocket 的 HEARTBEAT RTT（~500ms），与实际音频 UDP 通路延迟严重不符，误导用户。
+
+### 方案
+
+复用 SPA1 头部已有的 `timestamp` 字段（u16 BE，偏移 6-7），实现零额外开销的音频端到端 RTT 测量：
+
+1. **客户端发送** (`MixerBridge.mm`): `timestamp = htons(currentTimeMs & 0xFFFF)`
+2. **服务器透传** (`mixer_server.cpp`): `Room::latest_timestamp` 记录最近收到的值，`broadcast_mixed_audio()` 写入返回包
+3. **客户端接收** (`MixerBridge.mm`): `RTT = (now16 - rxTs) & 0xFFFF`，EMA 平滑（α=0.2），丢弃 >10s 异常值
+4. **UI 显示** (`RoomViewController.mm`): 优先使用 `MixerBridge.audioRttMs`，无数据时 fallback 到信令 heartbeat
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `Tonel-Desktop-AppKit/src/bridge/MixerBridge.h` | 新增 `audioRttMs` 方法 |
+| `Tonel-Desktop-AppKit/src/bridge/MixerBridge.mm` | 发送写入 timestamp，接收计算 RTT |
+| `Tonel-Desktop-AppKit/src/ui/RoomViewController.mm` | UI 优先显示音频 RTT |
+| `server/src/mixer_server.h` | Room 新增 `latest_timestamp` 字段 |
+| `server/src/mixer_server.cpp` | 接收存储 timestamp，广播时透传 |
+
+### 收益
+
+- 延迟显示反映真实音频端到端延迟
+- 零额外带宽（复用已有空闲字段）
+- 零额外处理开销（仅一次时钟读取 + 减法）

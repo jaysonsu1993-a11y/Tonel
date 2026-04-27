@@ -563,6 +563,7 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
         // Update mixer track and UDP endpoint while still holding the lock.
         target_room->mixer.addTrack(user_id, float_buf.data(), frame_count);
         target_room->pending_mix = true;
+        target_room->latest_timestamp = ntohs(pkt->timestamp);
         auto it = target_room->users.find(user_id);
         if (it != target_room->users.end()) {
             it->second.addr = client_addr;
@@ -726,7 +727,7 @@ void MixerServer::handle_mix_timer() {
 
         room->pending_mix = false;
         mix_sequence_++;
-        broadcast_mixed_audio(room, mix_sequence_, 0);
+        broadcast_mixed_audio(room, mix_sequence_, room->latest_timestamp);
 
         if (send_levels) {
             broadcast_levels(room);

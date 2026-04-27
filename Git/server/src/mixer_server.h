@@ -104,6 +104,7 @@ private:
         std::unordered_map<std::string, UserEndpoint> users;
         bool recording = false;  // true while this room is being recorded
         bool pending_mix = false; // true when new audio arrived since last mix
+        uint16_t latest_timestamp = 0; // pass-through for client RTT measurement
     };
 
     // ── Room map access ──────────────────────────────────────
