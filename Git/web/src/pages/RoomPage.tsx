@@ -40,7 +40,8 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   useEffect(() => {
     const fast = setInterval(() => {
       setSelfLevel(audioService.currentLevel)
-      setLatency(audioService.audioLatency)
+      const lat = audioService.audioLatency
+      if (lat >= 0 && lat < 5000) setLatency(lat)  // guard against runaway values
     }, 100)
     const slow = setInterval(() => {
       setDbg(`tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ws=${audioService.audioWsState}`)
@@ -195,10 +196,20 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
       </header>
       <div style={{fontSize:'11px',color:'#0f0',padding:'4px 24px',background:'#000',fontFamily:'monospace'}}>
-        {dbg} | selfLvl={selfLevel.toFixed(4)} peak={selfPeak.toFixed(4)}
-        <span style={{display:'inline-block',width:100,height:10,background:'#333',marginLeft:8,position:'relative'}}>
-          <span style={{display:'block',height:'100%',width:`${Math.min(100,selfLevel*100*30)}%`,background:selfLevel>0.7?'red':selfLevel>0.3?'yellow':'#0f0'}}/>
-        </span>
+        {dbg}
+        <button style={{marginLeft:12,fontSize:10,padding:'2px 8px'}} onClick={() => {
+          // Test tone: 440Hz for 0.5s — verifies AudioContext output works
+          const ctx = (audioService as any).audioContext
+          if (!ctx) return
+          const osc = ctx.createOscillator()
+          const gain = ctx.createGain()
+          osc.frequency.value = 440
+          gain.gain.value = 0.3
+          osc.connect(gain)
+          gain.connect(ctx.destination)
+          osc.start()
+          osc.stop(ctx.currentTime + 0.5)
+        }}>TEST TONE</button>
       </div>
 
       <div className="room-content">

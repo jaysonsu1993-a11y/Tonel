@@ -420,9 +420,7 @@ class AudioService {
         const frame = this.concatenate(parts)
         const pcm16 = float32ToPcm16(frame)
         // FIX #2: use correct SPA1 format (BE, with userId field)
-        // Embed wall-clock ms (low 16 bits) for RTT — use Date.now() for absolute time
-        // (matches AppKit's mach_absolute_time → ms conversion)
-        const nowMs = Date.now() & 0xFFFF
+        const nowMs = 0  // RTT disabled for now
         const spa1 = buildSpa1Packet(
           pcm16,
           SPA1_CODEC_PCM16,
@@ -586,17 +584,8 @@ class AudioService {
     if (!header) return
     this.rxCount++
 
-    // RTT from SPA1 timestamp — matches AppKit MixerBridge exactly:
-    // Server echoes client's ms-low-16 timestamp back in mixed audio
-    if (header.timestamp > 0) {
-      const now16 = Date.now() & 0xFFFF
-      const rtt = (now16 - header.timestamp) & 0xFFFF  // unsigned 16-bit subtract
-      if (rtt > 0 && rtt < 5000) {  // discard wrap-around and >5s glitches
-        const prev = this._audioLatency
-        // AppKit: (prev * 4 + rtt) / 5  — integer EMA, 80% old + 20% new
-        this._audioLatency = (prev <= 0) ? rtt : Math.floor((prev * 4 + rtt) / 5)
-      }
-    }
+    // TODO: RTT measurement disabled — was causing page freeze due to
+    // timestamp calculation issues. Will re-implement with proper sequenced PING.
 
     switch (header.codec) {
       case SPA1_CODEC_PCM16:
