@@ -400,6 +400,7 @@ class AudioService {
   }
 
   private smoothedLevel = 0
+  private nextPlayTime = 0
 
   private onAudioFrame(f32: Float32Array): void {
     // Compute input level: linear RMS with exponential smoothing (matches AppKit 80/20)
@@ -648,15 +649,8 @@ class AudioService {
     const pcm = parseSpa1Body(data)
     const f32 = pcm16ToFloat32(pcm)
 
-    // Ring buffer path: send float32 samples to playback worklet
-    // Use transferable ArrayBuffer to avoid copy and reduce GC pressure
-    if (this.playbackWorklet) {
-      this.playbackWorklet.port.postMessage(f32, [f32.buffer])
-      this.playCount++
-      return
-    }
-
-    // Legacy fallback: create buffer + source per frame
+    // Direct buffer playback (simpler, more reliable than worklet ring buffer)
+    this.playCount++
     const buffer = this.audioContext.createBuffer(
       CHANNELS,
       f32.length,
@@ -667,7 +661,12 @@ class AudioService {
     const src = this.audioContext.createBufferSource()
     src.buffer = buffer
     src.connect(this.masterGain)
-    src.start(0)
+    // Schedule playback to maintain continuous stream without gaps/overlaps
+    const frameDuration = f32.length / SAMPLE_RATE
+    const ctxNow = this.audioContext.currentTime
+    if (this.nextPlayTime < ctxNow) this.nextPlayTime = ctxNow
+    src.start(this.nextPlayTime)
+    this.nextPlayTime += frameDuration
   }
 
   /**

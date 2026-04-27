@@ -36,16 +36,13 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     if (outputs.length > 0 && !selectedOutput) setSelectedOutput(outputs[0].deviceId)
   }, [selectedInput, selectedOutput])
 
-  // Poll audio levels and latency directly from audioService (avoids callback chain issues)
+  // Poll audio levels and latency via setInterval (more reliable than RAF/callbacks)
   useEffect(() => {
-    let raf: number
-    const poll = () => {
+    const id = setInterval(() => {
       setSelfLevel(audioService.currentLevel)
       setLatency(audioService.audioLatency)
-      raf = requestAnimationFrame(poll)
-    }
-    raf = requestAnimationFrame(poll)
-    return () => cancelAnimationFrame(raf)
+    }, 50)
+    return () => clearInterval(id)
   }, [])
 
   useEffect(() => {
