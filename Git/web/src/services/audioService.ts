@@ -406,11 +406,13 @@ class AudioService {
   }
 
   private onAudioFrame(f32: Float32Array): void {
-    // Compute input level from raw capture data (ScriptProcessor is reliable)
+    // Compute input level from raw capture data using dB scale for visibility
     let sum = 0
     for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i]
     const rms = Math.sqrt(sum / f32.length)
-    this.currentLevel = Math.min(1.0, rms * 5)
+    // Map RMS to 0-1 using dB scale: -60dB → 0, 0dB → 1
+    const db = rms > 0 ? 20 * Math.log10(rms) : -100
+    this.currentLevel = Math.max(0, Math.min(1.0, (db + 60) / 60))
 
     this.frameBuffer.push(f32)
     let total = 0

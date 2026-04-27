@@ -414,6 +414,9 @@ void MixerServer::handle_control_message(uv_stream_t* client,
         send_tcp_response(client, SimpleJson::make_ack("MIXER_LEAVE"));
         std::cout << "[MixerServer] " << j.user_id << " left room " << j.room_id << std::endl;
 
+    } else if (j.type == "PING") {
+        send_tcp_response(client, "{\"type\":\"PONG\"}\n");
+
     } else {
         send_tcp_response(client, SimpleJson::make_error("Unknown type: " + j.type));
     }
