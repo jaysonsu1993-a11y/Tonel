@@ -39,6 +39,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<AudioDeviceInfo*>*)outputDevices;
 - (void)setInputDeviceIndex:(NSInteger)index;
 - (void)setOutputDeviceIndex:(NSInteger)index;
+/// Current selection (-1 = system default). Used by Settings UI to highlight.
+- (NSInteger)currentInputDeviceIndex;
+- (NSInteger)currentOutputDeviceIndex;
 
 // ── Volume & mute ─────────────────────────────────────────────────────────────
 - (void)setOutputVolume:(float)volume;   // 0.0 – 1.0

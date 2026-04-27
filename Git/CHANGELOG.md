@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] - 2026-04-28
+
+### Fixed (AppKit Audio)
+- **`AudioBridge` split from one duplex `ma_device` into two independent `ma_device`s — capture and playback.** The previous duplex configuration was the reason `setInputDeviceIndex` / `setOutputDeviceIndex` looked broken from the Settings UI: switching to an input or output device that the system can't fold into a single `ma_device_init()` call (different sample-rate clocks, devices that don't expose a duplex direction) silently failed and left the device unchanged. Now each direction has its own miniaudio device and its own callback (`captureCallback`, `playbackCallback`); changing one direction tears down and re-inits only that device, and the other keeps streaming so audio never drops out on the speaker just because the user picked a different microphone. If a re-init fails, the bridge falls back to the system default and logs the failure to the system console. ([Git/Tonel-Desktop-AppKit/src/bridge/AudioBridge.mm:1](Git/Tonel-Desktop-AppKit/src/bridge/AudioBridge.mm:1))
+- **`MixerBridge` ring buffer: prime threshold + slide-window overflow.** The RX ring used to drain on every callback as long as `count > 0`, which meant a partial read followed by zero-fill mid-callback whenever a packet ran late — audible as the "电流静电" floor noise the v1.0.8 web fix had eliminated. The web client's smoother playback path was masking the same ring-buffer-design bug that AppKit was hitting head-on. RX ring now refuses to drain until it holds `kPrimeTarget` samples (10 ms cushion), drops back to "primed=false" the moment it would underrun on the next read, and on overflow advances `readPos` (slide window) instead of dropping the whole 5 ms slab. The AppKit pipeline now has the same smoothness characteristics as the web client. ([Git/Tonel-Desktop-AppKit/src/bridge/MixerBridge.mm:38](Git/Tonel-Desktop-AppKit/src/bridge/MixerBridge.mm:38))
+- **Local mic loopback dropped.** The home-screen "hear yourself" feature only worked because the old duplex callback had both input and output buffers in the same call. With separate devices it would need a dedicated ring between callbacks; the feature also encouraged users to leave the mic open into the speakers and discover the feedback loop by accident. The home screen now outputs silence and the input level meter remains live. (Same file)
+- **Settings UI re-enumerates devices on each appearance and highlights the current selection.** Previously the popups were populated once in `viewDidLoad` and never refreshed — newly-plugged devices wouldn't appear, and the popup always showed item 0 even after the user had picked a different device. ([Git/Tonel-Desktop-AppKit/src/ui/SettingsViewController.mm:23](Git/Tonel-Desktop-AppKit/src/ui/SettingsViewController.mm:23))
+
+### Fixed (Web Audio Quality)
+- **Capture `ScriptProcessorNode` buffer size 256 → 512.** v1.0.8 set 256 to perfectly match the server's 5 ms broadcast cadence (one frame per callback), but `ScriptProcessorNode` at 256 turns out to be unreliable across browsers — the API is deprecated and at the lower edge of buffer sizes some implementations occasionally drop callbacks under main-thread load, audible as fresh noise. 512 (~10.67 ms, ~2 frames per callback with leftover carried over) keeps the pacing close enough to the server's mixer (no loss to the 5 ms slot overwrite) while staying inside the reliable region of the API. ([Git/web/src/services/audioService.ts:373](Git/web/src/services/audioService.ts:373))
+
+### Why this is a release
+Two surfaces, one root theme: the AppKit pipeline had drifted from the web pipeline's correctness without anyone noticing because nobody had compared them head-to-head. The AppKit bug was twofold — duplex device fragility on macOS for device switching, and missing jitter-prime in the RX ring — and v1.0.8's web-side fix exposed both by making web noticeably smoother. v1.0.9 lifts AppKit to the same quality bar and rolls back v1.0.8's overly-aggressive web capture buffer.
+
+The server-side OPUS channel-count mismatch (Bug 3 from the original investigation) and the suspected hard-clip on the mixer (the "音量稍大爆破音" report) remain deferred to v1.0.10 — both need server changes and the audio-path quality issues here are independent.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/Tonel-Desktop-AppKit/src/bridge/AudioBridge.{h,mm}` | Split duplex `ma_device` into separate capture + playback devices; per-direction teardown/re-init in `setInputDeviceIndex` / `setOutputDeviceIndex`; default-fallback on init failure; expose current selection via `currentInputDeviceIndex` / `currentOutputDeviceIndex` |
+| `Git/Tonel-Desktop-AppKit/src/bridge/MixerBridge.mm` `RingBuffer` | Prime threshold (480 samples / 10 ms), re-prime on near-underrun, slide-window on overflow |
+| `Git/Tonel-Desktop-AppKit/src/ui/SettingsViewController.mm` | `viewWillAppear` re-enumerates devices; popups highlight `AudioBridge`'s current selection |
+| `Git/web/src/services/audioService.ts` `startCaptureWithScriptProcessor` | bufferSize 256 → 512 |
+
 ## [1.0.8] - 2026-04-28
 
 ### Fixed (Web Audio Quality — v2)

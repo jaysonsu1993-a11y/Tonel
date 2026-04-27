@@ -374,13 +374,16 @@ class AudioService {
 
   private startCaptureWithScriptProcessor(): void {
     if (!this.audioContext) return
-    // 256 samples = 5.33 ms, the smallest size ScriptProcessor allows. This
-    // matches the server mixer's 5 ms timer: each callback ships ~1 frame
-    // (240 samples) and the leftover lands in the next callback. Using 1024
-    // sent 4 frames in a 21 ms burst and the server mixer (single-buffer
-    // per track, overwritten on addTrack) discarded all but the last frame
-    // in each 5 ms slot — losing 75% of upstream audio.
-    const node = this.audioContext.createScriptProcessor(256, 1, 1)
+    // 512 samples = 10.67 ms per callback → ~2 SPA1 frames (240 each) per
+    // callback, leftover carried over via captureLeftover. v1.0.8 tried
+    // 256 to perfectly match the server's 5 ms cadence, but ScriptProcessor
+    // at 256 is unreliable across browsers (deprecated API, stricter than
+    // worklet on real-time deadlines, occasionally drops callbacks under
+    // load — audible as new noise). 512 is the smallest size that still
+    // runs reliably and is far better paced than the original 1024 (which
+    // packed 4 frames into a 21 ms burst, each 5 ms slot losing all but
+    // the last to the server mixer's single-buffer addTrack overwrite).
+    const node = this.audioContext.createScriptProcessor(512, 1, 1)
     node.onaudioprocess = (ev) => {
       // Always send frames (even silence when muted) to keep server mixer alive
       // AppKit: audio callback always runs, mute just zeros the data

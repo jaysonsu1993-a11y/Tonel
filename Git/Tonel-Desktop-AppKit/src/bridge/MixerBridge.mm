@@ -36,13 +36,41 @@ struct SPA1Header {
 static_assert(sizeof(SPA1Header) == 76, "SPA1 header must be 76 bytes");
 
 // ── Lock-free SPSC ring buffer ───────────────────────────────────────────────
+//
+// Producer: UDP recv queue (write).  Consumer: realtime audio thread (read).
+//
+// Two design choices that the original implementation got wrong and the web
+// client's v1.0.8 fix corrected on its side — mirrored here:
+//
+//   1. **Slide-window on overflow.**  The previous version checked `space() >=
+//      count` at the call site and dropped the whole 5ms packet when the ring
+//      was full.  A whole-packet drop is an audible 5ms silent gap → pop.
+//      We now always write, and on overflow advance readPos to make room
+//      (overwriting the oldest samples).  In steady state overflow doesn't
+//      happen; on a brief network burst the listener loses the oldest 5ms
+//      instead of the newest, which is less perceptible.
+//
+//   2. **Prime threshold + re-prime on underrun.**  The previous version
+//      drained whatever was available, even partial, every callback.  When
+//      the ring dipped below the consumer's per-callback frame count (128
+//      samples on miniaudio low-latency), the audio thread would read
+//      `avail` samples then silently fill the rest with zeros — producing a
+//      mid-callback discontinuity that is clearly audible as a click.
+//      We now refuse to drain until the ring has at least kPrimeTarget
+//      samples buffered, and we drop back into the "primed=false" state the
+//      moment we *would* underrun on the next read.  That converts the
+//      mid-callback click into a clean full-callback silence, which is
+//      perceptually much better and gives the buffer time to refill.
 
-static constexpr int kRingSize = 48000;  // 1 second @ 48kHz
+static constexpr int kRingSize     = 48000;  // 1 second @ 48kHz mono
+static constexpr int kPrimeTarget  = 480;    // 10ms — start draining once buffered
+static constexpr int kPrimeMinRead = 128;    // miniaudio period; underrun if avail < this
 
 struct RingBuffer {
     float data[kRingSize];
-    std::atomic<int> writePos{0};
-    std::atomic<int> readPos{0};
+    std::atomic<int>  writePos{0};
+    std::atomic<int>  readPos{0};
+    std::atomic<bool> primed{false};
 
     int available() const {
         int w = writePos.load(std::memory_order_acquire);
@@ -50,34 +78,58 @@ struct RingBuffer {
         return (w - r + kRingSize) % kRingSize;
     }
 
-    int space() const {
-        return kRingSize - 1 - available();
-    }
-
     void write(const float* src, int count) {
         int w = writePos.load(std::memory_order_relaxed);
+        int r = readPos.load(std::memory_order_acquire);
+        int avail     = (w - r + kRingSize) % kRingSize;
+        int spaceLeft = kRingSize - 1 - avail;
+
+        // Slide-window on overflow: advance readPos past the samples that
+        // are about to be overwritten so we never wrap writePos past readPos.
+        if (count > spaceLeft) {
+            int needed = count - spaceLeft;
+            int newR   = (r + needed) % kRingSize;
+            readPos.store(newR, std::memory_order_release);
+        }
+
         for (int i = 0; i < count; i++) {
             data[w] = src[i];
             w = (w + 1) % kRingSize;
         }
         writePos.store(w, std::memory_order_release);
+
+        // Transition to primed once we've buffered enough cushion.
+        if (!primed.load(std::memory_order_acquire)) {
+            int newAvail = (w - readPos.load(std::memory_order_acquire) + kRingSize) % kRingSize;
+            if (newAvail >= kPrimeTarget) {
+                primed.store(true, std::memory_order_release);
+            }
+        }
     }
 
     int read(float* dst, int count) {
+        if (!primed.load(std::memory_order_acquire)) return 0;
         int avail = available();
-        int toRead = (count < avail) ? count : avail;
+        // If we would underrun (or fall below the per-callback safety margin
+        // mid-buffer), re-prime — the caller will fill the whole callback
+        // with silence which is preferable to a partial-then-zero glitch.
+        if (avail < count || avail < kPrimeMinRead) {
+            primed.store(false, std::memory_order_release);
+            return 0;
+        }
         int r = readPos.load(std::memory_order_relaxed);
-        for (int i = 0; i < toRead; i++) {
+        for (int i = 0; i < count; i++) {
             dst[i] = data[r];
             r = (r + 1) % kRingSize;
         }
         readPos.store(r, std::memory_order_release);
-        return toRead;
+        return count;
     }
 
     void reset() {
         writePos.store(0, std::memory_order_release);
         readPos.store(0, std::memory_order_release);
+        primed.store(false, std::memory_order_release);
     }
 };
 
@@ -391,9 +443,10 @@ static const int   kMixerUDPPort = 9003;
             }
             rxCount++;
 
-            if (strongSelf->_rxRing.space() >= sampleCount) {
-                strongSelf->_rxRing.write(floatBuf, sampleCount);
-            }
+            // RingBuffer.write handles overflow internally via slide-window;
+            // we always submit the packet so brief network bursts cost the
+            // oldest samples instead of dropping the whole 5ms slab.
+            strongSelf->_rxRing.write(floatBuf, sampleCount);
         }
         // Opus decode could be added here if needed
     });

@@ -26,6 +26,13 @@
     [self refreshDeviceLists];
 }
 
+- (void)viewWillAppear {
+    [super viewWillAppear];
+    // Re-enumerate every time Settings opens so newly-plugged devices show up
+    // and the popup reflects the AudioBridge's current selection.
+    [self refreshDeviceLists];
+}
+
 - (void)buildUI {
     NSView* root = self.view;
 
@@ -218,6 +225,10 @@
     if (inputs.count > 0) {
         for (AudioDeviceInfo* d in inputs)
             [_inputDevicePopup addItemWithTitle:d.name];
+        NSInteger sel = [audio currentInputDeviceIndex];
+        if (sel >= 0 && sel < (NSInteger)inputs.count) {
+            [_inputDevicePopup selectItemAtIndex:sel];
+        }
     } else {
         [_inputDevicePopup addItemWithTitle:@"(无可用设备)"];
     }
@@ -226,6 +237,10 @@
     if (outputs.count > 0) {
         for (AudioDeviceInfo* d in outputs)
             [_outputDevicePopup addItemWithTitle:d.name];
+        NSInteger sel = [audio currentOutputDeviceIndex];
+        if (sel >= 0 && sel < (NSInteger)outputs.count) {
+            [_outputDevicePopup selectItemAtIndex:sel];
+        }
     } else {
         [_outputDevicePopup addItemWithTitle:@"(无可用设备)"];
     }

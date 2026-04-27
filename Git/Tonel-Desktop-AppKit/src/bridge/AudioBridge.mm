@@ -1,9 +1,15 @@
-// AudioBridge.mm — miniaudio duplex engine wrapped in Objective-C
+// AudioBridge.mm — miniaudio engine wrapped in Objective-C
 //
-// Implements its own audio engine inline so we avoid the JUCE transitive
-// dependency chain that MiniaudioEngine.cpp would pull in through AudioRouter.h.
-// The miniaudio header is header-only; MINIAUDIO_IMPLEMENTATION must be defined
-// in exactly one translation unit — this file.
+// v1.0.9: split the previous single duplex ma_device into two independent
+// devices — one capture, one playback. The duplex form was fragile on
+// macOS: switching to an input or output device that the system can't
+// fold into a single ma_device_init() call (different sample-rate clocks,
+// devices that don't expose the duplex direction, etc.) silently failed
+// and `setInputDeviceIndex` / `setOutputDeviceIndex` looked broken from
+// the UI's perspective. With separate devices, changing one direction
+// only re-inits that direction; the other keeps streaming.
+//
+// MINIAUDIO_IMPLEMENTATION must live in exactly one TU — this file.
 
 #define MINIAUDIO_IMPLEMENTATION
 #import "AudioBridge.h"
@@ -22,9 +28,11 @@ static constexpr int kSendFrameSize = 240;  // 5ms @ 48kHz mono — matches serv
 
 struct AudioBridgeState {
     ma_context  context;
-    ma_device   device;
-    bool        contextInited = false;
-    bool        deviceInited  = false;
+    ma_device   captureDevice;
+    ma_device   playbackDevice;
+    bool        contextInited       = false;
+    bool        captureInited       = false;
+    bool        playbackInited      = false;
 
     std::atomic<float> inputLevel{ 0.0f };
     std::atomic<float> outputVolume{ 1.0f };
@@ -33,7 +41,7 @@ struct AudioBridgeState {
     int inputDeviceIndex  = -1;   // -1 = system default
     int outputDeviceIndex = -1;
 
-    // Accumulation buffer: stereo f32 → mono int16, send when 240 samples ready
+    // Capture-side accumulator: stereo f32 → mono int16 → ship every 240 samples.
     int16_t accumBuf[kSendFrameSize];
     int     accumCount = 0;
 
@@ -44,36 +52,35 @@ struct AudioBridgeState {
     __unsafe_unretained id owner = nil;
 };
 
-// ── Audio callback (called on real-time audio thread) ────────────────────────
+// ── Capture callback (real-time audio thread, capture device) ─────────────────
+//
+// Reads stereo mic input, computes RMS for the level meter, downmixes to mono
+// int16 PCM, and ships 5ms (240-sample) frames to the mixer when connected.
 
-static void audioDataCallback(ma_device* dev, void* output,
-                              const void* input, ma_uint32 frameCount)
+static void captureCallback(ma_device* dev, void* /*output*/,
+                            const void* input, ma_uint32 frameCount)
 {
     AudioBridgeState* s = static_cast<AudioBridgeState*>(dev->pUserData);
-    if (!s) return;
+    if (!s || !input) return;
 
     const int ch = 2;
     const float* in = static_cast<const float*>(input);
-    float* out = static_cast<float*>(output);
     MixerBridge* mixer = s->mixerBridge;
     bool mixerActive = (mixer != nil && [mixer isConnected]);
 
-    // ── Input level metering (RMS with smoothing) ─────────────────────────
-    if (input) {
-        float sumSq = 0.0f;
-        ma_uint32 totalSamples = frameCount * ch;
-        for (ma_uint32 i = 0; i < totalSamples; ++i) {
-            sumSq += in[i] * in[i];
-        }
-        float rms = sumSq > 0.0f ? std::sqrt(sumSq / static_cast<float>(totalSamples)) : 0.0f;
-        float prev = s->inputLevel.load(std::memory_order_relaxed);
-        s->inputLevel.store(prev * 0.8f + rms * 0.2f, std::memory_order_release);
+    // Input level metering (RMS with EMA smoothing).
+    float sumSq = 0.0f;
+    ma_uint32 totalSamples = frameCount * ch;
+    for (ma_uint32 i = 0; i < totalSamples; ++i) {
+        sumSq += in[i] * in[i];
     }
+    float rms = sumSq > 0.0f ? std::sqrt(sumSq / static_cast<float>(totalSamples)) : 0.0f;
+    float prev = s->inputLevel.load(std::memory_order_relaxed);
+    s->inputLevel.store(prev * 0.8f + rms * 0.2f, std::memory_order_release);
 
-    // ── Send mic audio to mixer server ────────────────────────────────────
-    if (input && !s->muted.load() && mixerActive) {
+    // Send mic audio to the mixer (only when we have a live connection).
+    if (!s->muted.load() && mixerActive) {
         for (ma_uint32 i = 0; i < frameCount; i++) {
-            // Stereo f32 → mono int16
             float mono = (in[i * ch] + in[i * ch + 1]) * 0.5f;
             mono = std::max(-1.0f, std::min(1.0f, mono));
             s->accumBuf[s->accumCount++] = static_cast<int16_t>(mono * 32767.0f);
@@ -84,35 +91,40 @@ static void audioDataCallback(ma_device* dev, void* output,
             }
         }
     }
+}
 
-    // ── Playback ──────────────────────────────────────────────────────────
-    if (output) {
-        if (mixer != nil) {
-            // Mixer bridge is set (in-room mode): play server audio or silence
-            if (mixerActive) {
-                float monoBuf[1024];
-                int got = [mixer readMixedAudio:monoBuf maxSamples:static_cast<int>(frameCount)];
-                float vol = s->outputVolume.load();
-                for (ma_uint32 i = 0; i < frameCount; i++) {
-                    float sample = (static_cast<int>(i) < got) ? monoBuf[i] * vol : 0.0f;
-                    out[i * ch]     = sample;
-                    out[i * ch + 1] = sample;
-                }
-            } else {
-                // Mixer not yet connected — output silence (no local loopback)
-                std::memset(out, 0, frameCount * ch * sizeof(float));
-            }
-        } else {
-            // No mixer bridge (home screen) — local loopback for mic test
-            if (!s->muted.load() && input) {
-                float vol = s->outputVolume.load();
-                for (ma_uint32 i = 0; i < frameCount * ch; ++i) {
-                    out[i] = in[i] * vol;
-                }
-            } else {
-                std::memset(out, 0, frameCount * ch * sizeof(float));
-            }
-        }
+// ── Playback callback (real-time audio thread, playback device) ───────────────
+//
+// Reads mono float samples from the mixer's RX ring buffer (or zeros when
+// not connected / not yet primed), applies the master volume, and writes
+// stereo output. Local mic loopback was dropped along with the duplex
+// device — the home screen no longer hears the mic, which avoids the
+// feedback loop the old loopback used to cause when the user forgot to
+// mute before joining a room.
+
+static void playbackCallback(ma_device* dev, void* output,
+                             const void* /*input*/, ma_uint32 frameCount)
+{
+    AudioBridgeState* s = static_cast<AudioBridgeState*>(dev->pUserData);
+    if (!s || !output) return;
+
+    const int ch = 2;
+    float* out = static_cast<float*>(output);
+    MixerBridge* mixer = s->mixerBridge;
+    bool mixerActive = (mixer != nil && [mixer isConnected]);
+
+    if (!mixerActive) {
+        std::memset(out, 0, frameCount * ch * sizeof(float));
+        return;
+    }
+
+    float monoBuf[1024];
+    int got = [mixer readMixedAudio:monoBuf maxSamples:static_cast<int>(frameCount)];
+    float vol = s->outputVolume.load();
+    for (ma_uint32 i = 0; i < frameCount; i++) {
+        float sample = (static_cast<int>(i) < got) ? monoBuf[i] * vol : 0.0f;
+        out[i * ch]     = sample;
+        out[i * ch + 1] = sample;
     }
 }
 
@@ -150,67 +162,98 @@ static void audioDataCallback(ma_device* dev, void* output,
     delete _state;
 }
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
+// ── Context bootstrap ─────────────────────────────────────────────────────────
 
-- (BOOL)initialize {
-    if (_state->deviceInited) return YES;
-
-    // Init context
-    if (!_state->contextInited) {
-        if (ma_context_init(nullptr, 0, nullptr, &_state->context) != MA_SUCCESS) {
-            NSLog(@"[AudioBridge] ma_context_init failed");
-            return NO;
-        }
-        _state->contextInited = true;
-    }
-
-    // Build duplex config
-    ma_device_config cfg = ma_device_config_init(ma_device_type_duplex);
-    cfg.sampleRate = 48000;
-    cfg.performanceProfile = ma_performance_profile_low_latency;
-    cfg.periodSizeInFrames = 128;  // 2.67ms @ 48kHz (validated in s1-mini)
-
-    cfg.capture.format   = ma_format_f32;
-    cfg.capture.channels = 2;
-    cfg.capture.shareMode = ma_share_mode_shared;
-
-    cfg.playback.format   = ma_format_f32;
-    cfg.playback.channels = 2;
-    cfg.playback.shareMode = ma_share_mode_shared;
-
-    // Resolve device IDs (nil = default)
-    const ma_device_id* captureId  = [self deviceIdForType:ma_device_type_capture
-                                                      index:_state->inputDeviceIndex];
-    const ma_device_id* playbackId = [self deviceIdForType:ma_device_type_playback
-                                                      index:_state->outputDeviceIndex];
-    cfg.capture.pDeviceID  = captureId;
-    cfg.playback.pDeviceID = playbackId;
-
-    cfg.dataCallback = audioDataCallback;
-    cfg.pUserData    = _state;
-
-    if (ma_device_init(&_state->context, &cfg, &_state->device) != MA_SUCCESS) {
-        NSLog(@"[AudioBridge] ma_device_init failed");
+- (BOOL)ensureContext {
+    if (_state->contextInited) return YES;
+    if (ma_context_init(nullptr, 0, nullptr, &_state->context) != MA_SUCCESS) {
+        NSLog(@"[AudioBridge] ma_context_init failed");
         return NO;
     }
-
-    _state->deviceInited = true;
-    NSLog(@"[AudioBridge] initialized — capture: %s / playback: %s",
-          _state->device.capture.name, _state->device.playback.name);
+    _state->contextInited = true;
     return YES;
 }
 
-- (void)start {
-    if (!_state->deviceInited && ![self initialize]) return;
-    if (ma_device_is_started(&_state->device)) return;
+// ── Capture device ────────────────────────────────────────────────────────────
 
-    if (ma_device_start(&_state->device) != MA_SUCCESS) {
-        NSLog(@"[AudioBridge] ma_device_start failed");
-        return;
+- (BOOL)initializeCapture {
+    if (_state->captureInited) return YES;
+    if (![self ensureContext]) return NO;
+
+    ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+    cfg.sampleRate          = 48000;
+    cfg.performanceProfile  = ma_performance_profile_low_latency;
+    cfg.periodSizeInFrames  = 128;       // 2.67 ms @ 48 kHz
+    cfg.capture.format      = ma_format_f32;
+    cfg.capture.channels    = 2;
+    cfg.capture.shareMode   = ma_share_mode_shared;
+    cfg.capture.pDeviceID   = [self deviceIdForType:ma_device_type_capture
+                                              index:_state->inputDeviceIndex];
+    cfg.dataCallback        = captureCallback;
+    cfg.pUserData           = _state;
+
+    if (ma_device_init(&_state->context, &cfg, &_state->captureDevice) != MA_SUCCESS) {
+        NSLog(@"[AudioBridge] capture device init failed (index=%d)", _state->inputDeviceIndex);
+        return NO;
     }
-    NSLog(@"[AudioBridge] started");
+    _state->captureInited = true;
+    NSLog(@"[AudioBridge] capture initialized — %s", _state->captureDevice.capture.name);
+    return YES;
+}
 
-    // Poll input level on main thread every 50 ms
+// ── Playback device ───────────────────────────────────────────────────────────
+
+- (BOOL)initializePlayback {
+    if (_state->playbackInited) return YES;
+    if (![self ensureContext]) return NO;
+
+    ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
+    cfg.sampleRate          = 48000;
+    cfg.performanceProfile  = ma_performance_profile_low_latency;
+    cfg.periodSizeInFrames  = 128;       // 2.67 ms @ 48 kHz
+    cfg.playback.format     = ma_format_f32;
+    cfg.playback.channels   = 2;
+    cfg.playback.shareMode  = ma_share_mode_shared;
+    cfg.playback.pDeviceID  = [self deviceIdForType:ma_device_type_playback
+                                              index:_state->outputDeviceIndex];
+    cfg.dataCallback        = playbackCallback;
+    cfg.pUserData           = _state;
+
+    if (ma_device_init(&_state->context, &cfg, &_state->playbackDevice) != MA_SUCCESS) {
+        NSLog(@"[AudioBridge] playback device init failed (index=%d)", _state->outputDeviceIndex);
+        return NO;
+    }
+    _state->playbackInited = true;
+    NSLog(@"[AudioBridge] playback initialized — %s", _state->playbackDevice.playback.name);
+    return YES;
+}
+
+// Header-declared init combines both directions; if either fails, the other
+// stays usable so partial functionality is preserved.
+- (BOOL)initialize {
+    BOOL c = [self initializeCapture];
+    BOOL p = [self initializePlayback];
+    return c && p;
+}
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+- (void)start {
+    [self initialize];
+
+    if (_state->captureInited && !ma_device_is_started(&_state->captureDevice)) {
+        if (ma_device_start(&_state->captureDevice) != MA_SUCCESS) {
+            NSLog(@"[AudioBridge] capture start failed");
+        }
+    }
+    if (_state->playbackInited && !ma_device_is_started(&_state->playbackDevice)) {
+        if (ma_device_start(&_state->playbackDevice) != MA_SUCCESS) {
+            NSLog(@"[AudioBridge] playback start failed");
+        }
+    }
+    NSLog(@"[AudioBridge] started (capture=%d, playback=%d)",
+          (int)_state->captureInited, (int)_state->playbackInited);
+
     dispatch_async(dispatch_get_main_queue(), ^{
         [self startLevelTimer];
     });
@@ -218,18 +261,40 @@ static void audioDataCallback(ma_device* dev, void* output,
 
 - (void)stop {
     [self stopLevelTimer];
-    if (_state->deviceInited && ma_device_is_started(&_state->device)) {
-        ma_device_stop(&_state->device);
-        NSLog(@"[AudioBridge] stopped");
+    if (_state->captureInited && ma_device_is_started(&_state->captureDevice)) {
+        ma_device_stop(&_state->captureDevice);
+    }
+    if (_state->playbackInited && ma_device_is_started(&_state->playbackDevice)) {
+        ma_device_stop(&_state->playbackDevice);
+    }
+    NSLog(@"[AudioBridge] stopped");
+}
+
+- (void)teardownCapture {
+    if (_state->captureInited) {
+        if (ma_device_is_started(&_state->captureDevice)) {
+            ma_device_stop(&_state->captureDevice);
+        }
+        ma_device_uninit(&_state->captureDevice);
+        _state->captureInited = false;
+        _state->accumCount = 0;
+    }
+}
+
+- (void)teardownPlayback {
+    if (_state->playbackInited) {
+        if (ma_device_is_started(&_state->playbackDevice)) {
+            ma_device_stop(&_state->playbackDevice);
+        }
+        ma_device_uninit(&_state->playbackDevice);
+        _state->playbackInited = false;
     }
 }
 
 - (void)shutdown {
     [self stop];
-    if (_state->deviceInited) {
-        ma_device_uninit(&_state->device);
-        _state->deviceInited = false;
-    }
+    [self teardownCapture];
+    [self teardownPlayback];
     if (_state->contextInited) {
         ma_context_uninit(&_state->context);
         _state->contextInited = false;
@@ -249,12 +314,7 @@ static void audioDataCallback(ma_device* dev, void* output,
 
 - (NSArray<AudioDeviceInfo*>*)enumerateDevicesOfType:(ma_device_type)type {
     NSMutableArray* result = [NSMutableArray array];
-
-    if (!_state->contextInited) {
-        if (ma_context_init(nullptr, 0, nullptr, &_state->context) != MA_SUCCESS)
-            return result;
-        _state->contextInited = true;
-    }
+    if (![self ensureContext]) return result;
 
     ma_device_info* playbackDevices = nullptr;
     ma_device_info* captureDevices  = nullptr;
@@ -283,34 +343,45 @@ static void audioDataCallback(ma_device* dev, void* output,
 }
 
 // ── Device selection ──────────────────────────────────────────────────────────
+//
+// Only the affected direction is torn down and re-initialized. The other
+// direction keeps streaming, so audio doesn't drop out on the speaker just
+// because the user picked a different microphone.
 
 - (void)setInputDeviceIndex:(NSInteger)index {
     _state->inputDeviceIndex = (int)index;
-    if (_state->deviceInited) {
-        BOOL wasRunning = ma_device_is_started(&_state->device);
-        [self stop];
-        ma_device_uninit(&_state->device);
-        _state->deviceInited = false;
-        [self initialize];
-        if (wasRunning) [self start];
+    BOOL wasRunning = _state->captureInited && ma_device_is_started(&_state->captureDevice);
+    [self teardownCapture];
+    if (![self initializeCapture]) {
+        NSLog(@"[AudioBridge] setInputDeviceIndex: failed to init new capture device, falling back to default");
+        _state->inputDeviceIndex = -1;
+        [self initializeCapture];
+    }
+    if (wasRunning && _state->captureInited) {
+        ma_device_start(&_state->captureDevice);
     }
     NSLog(@"[AudioBridge] Input device → index %ld (%s)", (long)index,
-          _state->deviceInited ? _state->device.capture.name : "pending");
+          _state->captureInited ? _state->captureDevice.capture.name : "unavailable");
 }
 
 - (void)setOutputDeviceIndex:(NSInteger)index {
     _state->outputDeviceIndex = (int)index;
-    if (_state->deviceInited) {
-        BOOL wasRunning = ma_device_is_started(&_state->device);
-        [self stop];
-        ma_device_uninit(&_state->device);
-        _state->deviceInited = false;
-        [self initialize];
-        if (wasRunning) [self start];
+    BOOL wasRunning = _state->playbackInited && ma_device_is_started(&_state->playbackDevice);
+    [self teardownPlayback];
+    if (![self initializePlayback]) {
+        NSLog(@"[AudioBridge] setOutputDeviceIndex: failed to init new playback device, falling back to default");
+        _state->outputDeviceIndex = -1;
+        [self initializePlayback];
+    }
+    if (wasRunning && _state->playbackInited) {
+        ma_device_start(&_state->playbackDevice);
     }
     NSLog(@"[AudioBridge] Output device → index %ld (%s)", (long)index,
-          _state->deviceInited ? _state->device.playback.name : "pending");
+          _state->playbackInited ? _state->playbackDevice.playback.name : "unavailable");
 }
+
+- (NSInteger)currentInputDeviceIndex  { return _state->inputDeviceIndex; }
+- (NSInteger)currentOutputDeviceIndex { return _state->outputDeviceIndex; }
 
 // ── Volume & mute ─────────────────────────────────────────────────────────────
 
@@ -365,7 +436,7 @@ static void audioDataCallback(ma_device* dev, void* output,
 /// Returns pointer to a thread-safely stored ma_device_id, or nullptr for default.
 - (const ma_device_id*)deviceIdForType:(ma_device_type)type index:(int)index {
     if (index < 0) return nullptr;
-    if (!_state->contextInited) return nullptr;
+    if (![self ensureContext]) return nullptr;
 
     ma_device_info* playbackDevices = nullptr;
     ma_device_info* captureDevices  = nullptr;
@@ -383,7 +454,7 @@ static void audioDataCallback(ma_device* dev, void* output,
 
     // Thread-local storage — safe because return value is only used immediately
     // within the same call stack before ma_device_init.
-    thread_local ma_device_id storedIdCapture;   // per-thread, no cross-thread race
+    thread_local ma_device_id storedIdCapture;
     thread_local ma_device_id storedIdPlayback;
 
     if (type == ma_device_type_playback) {
