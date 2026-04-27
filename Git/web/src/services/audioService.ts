@@ -202,13 +202,6 @@ class AudioService {
   // timestamp removed — now using wall-clock ms in SPA1 header for RTT
   // frameBuffer removed — onAudioFrame sends directly from ScriptProcessor data
 
-  // Playback adaptive jitter buffer: tracks arrival intervals and adjusts target depth
-  private targetBufferFrames = 2  // Start with 2 frames (20ms), will adapt
-  private arrivalIntervals: number[] = []  // Last 20 packet arrival intervals (ms)
-  private lastArrivalTime = 0
-  private readonly MIN_BUFFER_FRAMES = 2   // 20ms minimum
-  private readonly MAX_BUFFER_FRAMES = 8   // 80ms maximum
-
   async init(): Promise<MediaStream> {
     // Clean up previous state to avoid stale AudioContext/MediaStream pileup
     this.stopCapture()
@@ -240,6 +233,13 @@ class AudioService {
       // FIX: Resume the AudioContext to unfreeze it from browser autoplay policy.
       // Without this the context stays in 'suspended' state and no audio flows.
       await this.audioContext.resume()
+      // The sampleRate hint is best-effort — Bluetooth output / system overrides
+      // may force a different rate. Log so we can spot the mismatch.
+      if (this.audioContext.sampleRate !== SAMPLE_RATE) {
+        console.warn(`[Audio] AudioContext rate is ${this.audioContext.sampleRate} Hz, expected ${SAMPLE_RATE}. Web Audio will resample on playback.`)
+      } else {
+        console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz`)
+      }
 
       this.analyser = this.audioContext.createAnalyser()
       this.analyser.fftSize = 256
@@ -374,8 +374,13 @@ class AudioService {
 
   private startCaptureWithScriptProcessor(): void {
     if (!this.audioContext) return
-    // 1024 samples ≈ 21ms — balance between packet frequency and latency
-    const node = this.audioContext.createScriptProcessor(1024, 1, 1)
+    // 256 samples = 5.33 ms, the smallest size ScriptProcessor allows. This
+    // matches the server mixer's 5 ms timer: each callback ships ~1 frame
+    // (240 samples) and the leftover lands in the next callback. Using 1024
+    // sent 4 frames in a 21 ms burst and the server mixer (single-buffer
+    // per track, overwritten on addTrack) discarded all but the last frame
+    // in each 5 ms slot — losing 75% of upstream audio.
+    const node = this.audioContext.createScriptProcessor(256, 1, 1)
     node.onaudioprocess = (ev) => {
       // Always send frames (even silence when muted) to keep server mixer alive
       // AppKit: audio callback always runs, mute just zeros the data
@@ -391,7 +396,11 @@ class AudioService {
   }
 
   private smoothedLevel = 0
-  // playTime removed — using immediate start(0)
+  // Continuous playback timeline: each incoming 5ms PCM16 frame is scheduled
+  // at playTime, then playTime advances by frame.duration. When a network
+  // gap pushes playTime into the past, we re-anchor to currentTime + lookahead.
+  private playTime = 0
+  private readonly PLAYBACK_LOOKAHEAD_SEC = 0.04  // 40ms jitter cushion
 
   private onAudioFrame(f32: Float32Array): void {
     // Input level: linear RMS + EMA smoothing (AppKit AudioBridge pattern)
@@ -611,8 +620,6 @@ class AudioService {
     // Ensure AudioContext is running (may be suspended by browser policy)
     if (this.audioContext.state === 'suspended') this.audioContext.resume()
 
-    this.updateAdaptiveBufferDepth(performance.now())
-
     const header = parseSpa1Header(data)
     if (!header || header.dataSize === 0) return
 
@@ -623,66 +630,31 @@ class AudioService {
     let rxSum = 0
     for (let i = 0; i < f32.length; i++) rxSum += f32[i] * f32[i]
     this.rxLevel = Math.sqrt(rxSum / f32.length)
-
     this.playCount++
-    // Push samples into the AudioWorklet ring buffer. Per-packet BufferSource
-    // start(0) overlapped on bursts and gapped on jitter — the worklet plays
-    // the ring continuously at the audio thread cadence, so the boundary
-    // between 5ms frames stays inaudible.
-    if (this.playbackWorklet) {
-      const copy = new Float32Array(f32)
-      this.playbackWorklet.port.postMessage(copy.buffer, [copy.buffer])
+
+    // Build a 5ms buffer at the wire rate (48 kHz). createBuffer takes a
+    // sample-rate argument independent of the AudioContext rate — Web Audio
+    // resamples on connect, so this still plays correctly when the context
+    // ends up at 44.1 kHz (Bluetooth, system override). The previous worklet
+    // ring path skipped this resample and overran the ring whenever the
+    // context wasn't 48 kHz, which surfaced as constant static.
+    const buffer = this.audioContext.createBuffer(CHANNELS, f32.length, SAMPLE_RATE)
+    buffer.getChannelData(0).set(f32)
+    const src = this.audioContext.createBufferSource()
+    src.buffer = buffer
+    src.connect(this.masterGain)
+
+    // Schedule on a continuous timeline so consecutive 5ms frames are
+    // sample-exact. start(0) (the first attempt) overlapped on bursts and
+    // left gaps on late packets; this preserves frame boundaries.
+    const now = this.audioContext.currentTime
+    if (this.playTime < now + 0.005) {
+      // Fallen behind real time — re-anchor with a lookahead cushion so the
+      // next few frames have room to absorb jitter.
+      this.playTime = now + this.PLAYBACK_LOOKAHEAD_SEC
     }
-  }
-
-  /**
-   * Update target buffer depth based on network jitter.
-   * Tracks last 20 packet arrival intervals, computes mean + 2*stddev.
-   * Sends updated target to the AudioWorklet via port message.
-   */
-  private updateAdaptiveBufferDepth(now: number): void {
-    if (this.lastArrivalTime === 0) {
-      this.lastArrivalTime = now
-      return
-    }
-
-    const interval = now - this.lastArrivalTime
-    this.lastArrivalTime = now
-
-    // Sanity: ignore absurd intervals (e.g. after pause/resume)
-    if (interval < 0 || interval > 200) return
-
-    this.arrivalIntervals.push(interval)
-    if (this.arrivalIntervals.length > 20) {
-      this.arrivalIntervals.shift()
-    }
-
-    if (this.arrivalIntervals.length < 5) return
-
-    // Compute mean and stddev
-    const avg = this.arrivalIntervals.reduce((a, b) => a + b, 0) / this.arrivalIntervals.length
-    const variance = this.arrivalIntervals.reduce((sum, v) => sum + (v - avg) ** 2, 0) / this.arrivalIntervals.length
-    const stddev = Math.sqrt(variance)
-
-    // Target = avg interval + 2*stddev (covers ~95% of jitter)
-    // Convert to frames (each frame = 10ms)
-    let targetFrames = Math.ceil((avg + 2 * stddev) / 10)
-    if (targetFrames < this.MIN_BUFFER_FRAMES) targetFrames = this.MIN_BUFFER_FRAMES
-    if (targetFrames > this.MAX_BUFFER_FRAMES) targetFrames = this.MAX_BUFFER_FRAMES
-
-    // Exponential smoothing to avoid sudden jumps
-    const smoothed = Math.round((this.targetBufferFrames * 3 + targetFrames) / 4)
-
-    if (smoothed !== this.targetBufferFrames) {
-      this.targetBufferFrames = smoothed
-      // Notify AudioWorklet of new target
-      if (this.playbackWorklet) {
-        this.playbackWorklet.port.postMessage({
-          type: 'setTarget',
-          samples: smoothed * FRAME_SAMPLES
-        })
-      }
-    }
+    src.start(this.playTime)
+    this.playTime += buffer.duration
   }
 
   // Legacy: called by UI; real sending is via capture pipeline
@@ -815,6 +787,7 @@ class AudioService {
   public stopCapture(): void {
     this.isCapturing = false
     this.captureLeftover = new Float32Array(0)
+    this.playTime = 0
     if (this.processor) {
       try { this.processor.disconnect() } catch (_) {}
       if ('port' in this.processor) {

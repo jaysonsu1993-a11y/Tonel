@@ -11,6 +11,47 @@ sections in the standards doc.
 
 ---
 
+## 2026-04-28 — v1.0.7 → v1.0.8 release cycle
+
+### Incident 7 — Local `Git/server/build/` rsync'd to remote, polluting CMakeCache (new R)
+
+**Symptom.** During `release.sh 1.0.7` the `[binary] remote build (cmake)`
+step failed with `CMake Error: The current CMakeCache.txt directory
+/opt/tonel/build-src/build/CMakeCache.txt is different than the directory
+/Users/niko/project-s/Tonel/Git/server/build where CMakeCache.txt was
+created.` The release had already bumped, committed, tagged, and pushed
+v1.0.7 by the time the failure surfaced — only the deploy was blocked.
+
+**What we thought.** Stale remote build directory from a prior aborted
+deploy.
+
+**What it actually was.** `Git/deploy/server.sh` ran
+`rsync_to_remote "$GIT_DIR/server/" "$TONEL_DEPLOY_DIR/build-src/"` with
+the default `--delete` flag and **no excludes**. The laptop happened to
+have a local `Git/server/build/` (from a developer cmake run — the dir
+is gitignored but rsync doesn't honor `.gitignore`) and a `.cache/`
+clangd index. Both got pushed. The remote `cmake -B build` then refused
+to use the polluted cache because its baked-in source path
+(`/Users/niko/project-s/Tonel/...`) didn't match the remote tree.
+
+**Impact.** Every contributor with a local `server/build/` would hit
+this on first deploy. v1.0.7 was rescued by skipping `server.sh`
+(the v1.0.7 change set was web-only, so the C++ binary was unchanged
+and didn't need a redeploy) and shipping web via `web.sh` directly.
+
+**Fix.** `server.sh`'s rsync now passes
+`RSYNC_FLAGS="--delete --delete-excluded --exclude=build/ --exclude=.cache/"`
+for the source-tree push. `--delete-excluded` self-heals any remote
+trees that already received the polluted artifacts.
+
+**Lesson.** rsync is not git-aware. Any local-only artifact directories
+that should never reach the remote must be enumerated explicitly via
+`--exclude` on the rsync call. `--delete-excluded` makes the rule
+forward-and-backward idempotent so the next deploy cleans up the mess
+the previous one made.
+
+---
+
 ## 2026-04-28 — v1.0.3 → v1.0.4 release cycle
 
 The first release that moved production from `/opt/tonel-server/` to

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-04-28
+
+### Fixed (Web Audio Quality — v2)
+- **Playback reverted from `AudioWorkletNode` ring buffer to a continuously-scheduled `AudioBufferSourceNode` timeline.** v1.0.7's worklet path drained on every `process()` call as long as `count > 0` — with internet jitter, `count` regularly dipped to 0 mid-buffer and the worklet output zeros for the rest of that 128-sample frame, producing sub-millisecond discontinuities that summed into the constant "电流静电" floor noise the user reported. The worklet also bypassed Web Audio's automatic resampling: the wire format is 48 kHz, but `new AudioContext({ sampleRate: 48000 })` is only a hint — Bluetooth output and some desktop audio stacks force 44.1 kHz, in which case the worklet was being fed 48 k samples/sec but read at 44.1 k samples/sec, the ring overran continuously, and `readPos` skipped samples in a chaotic pattern that sounded like noise. The new path uses `audioContext.createBuffer(channels, n, 48000)` (Web Audio resamples on connect, so the context's actual rate doesn't matter) and schedules each 5 ms frame at `playTime`, advancing `playTime += duration` so consecutive frames concatenate sample-exact. When a network gap pushes `playTime` into the past, the next frame re-anchors at `currentTime + 40 ms`, restoring a jitter cushion. ([Git/web/src/services/audioService.ts:601](Git/web/src/services/audioService.ts:601))
+- **Capture `ScriptProcessorNode` buffer size 1024 → 256.** v1.0.7 left the buffer at 1024 (~21 ms), so each callback shipped ~4 SPA1 frames in a burst. The server mixer is single-buffered per track (`addTrack()` overwrites), and its 5 ms broadcast timer only fires on `pending_mix`. With 4 frames packed into a 21 ms window, multiple frames landed in the same 5 ms slot and only the last survived — losing 50–75 % of upstream audio in a way that sounded like garbled noise on the return path. 256 samples = 5.33 ms per callback, so each callback ships ~1 frame (240 samples) and the leftover lands in the next callback, naturally pacing the wire to match the server's 5 ms cadence. ([Git/web/src/services/audioService.ts:373](Git/web/src/services/audioService.ts:373))
+- **Diagnostic: log `audioContext.sampleRate` after init.** Surfaces the Bluetooth/system-rate-override case in the browser console (`[Audio] AudioContext rate is 44100 Hz, expected 48000.`) so the next "audio sounds wrong" report can be triaged in one console line.
+
+### Fixed (Deploy Tooling)
+- **`Git/deploy/server.sh` excludes `build/` + `.cache/` from the source rsync.** v1.0.7's first `release.sh` run failed at `[binary] remote build (cmake)` because `rsync_to_remote "$GIT_DIR/server/" "$TONEL_DEPLOY_DIR/build-src/"` blasted the laptop's local `Git/server/build/` (gitignored, so `git status` is clean — but rsync doesn't honor `.gitignore`) up to the remote, baking the laptop's source path into the remote `CMakeCache.txt`. Remote `cmake -B build` then refused to use the cache because the embedded source path no longer matched. Fixed by passing `RSYNC_FLAGS="--delete --delete-excluded --exclude=build/ --exclude=.cache/"` for the source-tree push; `--delete-excluded` makes the rule self-healing so any remote tree that already received the bad artifacts gets cleaned on the next deploy. Captured as [Incident 7 in `Git/deploy/LESSONS.md`](../deploy/LESSONS.md). ([Git/deploy/server.sh:48](Git/deploy/server.sh:48))
+
+### Why this is a release
+Two-part story:
+1. **v1.0.7 didn't fully fix the reported audio quality issue.** The diagnosis nailed the per-packet `BufferSource.start(0)` overlap and the 64-sample tail drop, but moving to the worklet ring buffer unmasked two subtler issues (no fill threshold, no resampling) that produced a worse symptom — constant "电流静电" floor noise. v1.0.8 reverts to the canonical scheduled `BufferSource` streaming pattern, which is the well-tested approach for this exact problem and handles AudioContext sample-rate mismatch by leaning on Web Audio's built-in resampler.
+2. **`server.sh` deploy bug surfaced during the v1.0.7 release attempt.** Folded into this release per discipline (no bare commits to main), with a new LESSONS case file linking back to the rule it produced.
+
+The v1.0.7 audio code that did land (the capture leftover preservation) is retained — it's still the right thing.
+
+The server-side OPUS channel-count mismatch (Bug 3 from the original investigation) remains deferred — it's dormant for web-only traffic and will ship in v1.0.9 with the `tonel-mixer` redeploy.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `playPcm16` | Scheduled `BufferSource` on continuous `playTime` timeline + 40 ms re-anchor cushion; `createBuffer(_, _, 48000)` for built-in resampling |
+| `Git/web/src/services/audioService.ts` `startCaptureWithScriptProcessor` | bufferSize 1024 → 256 to pace SPA1 packets at ~5 ms cadence |
+| `Git/web/src/services/audioService.ts` `init` | Warn when AudioContext sample rate ≠ 48 kHz |
+| `Git/web/src/services/audioService.ts` | Removed dead `updateAdaptiveBufferDepth` + worklet target-depth state |
+| `Git/deploy/server.sh` | rsync excludes `build/` + `.cache/`, `--delete-excluded` for self-healing |
+| `Git/deploy/LESSONS.md` | New Incident 7 case file |
+
 ## [1.0.7] - 2026-04-28
 
 ### Fixed (Web Audio Quality)

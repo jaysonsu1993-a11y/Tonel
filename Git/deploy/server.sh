@@ -46,7 +46,13 @@ fi
 
 deploy_binary() {
     log "[binary] rsync server/ source"
-    rsync_to_remote "$GIT_DIR/server/" "$TONEL_DEPLOY_DIR/build-src/"
+    # R-NEW: never push local build artifacts or clangd index to the remote —
+    # they pollute the remote CMakeCache.txt (laptop's source path is baked
+    # into the cache and remote cmake then refuses with "directory differs").
+    # --delete-excluded also wipes any artifacts that previous releases pushed
+    # so we self-heal a polluted remote tree.
+    RSYNC_FLAGS="--delete --delete-excluded --exclude=build/ --exclude=.cache/" \
+        rsync_to_remote "$GIT_DIR/server/" "$TONEL_DEPLOY_DIR/build-src/"
 
     log "[binary] remote build (cmake)"
     ssh_exec "
