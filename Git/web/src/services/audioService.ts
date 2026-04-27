@@ -174,6 +174,12 @@ class AudioService {
   // Playback (shares audioContext with capture to avoid autoplay policy issues)
   private masterGain:       GainNode | null = null
 
+  // Debug counters
+  public rxCount = 0   // received SPA1 audio packets from server
+  public txCount = 0   // sent SPA1 audio packets to server
+  public playCount = 0 // packets sent to playback worklet
+  public cbCount = 0   // level callback invocations
+
   // Capture pipeline
   private processor:      AudioWorkletNode | ScriptProcessorNode | null = null
   private isCapturing:    boolean = false
@@ -190,6 +196,20 @@ class AudioService {
   private readonly MAX_BUFFER_FRAMES = 8   // 80ms maximum
 
   async init(): Promise<MediaStream> {
+    // Clean up previous state to avoid stale AudioContext/MediaStream pileup
+    this.stopCapture()
+    if (this.mediaStream) {
+      this.mediaStream.getAudioTracks().forEach(t => t.stop())
+      this.mediaStream = null
+    }
+    if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
+    if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
+    if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
+    if (this.animationFrameId) { cancelAnimationFrame(this.animationFrameId); this.animationFrameId = null }
+    if (this.audioContext) { try { this.audioContext.close() } catch (_) {} this.audioContext = null }
+    this.analyser = null
+    this.txCount = 0; this.rxCount = 0; this.playCount = 0
+
     try {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -322,28 +342,20 @@ class AudioService {
   }
 
   private startLevelMonitoring(): void {
-    if (!this.analyser) return
-    const data = new Uint8Array(this.analyser.frequencyBinCount)
+    // Level is computed from ScriptProcessor data in onAudioFrame().
+    // This RAF loop just pushes the latest value to the UI callback at display rate.
     const update = () => {
-      if (this.analyser) {
-        this.analyser.getByteFrequencyData(data)
-        let sum = 0
-        for (let i = 0; i < data.length; i++) sum += data[i] * data[i]
-        const rms   = Math.sqrt(sum / data.length)
-        // FIX: Normalize level to 0–1 range instead of 0–100 for consistency.
-        const level = Math.min(1.0, rms / 128)
-        this.currentLevel = level
-        if (this.levelCallback) {
-          this.levelCallback(level)
-        }
+      if (this.levelCallback && this.currentLevel > 0) {
+        this.levelCallback(this.currentLevel)
       }
       this.animationFrameId = requestAnimationFrame(update)
     }
-    update()
+    this.animationFrameId = requestAnimationFrame(update)
   }
 
   onLevel(cb: AudioLevelCallback): void {
     this.levelCallback = cb
+    console.log('[Audio] onLevel callback registered')
   }
 
   /** Set master output gain (0-1 linear). Controls playback volume. */
@@ -372,48 +384,9 @@ class AudioService {
     this.timestamp     = 0
     this.frameBuffer   = []
 
-    if (typeof AudioWorkletNode !== 'undefined') {
-      this.startCaptureWithWorklet()
-    } else {
-      this.startCaptureWithScriptProcessor()
-    }
-  }
-
-  private startCaptureWithWorklet(): void {
-    if (!this.audioContext) return
-    const code = `
-      class MicProcessor extends AudioWorkletProcessor {
-        process(inputs, outputs) {
-          const input = inputs[0]
-          if (!input || !input[0]) return true
-          this.port.postMessage({ f32: Array.from(input[0]) })
-          return true
-        }
-      }
-      registerProcessor('mic-processor', MicProcessor)
-    `
-    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))
-
-    this.audioContext.audioWorklet.addModule(url).then(() => {
-      if (!this.audioContext) return
-      const node = new AudioWorkletNode(this.audioContext, 'mic-processor')
-      ;(node.port as MessagePort).onmessage = (ev: MessageEvent) => {
-        if (!this.muted) {
-          this.onAudioFrame(new Float32Array(ev.data.f32))
-        }
-      }
-      // Connect source → worklet so it receives mic audio
-      if (this.source) {
-        this.source.connect(node)
-      }
-      node.connect(this.audioContext.destination)
-      this.processor = node
-      URL.revokeObjectURL(url)
-    }).catch(err => {
-      console.error('[Audio] AudioWorklet failed, falling back:', err)
-      URL.revokeObjectURL(url)
-      this.startCaptureWithScriptProcessor()
-    })
+    // Use ScriptProcessorNode for capture — AudioWorklet has known issues
+    // with MediaStreamAudioSourceNode producing zeros in some browsers.
+    this.startCaptureWithScriptProcessor()
   }
 
   private startCaptureWithScriptProcessor(): void {
@@ -433,6 +406,12 @@ class AudioService {
   }
 
   private onAudioFrame(f32: Float32Array): void {
+    // Compute input level from raw capture data (ScriptProcessor is reliable)
+    let sum = 0
+    for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i]
+    const rms = Math.sqrt(sum / f32.length)
+    this.currentLevel = Math.min(1.0, rms * 5)
+
     this.frameBuffer.push(f32)
     let total = 0
     for (const b of this.frameBuffer) total += b.length
@@ -467,6 +446,7 @@ class AudioService {
         // Send via WebSocket (browser → ws-proxy → ws-mixer-proxy → UDP 9003)
         if (this.audioWs?.readyState === WebSocket.OPEN) {
           this.audioWs.send(spa1)
+          this.txCount++
         }
         total -= this.FRAME_WANT_SAMPLES
         const newBuf: Float32Array[] = []
@@ -594,6 +574,7 @@ class AudioService {
     // Binary SPA1 packet from mixer server (mixed audio response)
     const header = parseSpa1Header(data)
     if (!header) return
+    this.rxCount++
 
     switch (header.codec) {
       case SPA1_CODEC_PCM16:
@@ -659,6 +640,7 @@ class AudioService {
     // Use transferable ArrayBuffer to avoid copy and reduce GC pressure
     if (this.playbackWorklet) {
       this.playbackWorklet.port.postMessage(f32, [f32.buffer])
+      this.playCount++
       return
     }
 

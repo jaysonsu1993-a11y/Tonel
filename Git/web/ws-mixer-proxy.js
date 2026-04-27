@@ -157,8 +157,8 @@ wss.on('connection', (ws, req) => {
     }
   })
 
-  ws.on('close', () => {
-    console.log('[WS-Mixer-Proxy] WebSocket closed')
+  ws.on('close', (code, reason) => {
+    console.log(`[WS-Mixer-Proxy] WebSocket closed (path=${path} code=${code} reason=${reason || 'none'})`)
     closing = true
     if (uid) wsByUid.delete(uid)
     if (tcpClient) tcpClient.destroy()

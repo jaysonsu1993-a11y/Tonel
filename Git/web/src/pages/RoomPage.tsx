@@ -66,7 +66,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         }, 2000)
         // Keep updating level in debug every 2s
         setInterval(() => {
-          setAudioDebug(`${audioService.debugState()} | lvl=${audioService.currentLevel.toFixed(3)}`)
+          setAudioDebug(`${audioService.debugState()} | lvl=${audioService.currentLevel.toFixed(3)} tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} selfLvl=${selfLevel.toFixed(3)}`)
         }, 2000)
       } catch (err) {
         setAudioDebug(`ERROR: ${err}`)
@@ -157,11 +157,10 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           <div className="device-row">
             <label className="device-label">输入</label>
             <select
-              value={selectedInput || undefined}
+              value={selectedInput}
               onChange={e => handleInputChange(e.target.value)}
               className="device-select"
             >
-              {inputDevices.length === 0 && <option value="">--</option>}
               {inputDevices.map(d => (
                 <option key={d.deviceId} value={d.deviceId}>
                   {d.label || `Input ${d.deviceId.slice(0, 8)}`}
@@ -172,11 +171,10 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           <div className="device-row">
             <label className="device-label">输出</label>
             <select
-              value={selectedOutput || undefined}
+              value={selectedOutput}
               onChange={e => handleOutputChange(e.target.value)}
               className="device-select"
             >
-              {outputDevices.length === 0 && <option value="">--</option>}
               {outputDevices.map(d => (
                 <option key={d.deviceId} value={d.deviceId}>
                   {d.label || `Output ${d.deviceId.slice(0, 8)}`}
@@ -202,8 +200,8 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         </div>
 
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
-        {audioDebug && <div style={{fontSize:'10px',color:'#888',position:'absolute',bottom:2,left:8}}>{audioDebug}</div>}
       </header>
+      {audioDebug && <div style={{fontSize:'10px',color:'#666',padding:'2px 24px',background:'#1a1a1a'}}>{audioDebug} selfLvl={selfLevel.toFixed(3)}</div>}
 
       <div className="room-content">
         {/* 调音台区域 */}
