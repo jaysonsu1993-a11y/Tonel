@@ -46,3 +46,15 @@ All scripts accept `--dry-run`. All scripts require a clean working tree
   that file or read `$TONEL_DEPLOY_DIR/VERSION`.
 - **Backups before swap.** `server.sh --component=binary` writes `*.bak.<stamp>`
   before overwriting binaries. `rollback.sh --component=binary` reads them.
+
+## Before writing or modifying a deploy script
+
+Read these two — they are the distilled rules and the case files behind them:
+
+- [DEPLOY_SCRIPTING_STANDARDS.md](../docs/DEPLOY_SCRIPTING_STANDARDS.md) —
+  10 normative rules covering shell quoting across SSH, dry-run propagation,
+  `npm ci` discipline, health-check vantage point, idempotency, drift
+  detection, audit logging, and remote-expansion smoke testing.
+- [LESSONS.md](LESSONS.md) — case files for the v1.0.3 / v1.0.4 release
+  cycle (six real incidents, one production outage). Each case maps to a
+  rule.

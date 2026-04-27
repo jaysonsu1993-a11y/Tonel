@@ -70,6 +70,14 @@ Use only the categories you have. Entries focus on the **why**, not the diff.
 | Hot-fix proxy only | `Git/deploy/server.sh --component=proxy` |
 | Roll back binaries | `Git/deploy/rollback.sh --component=binary` |
 
+## Working on the deploy scripts themselves
+
+If you're modifying anything in [`Git/deploy/`](../deploy/) or
+[`Git/ops/`](../ops/), read [DEPLOY_SCRIPTING_STANDARDS.md](DEPLOY_SCRIPTING_STANDARDS.md)
+first. Six bugs surfaced during the v1.0.3 → v1.0.4 release cycle —
+each one became a rule. The case files are at
+[deploy/LESSONS.md](../deploy/LESSONS.md).
+
 ## What NOT to do
 
 - ❌ `git commit` directly on `main` without going through `release.sh`.

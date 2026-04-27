@@ -67,9 +67,16 @@ esac
 cd "$REPO_ROOT"
 
 # ─── Pre-flight ──────────────────────────────────────────────────────────────
+#
+# Intentionally NOT requiring a clean working tree here. The release commit
+# is supposed to collect (a) the version bumps from bump-version.sh, (b) the
+# new CHANGELOG section the operator wrote, and (c) any feature changes
+# that motivated this release — all into one atomic commit. Refusing to run
+# on a dirty tree would force a separate "feature changes" commit on main,
+# which violates the project's "no bare commits to main" rule (every main
+# commit must go through bump → CHANGELOG → tag → push).
 
 if [ "$MODE" != "deploy-only" ]; then
-    [ -n "$(git status --porcelain)" ] && { git status --short; die "working tree dirty — commit or stash first"; }
     [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "must be on main branch"
 fi
 

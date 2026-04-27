@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-04-28
+
+### Added (Documentation)
+- **`Git/docs/DEPLOY_SCRIPTING_STANDARDS.md`** — 10 normative rules (R1–R10) for everything in `Git/deploy/` and `Git/ops/`. Distilled from the v1.0.3 → v1.0.4 release cycle, where six distinct shell-scripting bugs surfaced (one caused a real ~1-minute production outage). Rules cover: where health probes run (R1), `npm ci` discipline (R2), boolean flag propagation via dedicated helpers rather than `${VAR:+...}` (R3), template substitution that respects comment lines (R4), shell quoting across the SSH boundary (R5), `$()` capture of remote stdout with `; true` and empty-fallback (R6), idempotency (R7), drift detection (R8), audit logging (R9), and remote-expansion smoke testing with `echo` (R10).
+- **`Git/deploy/LESSONS.md`** — case files for each of the six v1.0.3 / v1.0.4 incidents, in **Symptom / What we thought / What it actually was / Impact / Fix / Lesson** format. Rules above link back to specific case files; case files link back to the rule each one produced.
+- Cross-reference links added in `Git/deploy/README.md` and `Git/docs/RELEASE.md` so contributors hit the standards before writing or modifying a deploy script.
+
+### Fixed (Release Tooling)
+- **`Git/scripts/release.sh` no longer rejects a dirty working tree at entry.** The previous `require_clean_git`-style guard contradicted the project's own release discipline: a dirty tree was the *normal* state when running `release.sh`, since the operator just authored the feature change + CHANGELOG entry. Forcing a separate "feature changes" commit on main before running release.sh would have meant a bare main commit, violating the very rule release.sh was supposed to encode. The script's existing `git add -A && git commit -m "release: vX.Y.Z"` already collects everything into one atomic commit, which is what we want. (Discovered while preparing this v1.0.5 release; the bug shipped with v1.0.3 but had not been triggered until now because earlier releases did not have user-authored changes alongside the bump.) The branch check (`must be on main`) stays.
+
+### Why this is a release
+Documentation-only release with no runtime delta vs. v1.0.4 (the small `release.sh` fix above is dev-tooling only). We're shipping it as a tagged version because the project's release discipline forbids bare commits to `main`: every change goes through bump → CHANGELOG → tag → push. That rule is what produced the well-organized history we now have, and it applies to documentation too.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/docs/DEPLOY_SCRIPTING_STANDARDS.md` | New — 10 rules |
+| `Git/deploy/LESSONS.md` | New — 6 case files |
+| `Git/deploy/README.md` | Cross-reference to standards + lessons |
+| `Git/docs/RELEASE.md` | Cross-reference to standards |
+| `Git/scripts/release.sh` | Drop entry-time `require_clean_git` (contradicted release flow) |
+
 ## [1.0.4] - 2026-04-28
 
 ### Fixed (Deploy Tooling)
