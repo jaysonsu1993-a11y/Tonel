@@ -1,64 +1,30 @@
-import { useMemo } from 'react'
-
 interface LedMeterProps {
-  level: number  // 0-1
+  level: number  // 0-1 linear RMS
   peak?: number  // 0-1
-  segments?: number
   direction?: 'vertical' | 'horizontal'
 }
 
-export function LedMeter({ level, peak = 0, segments = 20, direction = 'vertical' }: LedMeterProps) {
-  // Map linear RMS (0-1) to dB-scaled meter position
-  // -60dB → 0 segments, 0dB → full scale (wide range for web mic sensitivity)
-  const dbRange = 60
-  const toMeterPos = (v: number) => {
-    if (v <= 0) return 0
-    const db = 20 * Math.log10(v)
-    return Math.max(0, Math.min(1, (db + dbRange) / dbRange))
-  }
-  const activeSegments = Math.round(toMeterPos(level) * segments)
-  const peakSegment = Math.round(toMeterPos(peak) * segments)
+// dB-scaled meter: -60dB → 0%, 0dB → 100%
+function toDb(v: number): number {
+  if (v <= 0) return 0
+  const db = 20 * Math.log10(v)
+  return Math.max(0, Math.min(1, (db + 60) / 60))
+}
 
-  const getSegmentColor = (idx: number) => {
-    const ratio = idx / segments
-    if (ratio >= 0.85) return 'red'
-    if (ratio >= 0.65) return 'yellow'
-    return 'green'
-  }
-
-  const segs = useMemo(() => {
-    return Array.from({ length: segments }, (_, i) => {
-      const segIdx = direction === 'vertical' ? segments - 1 - i : i
-      const isActive = segIdx < activeSegments
-      const isPeak = segIdx === peakSegment - 1 && peak > 0
-      const color = getSegmentColor(segIdx)
-      return { segIdx, isActive, isPeak, color }
-    })
-  }, [activeSegments, peakSegment, segments, direction])
+export function LedMeter({ level, direction = 'vertical' }: LedMeterProps) {
+  const pct = toDb(level) * 100
 
   if (direction === 'horizontal') {
     return (
-      <div className="led-meter" style={{ flexDirection: 'row', gap: '2px' }}>
-        {segs.map(({ segIdx, isActive, isPeak, color }) => (
-          <div
-            key={segIdx}
-            className={`led-segment ${isActive || isPeak ? `active ${color}` : ''}`}
-            style={{ width: '4px', height: '12px' }}
-          />
-        ))}
+      <div className="led-bar" style={{ width: '100%', height: 12 }}>
+        <div className="led-fill" style={{ width: `${pct}%`, height: '100%' }} />
       </div>
     )
   }
 
   return (
-    <div className="led-meter" style={{ flexDirection: 'column', gap: '1px' }}>
-      {segs.map(({ segIdx, isActive, isPeak, color }) => (
-        <div
-          key={segIdx}
-          className={`led-segment ${isActive || isPeak ? `active ${color}` : ''}`}
-          style={{ width: '100%', height: '3px' }}
-        />
-      ))}
+    <div className="led-bar led-bar-v">
+      <div className="led-fill" style={{ height: `${pct}%` }} />
     </div>
   )
 }

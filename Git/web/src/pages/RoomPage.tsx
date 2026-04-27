@@ -36,15 +36,16 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   }, [selectedInput, selectedOutput])
 
   const [dbg, setDbg] = useState('')
-  // Poll audio levels, latency, and debug info
+  // Poll level+latency at 10fps (fast timer), debug info at 1fps (slow timer)
   useEffect(() => {
-    const id = setInterval(() => {
-      const lvl = audioService.currentLevel
-      setSelfLevel(lvl)
+    const fast = setInterval(() => {
+      setSelfLevel(audioService.currentLevel)
       setLatency(audioService.audioLatency)
-      setDbg(`lvl=${lvl.toFixed(4)} tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ws=${audioService.audioWsState}`)
-    }, 50)  // 50ms = 20fps, matches AppKit level poll rate
-    return () => clearInterval(id)
+    }, 100)
+    const slow = setInterval(() => {
+      setDbg(`tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ws=${audioService.audioWsState}`)
+    }, 2000)
+    return () => { clearInterval(fast); clearInterval(slow) }
   }, [])
 
   useEffect(() => {

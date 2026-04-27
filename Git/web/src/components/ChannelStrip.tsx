@@ -40,7 +40,6 @@ export function ChannelStrip({
   useEffect(() => { setLocalSolo(isSolo) }, [isSolo])
 
   const displayLevel = localMuted ? 0 : level
-  const displayPeak = localMuted ? 0 : peak
   const handleMute = () => {
     setLocalMuted(!localMuted)
     onMute?.(!localMuted)
@@ -121,7 +120,7 @@ export function ChannelStrip({
 
         {/* LED Meter */}
         <div className="ch-meter">
-          <LedMeter level={displayLevel} peak={displayPeak} segments={24} direction="vertical" />
+          <LedMeter level={displayLevel} direction="vertical" />
         </div>
 
         {/* Vertical Fader */}

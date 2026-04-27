@@ -281,7 +281,9 @@ class AudioService {
           this.readPos = 0
           this.count = 0
           this.port.onmessage = (ev) => {
-            const samples = ev.data
+            // Handle both Float32Array and transferred ArrayBuffer
+            let samples = ev.data
+            if (samples instanceof ArrayBuffer) samples = new Float32Array(samples)
             if (!samples || !samples.length) return
             const len = samples.length
             for (let i = 0; i < len; i++) {
