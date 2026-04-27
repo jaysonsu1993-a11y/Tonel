@@ -50,8 +50,6 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         audioService.onLevel((l) => setSelfLevel(l))
         audioService.onPeerLevel((uid, level) => {
           setPeerLevels(prev => ({ ...prev, [uid]: level }))
-          // Also update self level from server if it's our own userId
-          if (uid === userId) setSelfLevel(level)
         })
         await audioService.connectMixer(userId, roomId)
         await audioService.startCapture()

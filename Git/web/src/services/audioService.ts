@@ -402,6 +402,10 @@ class AudioService {
           this.onAudioFrame(new Float32Array(ev.data.f32))
         }
       }
+      // Connect source → worklet so it receives mic audio
+      if (this.source) {
+        this.source.connect(node)
+      }
       node.connect(this.audioContext.destination)
       this.processor = node
       URL.revokeObjectURL(url)
@@ -419,6 +423,10 @@ class AudioService {
       if (!this.muted) {
         this.onAudioFrame(new Float32Array(ev.inputBuffer.getChannelData(0)))
       }
+    }
+    // Connect source → processor so it receives mic audio
+    if (this.source) {
+      this.source.connect(node)
     }
     node.connect(this.audioContext.destination)
     this.processor = node

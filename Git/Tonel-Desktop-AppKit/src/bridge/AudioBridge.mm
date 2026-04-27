@@ -294,6 +294,8 @@ static void audioDataCallback(ma_device* dev, void* output,
         [self initialize];
         if (wasRunning) [self start];
     }
+    NSLog(@"[AudioBridge] Input device → index %ld (%s)", (long)index,
+          _state->deviceInited ? _state->device.capture.name : "pending");
 }
 
 - (void)setOutputDeviceIndex:(NSInteger)index {
@@ -306,6 +308,8 @@ static void audioDataCallback(ma_device* dev, void* output,
         [self initialize];
         if (wasRunning) [self start];
     }
+    NSLog(@"[AudioBridge] Output device → index %ld (%s)", (long)index,
+          _state->deviceInited ? _state->device.playback.name : "pending");
 }
 
 // ── Volume & mute ─────────────────────────────────────────────────────────────

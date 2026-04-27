@@ -232,7 +232,7 @@ Automatic: P2P is preferred, switches to Mixer when:
 
 | Client | Web URL | Signaling | Audio (Mixer) |
 |---|---|---|---|
-| AppKit (Production) | https://tonel.io | wss://api.tonel.io/signaling | Direct UDP 9003 |
+| AppKit (Production) | https://tonel.io | wss://tonel.io/signaling (port 443 → nginx → ws-proxy:9004) | Direct UDP 9003 |
 | Web (Trial) | https://tonel.io | wss://api.tonel.io/signaling | WebRTC DataChannel (direct DTLS to server IP) |
 | JUCE (Legacy) | - | TCP direct to config host | Direct UDP/TCP |
 

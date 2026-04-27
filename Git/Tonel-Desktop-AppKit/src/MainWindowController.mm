@@ -148,7 +148,7 @@ typedef NS_ENUM(NSInteger, PendingRoomAction) {
         self.pendingRoomCode = code;
         self.pendingPassword = password;
         self.pendingUserId   = userId;
-        [bridge connectToHost:@"tonel.io" port:9001];
+        [bridge connectToHost:@"tonel.io" port:443];
     }
 }
 
@@ -169,7 +169,7 @@ typedef NS_ENUM(NSInteger, PendingRoomAction) {
         self.pendingRoomCode = code;
         self.pendingPassword = password;
         self.pendingUserId   = userId;
-        [bridge connectToHost:@"tonel.io" port:9001];
+        [bridge connectToHost:@"tonel.io" port:443];
     }
 }
 

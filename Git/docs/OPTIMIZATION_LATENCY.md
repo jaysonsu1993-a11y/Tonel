@@ -152,6 +152,7 @@
 | 2026-04-23 | 80cc569 | P0: Web + Desktop 自适应抖动缓冲 |
 | 2026-04-23 | (this) | P1+P2: 5ms帧 + 定时混音 + Opus复杂度 + transferable |
 | 2026-04-27 | — | P1-2: 音频 RTT 测量替代信令 heartbeat 延迟显示 |
+| 2026-04-27 | — | fix: AppKit 设备选择、AppKit↔Web 房间互通、Web 电平表及音频采集修复 |
 
 ---
 

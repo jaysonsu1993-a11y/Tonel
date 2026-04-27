@@ -1,68 +1,7 @@
-// SettingsViewController.mm — Settings: CoreAudio device pickers + buffer/sample rate
+// SettingsViewController.mm — Settings: audio device pickers + buffer/sample rate
 #import "SettingsViewController.h"
 #import "S1Theme.h"
-#import <CoreAudio/CoreAudio.h>
-#import <AudioToolbox/AudioToolbox.h>
-
-// ── CoreAudio device enumeration ───────────────────────────────────────────
-
-static NSArray<NSString*>* EnumerateAudioDevices(Boolean inputOnly) {
-    NSMutableArray<NSString*>* names = [NSMutableArray array];
-
-    AudioObjectPropertyAddress propAddr = {
-        kAudioHardwarePropertyDevices,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain
-    };
-
-    UInt32 dataSize = 0;
-    OSStatus status = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject,
-                                                     &propAddr, 0, NULL, &dataSize);
-    if (status != noErr || dataSize == 0) return names;
-
-    NSUInteger count = dataSize / sizeof(AudioDeviceID);
-    AudioDeviceID* deviceIDs = (AudioDeviceID*)malloc(dataSize);
-    if (!deviceIDs) return names;
-
-    status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &propAddr,
-                                        0, NULL, &dataSize, deviceIDs);
-    if (status != noErr) {
-        free(deviceIDs);
-        return names;
-    }
-
-    AudioObjectPropertyScope scope = inputOnly
-        ? kAudioDevicePropertyScopeInput
-        : kAudioDevicePropertyScopeOutput;
-
-    for (NSUInteger i = 0; i < count; i++) {
-        AudioDeviceID devID = deviceIDs[i];
-
-        // Check that the device has streams in the requested direction
-        AudioObjectPropertyAddress streamsAddr = {
-            kAudioDevicePropertyStreams, scope, kAudioObjectPropertyElementMain
-        };
-        UInt32 streamsSize = 0;
-        AudioObjectGetPropertyDataSize(devID, &streamsAddr, 0, NULL, &streamsSize);
-        if (streamsSize == 0) continue;
-
-        // Get device name
-        CFStringRef nameRef = NULL;
-        UInt32 nameSize = sizeof(nameRef);
-        AudioObjectPropertyAddress nameAddr = {
-            kAudioDevicePropertyDeviceNameCFString,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain
-        };
-        AudioObjectGetPropertyData(devID, &nameAddr, 0, NULL, &nameSize, &nameRef);
-        if (nameRef) {
-            [names addObject:(__bridge_transfer NSString*)nameRef];
-        }
-    }
-
-    free(deviceIDs);
-    return names;
-}
+#import "../bridge/AudioBridge.h"
 
 // ── SettingsViewController ─────────────────────────────────────────────────
 
@@ -117,6 +56,8 @@ static NSArray<NSString*>* EnumerateAudioDevices(Boolean inputOnly) {
 
     _inputDevicePopup = [[NSPopUpButton alloc] init];
     _inputDevicePopup.translatesAutoresizingMaskIntoConstraints = NO;
+    _inputDevicePopup.target = self;
+    _inputDevicePopup.action = @selector(inputDeviceChanged:);
     [card addSubview:_inputDevicePopup];
 
     // ── Output Device ─────────────────────────────────────────────────────
@@ -125,6 +66,8 @@ static NSArray<NSString*>* EnumerateAudioDevices(Boolean inputOnly) {
 
     _outputDevicePopup = [[NSPopUpButton alloc] init];
     _outputDevicePopup.translatesAutoresizingMaskIntoConstraints = NO;
+    _outputDevicePopup.target = self;
+    _outputDevicePopup.action = @selector(outputDeviceChanged:);
     [card addSubview:_outputDevicePopup];
 
     // ── Separator ─────────────────────────────────────────────────────────
@@ -266,21 +209,39 @@ static NSArray<NSString*>* EnumerateAudioDevices(Boolean inputOnly) {
 }
 
 - (void)refreshDeviceLists {
-    NSArray<NSString*>* inputs  = EnumerateAudioDevices(true);
-    NSArray<NSString*>* outputs = EnumerateAudioDevices(false);
+    AudioBridge* audio = [AudioBridge shared];
+
+    NSArray<AudioDeviceInfo*>* inputs  = [audio inputDevices];
+    NSArray<AudioDeviceInfo*>* outputs = [audio outputDevices];
 
     [_inputDevicePopup removeAllItems];
     if (inputs.count > 0) {
-        [_inputDevicePopup addItemsWithTitles:inputs];
+        for (AudioDeviceInfo* d in inputs)
+            [_inputDevicePopup addItemWithTitle:d.name];
     } else {
         [_inputDevicePopup addItemWithTitle:@"(无可用设备)"];
     }
 
     [_outputDevicePopup removeAllItems];
     if (outputs.count > 0) {
-        [_outputDevicePopup addItemsWithTitles:outputs];
+        for (AudioDeviceInfo* d in outputs)
+            [_outputDevicePopup addItemWithTitle:d.name];
     } else {
         [_outputDevicePopup addItemWithTitle:@"(无可用设备)"];
+    }
+}
+
+- (void)inputDeviceChanged:(id)sender {
+    NSInteger idx = _inputDevicePopup.indexOfSelectedItem;
+    if (idx >= 0) {
+        [[AudioBridge shared] setInputDeviceIndex:idx];
+    }
+}
+
+- (void)outputDeviceChanged:(id)sender {
+    NSInteger idx = _outputDevicePopup.indexOfSelectedItem;
+    if (idx >= 0) {
+        [[AudioBridge shared] setOutputDeviceIndex:idx];
     }
 }
 
