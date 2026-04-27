@@ -110,7 +110,10 @@ function parseSpa1Header(buf: ArrayBuffer): {
   return { sequence, timestamp, userId, codec, dataSize }
 }
 
-function parseSpa1Body(buf: ArrayBuffer): Uint8Array {
+function parseSpa1Body(buf: ArrayBuffer, dataSize?: number): Uint8Array {
+  if (dataSize !== undefined) {
+    return new Uint8Array(buf, SPA1_HEADER_SIZE, dataSize)
+  }
   return new Uint8Array(buf, SPA1_HEADER_SIZE)
 }
 
@@ -408,7 +411,8 @@ class AudioService {
     for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i]
     const rms = Math.sqrt(sum / f32.length)
     this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
-    this.currentLevel = Math.min(1.0, this.smoothedLevel * 3) // scale for visibility
+    // Scale up significantly — typical speech RMS is 0.01-0.05
+    this.currentLevel = Math.min(1.0, this.smoothedLevel * 15)
 
     this.frameBuffer.push(f32)
     let total = 0
@@ -646,7 +650,7 @@ class AudioService {
     const header = parseSpa1Header(data)
     if (!header || header.dataSize === 0) return
 
-    const pcm = parseSpa1Body(data)
+    const pcm = parseSpa1Body(data, header.dataSize)
     const f32 = pcm16ToFloat32(pcm)
 
     // Direct buffer playback (simpler, more reliable than worklet ring buffer)
@@ -786,40 +790,45 @@ class AudioService {
 
   /** Switch to a different audio input device by its deviceId */
   async setInputDevice(deviceId: string): Promise<void> {
-    // Stop existing tracks
-    if (this.mediaStream) {
-      this.mediaStream.getAudioTracks().forEach(t => t.stop())
-    }
-    // Re-acquire with the chosen device
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: { exact: deviceId },
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl:  false,
-        sampleRate:       SAMPLE_RATE,
-        channelCount:     CHANNELS,
-      },
-      video: false,
-    })
-    // Reconnect source → analyser
-    if (this.audioContext && this.analyser) {
-      if (this.source) this.source.disconnect()
-      this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
-      this.source.connect(this.analyser)
-      // Reconnect source → capture processor so audio actually flows
-      if (this.processor) {
-        this.source.connect(this.processor)
+    try {
+      // Re-acquire with the chosen device (prefer over exact to handle device changes)
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: { ideal: deviceId },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl:  false,
+          sampleRate:       SAMPLE_RATE,
+          channelCount:     CHANNELS,
+        },
+        video: false,
+      })
+      // Stop old tracks only after new stream is ready
+      if (this.mediaStream) {
+        this.mediaStream.getAudioTracks().forEach(t => t.stop())
       }
+      this.mediaStream = newStream
+      // Reconnect source → analyser + processor
+      if (this.audioContext) {
+        if (this.source) try { this.source.disconnect() } catch (_) {}
+        this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
+        if (this.analyser) this.source.connect(this.analyser)
+        if (this.processor) this.source.connect(this.processor)
+      }
+    } catch (err) {
+      console.error('[Audio] setInputDevice failed:', err)
     }
   }
 
   /** Switch audio output device (speaker/headphones) */
   async setOutputDevice(deviceId: string): Promise<void> {
-    // Use setSinkId on the playback AudioContext (Chrome 110+, Edge, Opera)
-    const ctx = this.audioContext as any
-    if (ctx && typeof ctx.setSinkId === 'function') {
-      await ctx.setSinkId(deviceId)
+    try {
+      const ctx = this.audioContext as any
+      if (ctx && typeof ctx.setSinkId === 'function') {
+        await ctx.setSinkId(deviceId)
+      }
+    } catch (err) {
+      console.error('[Audio] setOutputDevice failed:', err)
     }
   }
 

@@ -23,7 +23,6 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const [selectedInput, setSelectedInput] = useState<string>('')
   const [selectedOutput, setSelectedOutput] = useState<string>('')
   const [latency, setLatency] = useState<number>(-1)
-  const [audioDebug, setAudioDebug] = useState<string>('')
   const joinedRef = useRef(false)
 
   // Load available audio devices AFTER init (needs permission for labels)
@@ -52,26 +51,14 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     // 初始化音频并连接混音服务器
     ;(async () => {
       try {
-        setAudioDebug('init...')
         await audioService.init()
-        refreshDevices()  // enumerate devices after mic permission granted
+        refreshDevices()
         audioService.onPeerLevel((uid, level) => {
           setPeerLevels(prev => ({ ...prev, [uid]: level }))
         })
-        setAudioDebug('connecting mixer...')
         await audioService.connectMixer(userId, roomId)
-        setAudioDebug('starting capture...')
         audioService.startCapture()
-        // Wait for worklet to load, then show final state
-        setTimeout(() => {
-          setAudioDebug(`FINAL: ${audioService.debugState()} | lvl=${audioService.currentLevel.toFixed(3)}`)
-        }, 2000)
-        // Keep updating level in debug every 2s
-        setInterval(() => {
-          setAudioDebug(`${audioService.debugState()} | lvl=${audioService.currentLevel.toFixed(3)} tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} selfLvl=${selfLevel.toFixed(3)}`)
-        }, 2000)
       } catch (err) {
-        setAudioDebug(`ERROR: ${err}`)
         console.error('[RoomPage] Audio init failed:', err)
       }
     })()
@@ -203,7 +190,6 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
 
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
       </header>
-      {audioDebug && <div style={{fontSize:'10px',color:'#666',padding:'2px 24px',background:'#1a1a1a'}}>{audioDebug} selfLvl={selfLevel.toFixed(3)}</div>}
 
       <div className="room-content">
         {/* 调音台区域 */}
