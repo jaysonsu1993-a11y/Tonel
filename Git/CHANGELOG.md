@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-04-28
+
+### Fixed (Web Audio Quality)
+- **Playback no longer creates a new `BufferSource` per packet.** The previous `playPcm16` path immediately called `src.start(0)` for every received 5ms PCM16 frame. With network jitter this meant overlapping playback during bursts (chorus / metallic distortion) and silent gaps when packets arrived late, plus an audible discontinuity at every 5ms boundary because nothing tied consecutive frames together. The `AudioWorkletNode` ring buffer that `initPlaybackWorklet` builds (1-second capacity, drains continuously on the audio thread) was already wired to `masterGain` but was never receiving samples — `updateAdaptiveBufferDepth` was even computing a target depth and posting it to a worklet that ignored the message. Mixed audio is now `postMessage`'d (transferable `ArrayBuffer`) into the worklet, which then plays the ring continuously, so frame boundaries become inaudible. ([Git/web/src/services/audioService.ts:591](Git/web/src/services/audioService.ts:591))
+- **Capture no longer drops the 64-sample tail of every `ScriptProcessor` callback.** `onAudioFrame` received 1024 samples per callback, sliced them into 4×240 (5ms) frames, and threw away the trailing 64 (1.33ms). That was a steady ~6.25% audio loss with a periodic micro-cut every 21.3ms — perceptually a fast clicking artifact stacked on top of the playback discontinuities above. The remainder is now stashed in `captureLeftover` and prepended to the next callback so no samples leak. `stopCapture()` clears the leftover so a stop/start cycle never carries stale samples across sessions. ([Git/web/src/services/audioService.ts:391](Git/web/src/services/audioService.ts:391))
+
+### Why this is a release
+Two pure-client audio path bugs that together produced the "very low quality on returned audio" symptom users heard when listening to themselves through the mixer. No server, proxy, or protocol change — only `Git/web/src/services/audioService.ts`. The server-side OPUS channel-count mismatch flagged during this investigation is a separate dormant bug (web only ever sends/receives PCM16, so it doesn't trigger today); it will be fixed in a follow-up release that also touches the C++ mixer + needs `tonel-mixer` redeploy.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `playPcm16` | Route received PCM16 → `playbackWorklet.port.postMessage` (transferable), drop per-packet `BufferSource.start(0)` |
+| `Git/web/src/services/audioService.ts` `onAudioFrame` | Stash 64-sample remainder in `captureLeftover`, prepend on next callback, clear in `stopCapture` |
+
 ## [1.0.6] - 2026-04-28
 
 ### Added (Documentation)

@@ -194,6 +194,11 @@ class AudioService {
   private processor:      AudioWorkletNode | ScriptProcessorNode | null = null
   private isCapturing:    boolean = false
   private sequence:       number = 0
+  // ScriptProcessor delivers 1024-sample callbacks but we ship 240-sample
+  // (5ms) frames. 1024 / 240 = 4 frames + 64-sample remainder. Stash the
+  // remainder here and prepend it on the next callback so no samples are
+  // dropped — otherwise the encoder leaks 1.33ms of audio every 21ms.
+  private captureLeftover: Float32Array = new Float32Array(0)
   // timestamp removed — now using wall-clock ms in SPA1 header for RTT
   // frameBuffer removed — onAudioFrame sends directly from ScriptProcessor data
 
@@ -396,20 +401,33 @@ class AudioService {
     this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
     this.currentLevel = Math.min(1.0, this.smoothedLevel * 5)
 
-    // Send audio directly as SPA1 frames — bypass frameBuffer accumulation.
-    // ScriptProcessor gives 1024 samples. Send as 4x 240-sample frames + discard remainder.
-    // This avoids the mysterious zero-data bug in the old frameBuffer extraction.
     if (this.audioWs?.readyState !== WebSocket.OPEN) return
     const uid = `${this.roomId}:${this.userId}`
+
+    // Concatenate any leftover from the previous callback in front of the
+    // new samples so frame boundaries are never dropped.
+    let buf: Float32Array
+    if (this.captureLeftover.length > 0) {
+      buf = new Float32Array(this.captureLeftover.length + f32.length)
+      buf.set(this.captureLeftover, 0)
+      buf.set(f32, this.captureLeftover.length)
+    } else {
+      buf = f32
+    }
+
     let offset = 0
-    while (offset + FRAME_SAMPLES <= f32.length) {
-      const frame = f32.subarray(offset, offset + FRAME_SAMPLES)
+    while (offset + FRAME_SAMPLES <= buf.length) {
+      const frame = buf.subarray(offset, offset + FRAME_SAMPLES)
       const pcm16 = float32ToPcm16(frame)
       const spa1 = buildSpa1Packet(pcm16, SPA1_CODEC_PCM16, this.sequence++, 0, uid)
       this.audioWs.send(spa1)
       this.txCount++
       offset += FRAME_SAMPLES
     }
+    // Carry the tail (always < FRAME_SAMPLES) into the next callback.
+    this.captureLeftover = offset < buf.length
+      ? new Float32Array(buf.subarray(offset))
+      : new Float32Array(0)
   }
 
   // ── Mixer WebSocket connection (control + audio) ───────────────────────────
@@ -607,13 +625,14 @@ class AudioService {
     this.rxLevel = Math.sqrt(rxSum / f32.length)
 
     this.playCount++
-    // Play immediately via BufferSource → masterGain → destination
-    const buffer = this.audioContext.createBuffer(CHANNELS, f32.length, SAMPLE_RATE)
-    buffer.getChannelData(0).set(f32)
-    const src = this.audioContext.createBufferSource()
-    src.buffer = buffer
-    src.connect(this.masterGain)
-    src.start(0)  // play immediately, no scheduling
+    // Push samples into the AudioWorklet ring buffer. Per-packet BufferSource
+    // start(0) overlapped on bursts and gapped on jitter — the worklet plays
+    // the ring continuously at the audio thread cadence, so the boundary
+    // between 5ms frames stays inaudible.
+    if (this.playbackWorklet) {
+      const copy = new Float32Array(f32)
+      this.playbackWorklet.port.postMessage(copy.buffer, [copy.buffer])
+    }
   }
 
   /**
@@ -795,6 +814,7 @@ class AudioService {
 
   public stopCapture(): void {
     this.isCapturing = false
+    this.captureLeftover = new Float32Array(0)
     if (this.processor) {
       try { this.processor.disconnect() } catch (_) {}
       if ('port' in this.processor) {
