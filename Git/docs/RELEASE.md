@@ -3,6 +3,22 @@
 The single canonical way to ship a new version. **No bare commits to `main`.**
 Every change to `main` must go through this flow.
 
+## Before you start any release
+
+Five-second sanity check that catches the cheapest mistakes:
+
+1. `git status` is clean (or holds *only* the changes this release will ship)
+2. `git rev-parse --abbrev-ref HEAD` is `main`
+3. `git fetch && git log origin/main..HEAD` shows no surprise — i.e. you are
+   ahead of `origin/main` by exactly the commits you intend to ship
+4. **`Git/deploy/health.sh` returns all-green** (or notes any pre-existing
+   warnings you'll want to distinguish from the ones your deploy might cause).
+   This is the single most important step — it establishes the baseline so
+   that if something breaks during the release, you know your release caused it.
+5. `ssh "$TONEL_SSH_HOST" 'cat /opt/tonel/VERSION'` matches the latest tag
+   on `main` (`git describe --tags --abbrev=0`). If it doesn't, find out why
+   *before* shipping anything new.
+
 ## TL;DR
 
 ```bash

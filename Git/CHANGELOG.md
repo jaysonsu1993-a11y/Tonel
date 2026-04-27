@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-04-28
+
+### Added (Documentation)
+- **`Git/docs/RELEASE.md` "Before you start any release" section** — five-step pre-flight checklist (clean tree, on main, in sync with origin, **`health.sh` baseline green**, `/opt/tonel/VERSION` matches latest tag). Established because the most expensive class of release-time mistake is "deploy something while the baseline is already broken, then mis-attribute the breakage to your own change". Single most important step: running `health.sh` before touching anything.
+- **`Git/deploy/README.md` "Quirks (known cosmetic, do not panic)" section** — captures three failure modes that look like real errors but are not, so future readers can recognize them in seconds rather than minutes:
+  - `wrangler pages deploy` hangs in cleanup *after* the deploy is already live (kill is safe)
+  - `api.tonel.io/signaling` returns HTTP 426 to `curl` even when healthy (curl can't reliably WS-upgrade through HTTP/2 edges; browser is the real test)
+  - `srv.tonel.io` looks unreachable from some domestic ISP routes due to SNI filtering, but works for browsers / cellular / international (this is the reason `health.sh` probes from the server, not the laptop — R1)
+- **`Git/deploy/README.md` "Emergency recovery" section** — exact PM2 commands to fall back to the legacy `/opt/tonel-server/` install if a future migration leaves the new path broken. Preserves the institutional knowledge from the v1.0.3 outage as a runbook rather than scattered through commit messages.
+- **`Git/deploy/.env.deploy.example` CF token permissions** — explicit list of the three permissions wrangler 4.x checks (`Pages: Edit` + `User Details: Read` + `Memberships: Read`), with the failure signature (`Authentication error [code: 10000]` on `/memberships`) so the next operator who hits it doesn't go through the same diagnostic dance.
+
+### Why this is a release
+Documentation-only release. Same reason as v1.0.5: "no bare commits to main" applies to docs. The new content captures three categories of know-how that previously only lived in the head of whoever shipped v1.0.3:
+1. The discipline of running `health.sh` before any change
+2. Three benign-but-confusing failure modes that look like real errors
+3. The exact emergency recovery procedure if the new layout ever fails again
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/docs/RELEASE.md` | "Before you start any release" pre-flight checklist |
+| `Git/deploy/README.md` | "Quirks" + "Emergency recovery" sections |
+| `Git/deploy/.env.deploy.example` | CF token permissions enumerated |
+
 ## [1.0.5] - 2026-04-28
 
 ### Added (Documentation)
