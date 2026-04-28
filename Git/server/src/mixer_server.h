@@ -108,12 +108,19 @@ private:
         bool jitter_primed = false;   // false until queue first reaches JITTER_TARGET
     };
 
-    // Jitter buffer parameters. Target depth = 1 frame trades 5 ms of
-    // end-to-end latency (60 ms → 65 ms baseline) for absorption of
-    // ±2.5 ms of network jitter — covers the typical sub-WAN case.
-    // If empirical jitter is wider, JITTER_TARGET can be raised to 2
-    // (10 ms cost, ±7.5 ms absorbed) without other code changes.
-    static constexpr int JITTER_TARGET    = 1;
+    // Jitter buffer parameters. Target depth N absorbs up to N × 5 ms of
+    // one-sided arrival jitter (frames arriving N×5 ms after their ideal
+    // time still hit the right tick). Average buffer wait ≈ (N - 0.5) × 5 ms,
+    // so latency cost scales with depth.
+    //
+    // History:
+    //   v1.0.34: depth 1 (5 ms cost, ≤5 ms jitter absorbed) — cut click
+    //            rate 35× (7.2/s → 0.21/s) but residual events from
+    //            occasional WSS-over-Cloudflare jitter spikes > 5 ms.
+    //   v1.0.35: depth 2 (10 ms cost, ≤10 ms jitter absorbed) — covers
+    //            the long tail of public-net jitter at the cost of
+    //            ~5 ms more end-to-end latency (65 ms → 70 ms).
+    static constexpr int JITTER_TARGET    = 2;
     // Hard cap to keep the queue from growing without bound when the
     // client TX clock drifts faster than the server tick (or short
     // bursts). 4 frames = 20 ms — past this we drop oldest, which

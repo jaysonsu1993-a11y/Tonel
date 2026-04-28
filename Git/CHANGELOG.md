@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.35] - 2026-04-28
+
+### Tuned (Jitter buffer depth 1 → 2 — absorb the long tail of WSS jitter)
+
+User confirmed v1.0.34 jitter buffer "几乎彻底解决了噪音" — normalized
+click energy dropped 13× (0.80 → 0.062), click rate dropped 35× (7.2/s
+→ 0.21/s). Residual 0.21 click/s remained, amplitude-independent.
+These are the events where public-internet jitter exceeded the
+`JITTER_TARGET=1` (5 ms) absorption window and fell through to the
+PLC fallback.
+
+Per the math (depth N absorbs up to N × 5 ms one-sided arrival jitter,
+average wait (N − 0.5) × 5 ms), bumping depth 1 → 2 covers 95th-pct
+WSS-over-Cloudflare jitter (~10 ms) at the cost of an extra 5 ms
+end-to-end latency: 65 ms → ~70 ms. Still inside the perceptual
+threshold for cross-room band rehearsal (~30–50 ms is where most
+people start to notice, depending on instrument).
+
+### Layer 1 byte-identical
+
+SNR 84.01 dB / THD 0.006% at amp 0.30 / 5 s = unchanged from v1.0.34.
+The only difference at the unit level is one extra silent priming tick
+at room join (5 ms more dead air at start), invisible in the 5 s window.
+
+### Reversibility
+
+If 70 ms feels noticeably laggier than 65 ms, revert with one constant
+change (`JITTER_TARGET = 2 → 1`); we land back at v1.0.34 behaviour.
+If 0.21 click/s residual goes to ~0 but isn't 100 % gone, JITTER_TARGET = 3
+(15 ms cost) is the next step.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/mixer_server.h` `JITTER_TARGET` | 1 → 2 |
+
 ## [1.0.34] - 2026-04-28
 
 ### Added (Server-side jitter buffer — first non-zero-latency fix; expected to drop click rate to ~0)
