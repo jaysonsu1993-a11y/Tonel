@@ -10,6 +10,10 @@ type SignalMessage =
   | { type: 'JOIN_ROOM_ACK'; room_id: string }
   | { type: 'CREATE_ROOM_ACK'; room_id: string }
   | { type: 'ERROR'; message: string }
+  // Sent by the server when a newer connection takes over this user_id —
+  // another device or tab joined with the same identity. The old session
+  // must surrender (do not reconnect) or it would race the new one.
+  | { type: 'SESSION_REPLACED'; user_id: string }
   // WebRTC mixer signaling relay
   | { type: 'MIXER_ANSWER'; target_user_id: string; sdp: string }
   | { type: 'MIXER_ICE_RELAY'; target_user_id: string; candidate: string; sdpMid: string }
@@ -21,6 +25,9 @@ class SignalService {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private roomId = ''
   private userId = ''
+  // Set after SESSION_REPLACED. Suppresses scheduleReconnect so we don't
+  // bounce back and immediately re-take over the new session in a loop.
+  private sessionReplaced = false
 
   // Ping/latency measurement
   private pingTimer: ReturnType<typeof setInterval> | null = null
@@ -56,6 +63,14 @@ class SignalService {
               continue
             }
 
+            // SESSION_REPLACED: a newer connection has taken over this uid.
+            // Flag the service so the imminent server-initiated close does
+            // not trigger reconnect, then forward to subscribers (App will
+            // surface the toast and route the user back home).
+            if (parsed.type === 'SESSION_REPLACED') {
+              this.sessionReplaced = true
+            }
+
             // Server sends PEER_JOINED with flat {user_id, ip, port} at top level,
             // but SignalMessage expects a nested peer object — normalize here.
             let msg: SignalMessage
@@ -80,7 +95,7 @@ class SignalService {
       this.ws.onclose = () => {
         console.log('[Signal] Disconnected')
         this.stopHeartbeat()
-        this.scheduleReconnect()
+        if (!this.sessionReplaced) this.scheduleReconnect()
       }
     })
   }
@@ -236,6 +251,12 @@ class SignalService {
       this.ws.close()
       this.ws = null
     }
+  }
+
+  /** Reset the session-replaced latch — call after the user explicitly
+   *  re-engages (logs in / joins a room) so future drops can reconnect. */
+  resetSessionReplaced(): void {
+    this.sessionReplaced = false
   }
 
   get isConnected(): boolean {

@@ -5,6 +5,97 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.39] - 2026-04-29
+
+### Fixed (Room session takeover — same `user_id` no longer kicks the live session)
+
+User: "现在的房间功能比较不稳定，会出现用户被挤出房间的状况。"
+
+Two layers of the same root cause — both servers used `user_id` as the
+primary key and silently overwrote on duplicate join, with no takeover
+protocol. When the *old* connection eventually closed, its on-close
+cascade tore down the room/uid slots that now belonged to the *new*
+connection. Net effect: open the same site on a second device (or two
+tabs sharing the persisted `tonel_guest_id`, or any WeChat-logged-in
+user logging in twice — uid resolves to nickname) and a few seconds
+after the second device joins, the second device gets kicked out.
+
+The fix is a "newer session wins, old session is told and bows out"
+protocol on both layers:
+
+- `signaling_server`: `process_join_room` detects an existing ctx for
+  the same uid and marks it `displaced`. `on_close` for a displaced
+  ctx skips the leave_room / user_id_to_ctx_ / user_manager_ cascade.
+  The displaced client is sent `SESSION_REPLACED` and its TCP closed.
+- `mixer_server`: `MIXER_JOIN` captures the existing
+  `UserEndpoint.tcp_client` if it differs from the new one, frees the
+  old opus state, overwrites the slot, and after releasing the lock
+  notifies + closes the old TCP. `clear_tcp_client` runs on the close
+  but no longer matches any UE (we already overwrote), so the new
+  session stays clean.
+
+The web client (`signalService` + `audioService`) handles
+`SESSION_REPLACED`: the signal service sets a latch that suppresses
+`scheduleReconnect` (otherwise we'd race-reconnect into a takeover
+loop). `App.tsx` shows a one-shot modal — "账号已在其他设备登录" — and
+routes the user back home; the latch is cleared when the user
+acknowledges so future drops can still reconnect.
+
+### Added (Deep-link rooms — `/room/<id>` URLs with a password gate)
+
+User: "进入房间后，域名能不能变成 /房间号 的子页面？房间是有密码保护的，需要输入密码才能进。"
+
+`App.tsx` now mirrors room state into `window.history`:
+
+- Entering a room pushes `/room/<id>`; leaving pushes `/`.
+- Browser back/forward triggers leave-room / re-prompt as appropriate
+  (a popstate listener watches the URL).
+- First-load on `/room/<id>` opens a password modal (works for both
+  password-protected rooms and open rooms — open rooms accept an
+  empty password). Errors stay inline on the modal so users can retry
+  without losing the URL.
+
+This also gives Tonel a first shareable surface: send a friend
+`https://tonel.io/room/ABCD` and they land directly on the password
+prompt. URL-sync is paused while the modal is up so the deep-link
+URL isn't clobbered before the user submits.
+
+The room-id regex is `[A-Za-z0-9_-]+`, which matches the codepath
+already accepted by the create-room form.
+
+### Added (`www.tonel.io` alias + HSTS at the direct-origin nginx)
+
+User: "用户无论在什么终端，输入 tonel.io 就能正常访问。"
+
+`Git/ops/nginx/tonel.io.conf` now also serves `www.tonel.io` (301 →
+naked tonel.io) and emits a `Strict-Transport-Security` header
+(`max-age=15552000; includeSubDomains; preload`). The 80-listener
+adds the same www→naked redirect.
+
+Important: the production edge for `tonel.io` is **Cloudflare Pages**,
+not this nginx (only the legacy direct-origin path hits nginx). To
+actually wire `www.tonel.io` in production:
+
+1. Cloudflare Pages → tonel-web project → Custom domains → add
+   `www.tonel.io`. CF auto-creates the CNAME.
+2. Cloudflare Bulk Redirects (or Page Rules) → `www.tonel.io/*` →
+   `https://tonel.io/$1` (301).
+3. Cloudflare → SSL/TLS → Edge Certificates → "Always Use HTTPS" on,
+   HSTS on (Max Age 6mo, Include Subdomains, Preload).
+
+After the CF HSTS has been served stably for ~2 weeks without
+issues, submit `tonel.io` to https://hstspreload.org/ so even
+first-visit traffic skips HTTP entirely.
+
+### Notes
+
+- No audio path changed: jitter buffer parameters and broadcast
+  timing are untouched. Layer 1 + Layer 1.5 + Layer 2 audio test
+  suites all PASS pre-deploy.
+- Server-side fixes (mixer + signaling) compile clean with no new
+  warnings; the existing `unused-includes` clangd notes are
+  pre-existing.
+
 ## [1.0.38] - 2026-04-29
 
 ### Fixed (Jitter buffer cap 4 → 8 — 4–6× drop in PLC click rate, no latency cost)

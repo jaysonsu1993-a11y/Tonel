@@ -361,8 +361,22 @@ void MixerServer::handle_control_message(uv_stream_t* client,
             return;
         }
         Room* room = getOrCreateRoom(j.room_id);
+        uv_stream_t* displaced_tcp = nullptr;
         {
             std::lock_guard<std::mutex> lock(rooms_mutex_);
+            // Session takeover on the audio path: if a UE for this uid
+            // already exists with a *different* tcp_client, the old session
+            // is being replaced. Capture the old tcp_client so we can close
+            // it after the lock releases — clear_tcp_client (which runs
+            // when the close fires) iterates rooms but won't match anything
+            // by then because we've already overwritten the slot below.
+            auto existing = room->users.find(j.user_id);
+            if (existing != room->users.end() &&
+                existing->second.tcp_client != nullptr &&
+                existing->second.tcp_client != client) {
+                displaced_tcp = existing->second.tcp_client;
+                opus_state_free(&existing->second.opus);
+            }
             UserEndpoint ue;
             ue.user_id = j.user_id;
             ue.addr_valid = false;
@@ -380,6 +394,18 @@ void MixerServer::handle_control_message(uv_stream_t* client,
                     std::cout << "[MixerServer] Recording started: " << path << std::endl;
                 }
             }
+        }
+        if (displaced_tcp) {
+            // Notify (best-effort) and close the old TCP outside the lock.
+            send_tcp_response(displaced_tcp,
+                "{\"type\":\"SESSION_REPLACED\",\"user_id\":\"" + j.user_id + "\"}\n");
+            if (!uv_is_closing((uv_handle_t*)displaced_tcp)) {
+                uv_close((uv_handle_t*)displaced_tcp, [](uv_handle_t* h) {
+                    delete reinterpret_cast<uv_tcp_t*>(h);
+                });
+            }
+            std::cout << "[MixerServer] Session takeover for " << j.user_id
+                      << " in room " << j.room_id << std::endl;
         }
         // Issue #4 fix: tell client our UDP port so it can send a handshake.
         send_tcp_response(client, SimpleJson::make_mixer_join_ack(udp_port_));

@@ -280,6 +280,15 @@ void SignalingServer::on_close(uv_handle_t* handle) {
         std::cout << "[Mixer] WebRTC mixer proxy disconnected" << std::endl;
     }
     std::string uid = ctx->user_id;
+    // displaced = a newer session for the same uid took over before this
+    // close fired. The room/user/uid slots already point at the new ctx;
+    // running the leave cascade here would erase them and kick the live
+    // session out of the room. Drop only this ctx's own resources.
+    if (ctx->displaced) {
+        std::cout << "[Room] Closing displaced ctx for " << uid << std::endl;
+        delete ctx;
+        return;
+    }
     if (!uid.empty()) {
         // Collect rooms first (get_all_rooms snapshot before we start mutating)
         std::vector<std::string> room_ids;
@@ -460,6 +469,37 @@ void SignalingServer::process_join_room(uv_stream_t* client,
     }
     auto* ctx = static_cast<ClientContext*>(client->data);
     if (ctx) ctx->user_id = SimpleJson::json_escape(user_id);
+
+    // Session takeover: if another live ctx is bound to the same user_id,
+    // the *new* one wins. The old ctx is marked displaced so its eventual
+    // on_close does NOT cascade leave_room / user_id_to_ctx_.erase /
+    // user_manager_.remove_user_no_close — those slots now belong to the
+    // new session, and erasing them would silently kick the new client
+    // out of the room a few seconds after it joined. (See ClientContext
+    // ::displaced for context.)
+    ClientContext* displaced_ctx = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(client_map_mutex_);
+        auto it = user_id_to_ctx_.find(user_id);
+        if (it != user_id_to_ctx_.end() && it->second != ctx) {
+            displaced_ctx = it->second;
+        }
+    }
+    if (displaced_ctx) {
+        displaced_ctx->displaced = true;
+        // Best-effort notification — write is queued, then we close the
+        // stream. uv_close cancels pending writes, so the message may not
+        // reach the old client; the correctness fix is the displaced flag,
+        // the SESSION_REPLACED frame is purely UX.
+        std::string notice = "{\"type\":\"SESSION_REPLACED\",\"user_id\":\""
+                           + SimpleJson::json_escape(user_id) + "\"}\n";
+        send_response((uv_stream_t*)&displaced_ctx->tcp_handle, notice);
+        if (!uv_is_closing((uv_handle_t*)&displaced_ctx->tcp_handle)) {
+            uv_close((uv_handle_t*)&displaced_ctx->tcp_handle, on_close);
+        }
+        std::cout << "[Room] Session takeover for " << user_id
+                  << " — old ctx displaced" << std::endl;
+    }
 
     // Store or update user with their P2P address info
     User* existingUser = user_manager_.get_user(user_id);

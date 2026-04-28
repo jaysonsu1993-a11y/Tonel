@@ -168,6 +168,10 @@ export class AudioService {
   private peerLevelCallback: PeerLevelCallback | null = null
   private peerLevels: Map<string, number> = new Map()
 
+  // Session takeover notification (mixer server emits SESSION_REPLACED when
+  // another connection joins with the same user_id).
+  private sessionReplacedCallback: (() => void) | null = null
+
   // Audio latency (RTT via control WebSocket PING/PONG)
   private pingTimer:        ReturnType<typeof setInterval> | null = null
   // @ts-ignore — pingSentAt used in startPing
@@ -634,6 +638,12 @@ export class AudioService {
   /** Subscribe to remote peer level updates. Callback receives (userId, level 0-1). */
   onPeerLevel(cb: PeerLevelCallback): void {
     this.peerLevelCallback = cb
+  }
+
+  /** Notified once when this session is displaced by a newer join with the
+   *  same user_id (e.g. logging in on a second device). */
+  onSessionReplaced(cb: () => void): void {
+    this.sessionReplacedCallback = cb
   }
 
   /** Get last known level for a peer (0-1), or 0 if unknown. */
@@ -1143,6 +1153,14 @@ export class AudioService {
             for (const cb of this.latencyCallbacks) {
               try { cb(rtt) } catch (_) {}
             }
+          }
+        } else if (msg.type === 'SESSION_REPLACED') {
+          // Another device/tab joined with the same userId. The audio path
+          // server-side has already handed our slot to the new session;
+          // emit so App can route the user back home with a toast.
+          console.warn('[Mixer] Session replaced by another device for', msg.user_id)
+          if (this.sessionReplacedCallback) {
+            try { this.sessionReplacedCallback() } catch (_) {}
           }
         }
       } catch (_) {

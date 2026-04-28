@@ -6,6 +6,7 @@ export function useSignal() {
   const [isConnected, setIsConnected] = useState(false)
   const [peers, setPeers] = useState<PeerInfo[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [sessionReplaced, setSessionReplaced] = useState(false)
 
   useEffect(() => {
     const unsub = signalService.onMessage((msg: SignalingMessage) => {
@@ -24,6 +25,9 @@ export function useSignal() {
       } else if (msg.type === 'ERROR') {
         const m = msg as { type: string; message: string }
         setError(m.message)
+      } else if (msg.type === 'SESSION_REPLACED') {
+        // Surface to App so it can route back home with a notice.
+        setSessionReplaced(true)
       }
     })
     return () => {
@@ -74,10 +78,17 @@ export function useSignal() {
     setIsConnected(false)
   }, [])
 
+  const acknowledgeSessionReplaced = useCallback(() => {
+    setSessionReplaced(false)
+    signalService.resetSessionReplaced()
+  }, [])
+
   return {
     isConnected,
     peers,
     error,
+    sessionReplaced,
+    acknowledgeSessionReplaced,
     connect,
     createRoom,
     joinRoom,

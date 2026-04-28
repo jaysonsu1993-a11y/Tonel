@@ -16,6 +16,12 @@ struct ClientContext {
     SignalingServer* server;
     std::string user_id;
     uv_tcp_t tcp_handle;
+    // True when a newer session for the same user_id has taken over.
+    // Set by process_join_room when it kicks an existing ctx; on_close
+    // honors it by skipping the leave_room/user_id_to_ctx_/user_manager_
+    // cascade — that state already belongs to the new ctx and would
+    // otherwise erase a live session.
+    bool displaced = false;
     explicit ClientContext(SignalingServer* srv);
 };
 
