@@ -152,6 +152,52 @@ static int test_track_count() {
     return 0;
 }
 
+// N-1 mix invariants (v1.0.15):
+//   1. mixExcluding(uid) sums every track *except* uid's.
+//   2. mixExcluding does NOT consume; the caller must call consumeAllTracks.
+//   3. Excluding a user that doesn't exist is a clean mix-all (no-op).
+static int test_mix_excluding() {
+    AudioMixer m;
+    float t1[480], t2[480], t3[480];
+    for (int i = 0; i < 480; ++i) { t1[i] = 0.2f; t2[i] = 0.3f; t3[i] = 0.4f; }
+    m.addTrack("a", t1, 480);
+    m.addTrack("b", t2, 480);
+    m.addTrack("c", t3, 480);
+
+    float out[480];
+    m.mixExcluding("b", out, 480);     // expect 0.2 + 0.4 = 0.6 everywhere
+    for (int i = 0; i < 480; ++i) {
+        if (!approx(out[i], 0.6f)) {
+            std::fprintf(stderr, "FAIL: test_mix_excluding — out[%d] = %f, expected 0.6 (a+c)\n", i, out[i]);
+            return 1;
+        }
+    }
+
+    // mixExcluding must NOT have consumed — a second mix still gives 0.6.
+    m.mixExcluding("b", out, 480);
+    if (!approx(out[0], 0.6f)) {
+        std::fprintf(stderr, "FAIL: test_mix_excluding — second mix returned %f, expected 0.6 (mixExcluding consumed unexpectedly)\n", out[0]);
+        return 1;
+    }
+
+    // Excluding a non-existent user is a full mix.
+    m.mixExcluding("ghost", out, 480);
+    if (!approx(out[0], 0.9f)) {     // 0.2 + 0.3 + 0.4 = 0.9
+        std::fprintf(stderr, "FAIL: test_mix_excluding — ghost exclude gave %f, expected 0.9 (a+b+c)\n", out[0]);
+        return 1;
+    }
+
+    // consumeAllTracks then mix → silence.
+    m.consumeAllTracks();
+    m.mixAll(out, 480);
+    if (out[0] != 0.0f) {
+        std::fprintf(stderr, "FAIL: test_mix_excluding — after consumeAllTracks, mixAll gave %f, expected 0\n", out[0]);
+        return 1;
+    }
+    std::printf("PASS: test_mix_excluding\n");
+    return 0;
+}
+
 // Soft-clip invariants (v1.0.11):
 //   1. Below the knee (|x| <= 0.85) the mix output is byte-identical to
 //      the linear sum — single-talker audio MUST NOT be touched.
@@ -247,6 +293,7 @@ static int run_mixer_tests() {
     failures += test_consume_after_mix();
     failures += test_soft_clip_below_knee();
     failures += test_soft_clip_above_knee();
+    failures += test_mix_excluding();
     std::printf("\n=== AudioMixer: %d test(s) failed ===\n\n", failures);
     return failures;
 }

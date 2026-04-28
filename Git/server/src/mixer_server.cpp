@@ -607,15 +607,38 @@ void MixerServer::broadcast_mixed_audio(Room* room,
                                          uint16_t timestamp) {
     const int frame_count = audio_frames_;
 
-    std::vector<float> mixed(frame_count);
-    room->mixer.mix(mixed.data(), frame_count);
+    // Per-recipient N-1 mix.
+    //
+    // Each user receives the sum of every *other* user's audio, with
+    // their own track excluded. The previous design ran one global mix
+    // and broadcast the same bytes to everyone, which sent every user
+    // their own voice as a delayed echo. Stacked with the receiver's
+    // own live capture playing through their speakers, that 30–80 ms
+    // delayed self-loop sounded like volume-correlated distortion
+    // overlaid on the source signal — comb-filter artefacts at speech
+    // peaks, exactly the v1.0.14 residual the listener reported. With
+    // N-1 mix, a recipient's own voice never round-trips through the
+    // server; only true peer audio reaches them, so only true peer
+    // audio is in the mix sum (which keeps it well below the
+    // soft-clip knee for typical voices).
+    //
+    // We compute the full mix once for the recording sink, then mix
+    // again per recipient with their own track excluded. CPU cost is
+    // O(N) mix passes per tick; for N ≤ 10 users this is well under
+    // 0.1 ms on the production server. The Opus path still uses the
+    // global mix (no Opus client today), so an Opus user would still
+    // hear their own voice — accept this as a known gap until Opus is
+    // wired up for real, and personalise PCM16 only.
+
+    std::vector<float> fullMix(frame_count);
+    room->mixer.mixAll(fullMix.data(), frame_count);
 
     // Debug: log mix RMS every 1000 broadcasts
     {
         static int bc = 0;
         if (bc++ % 1000 == 0) {
             float rms = 0;
-            for (int i = 0; i < frame_count; i++) rms += mixed[i] * mixed[i];
+            for (int i = 0; i < frame_count; i++) rms += fullMix[i] * fullMix[i];
             rms = std::sqrt(rms / frame_count);
             std::cout << "[MixerServer] Broadcast #" << bc
                       << " rms=" << rms
@@ -624,18 +647,18 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         }
     }
 
-    // Record the mixed audio if this room is being recorded
+    // Record the full (everyone-included) mix if this room is being recorded.
     if (room->recording) {
-        recording_manager_.writeFrames(room->id, mixed.data(), frame_count);
+        recording_manager_.writeFrames(room->id, fullMix.data(), frame_count);
     }
 
-    // Pre-encode once for all recipients (mixed audio is identical for everyone)
-    // Opus encoding
+    // Opus encoding from the full mix (Opus path is not personalised yet —
+    // PCM16 is what every shipping client uses).
     std::vector<uint8_t> opus_encoded;
     bool has_opus = false;
     {
         opus_encoded.resize(4000);
-        int encoded = opus_encode_packet(mixed.data(), frame_count, 2,
+        int encoded = opus_encode_packet(fullMix.data(), frame_count, 2,
                                          opus_encoded.data(), (int)opus_encoded.size(),
                                          96000);
         if (encoded > 0) {
@@ -644,23 +667,27 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         }
     }
 
-    // PCM16 encoding
+    // Per-recipient N-1 PCM16 mix and broadcast — caller must hold rooms_mutex_.
+    std::vector<float>   recipientMix(frame_count);
     std::vector<uint8_t> pcm_encoded(frame_count * sizeof(int16_t));
-    float_to_pcm16(mixed.data(),
-                   reinterpret_cast<int16_t*>(pcm_encoded.data()),
-                   frame_count);
-
-    // Send to each recipient via UDP — caller must hold rooms_mutex_
     for (const auto& kv : room->users) {
         if (!kv.second.addr_valid) continue;
         const UserEndpoint& ue = kv.second;
         const struct sockaddr_in& addr = ue.addr;
 
+        // N-1 mix (everyone *but* this recipient) — fresh per recipient.
+        room->mixer.mixExcluding(kv.first, recipientMix.data(), frame_count);
+        float_to_pcm16(recipientMix.data(),
+                       reinterpret_cast<int16_t*>(pcm_encoded.data()),
+                       frame_count);
+
         uint8_t codec = ue.preferred_codec;
         const uint8_t* audio_data;
         size_t audio_bytes;
-
         if (codec == SPA1_CODEC_OPUS && ue.opus.valid && has_opus) {
+            // NOTE: Opus path is the global full mix, NOT N-1; this is
+            // a known regression for Opus listeners until per-recipient
+            // Opus encoding is wired up. No production client uses Opus.
             audio_data = opus_encoded.data();
             audio_bytes = opus_encoded.size();
         } else {
@@ -675,9 +702,7 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         out_pkt->magic      = htonl(SPA1_MAGIC);
         out_pkt->sequence   = htons(sequence);
         out_pkt->timestamp  = htons(timestamp);
-        // Write recipient's "roomId:userId" so the web proxy can route by userId.
         const std::string uid_key = room->id + ":" + kv.first;
-        // P1-1: userId is now 64 bytes
         std::memset(out_pkt->userId, 0, 64);
         std::strncpy(reinterpret_cast<char*>(out_pkt->userId), uid_key.c_str(), 63);
         out_pkt->codec      = codec;
@@ -702,6 +727,9 @@ void MixerServer::broadcast_mixed_audio(Room* room,
             delete req;
         }
     }
+
+    // Done with all per-recipient mixes — consume tracks for this tick.
+    room->mixer.consumeAllTracks();
 }
 
 // ============================================================

@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.15] - 2026-04-28
+
+### Fixed (Server Mixer — "失真与原音频音量正相关")
+
+The remaining residual distortion turned out to be two compounding
+issues at the server. Both were exposed by a fresh amplitude sweep on
+the existing Node test:
+
+| Sent amplitude | THD before | THD after |
+|----------------|-----------:|-----------:|
+| 0.30           | 0.006 %    | 0.006 %   |
+| 0.50           | 0.004 %    | 0.004 %   |
+| 0.70           | 0.002 %    | 0.002 %   |
+| 0.90           | **0.064 %** | **0.002 %** |
+| 0.95           | **0.484 %** | **0.002 %** |
+| 1.50 (overdrive) | 16.4 %  | 15.6 %    |
+
+### Two changes, both at the mixer
+
+- **Soft-clip knee 0.85 → 0.95.** At 0.85 the tanh saturation engaged
+  for any peak above 0.85, so a normal speaking voice with peaks at
+  0.85–0.95 took a small amount of THD on every speech burst — exactly
+  the volume-correlated distortion listeners reported. Raising the
+  knee to 0.95 keeps ordinary voice in the linear region; the tanh
+  region only activates near actual full-scale, where it's actually
+  preventing real clipping rather than baking in distortion "just in
+  case." Below 0.95 → byte-identical to a no-clip path. Above 0.95 →
+  smooth saturation as before. ([Git/server/src/audio_mixer.h:154](Git/server/src/audio_mixer.h:154))
+
+- **Per-recipient N-1 mix.** The previous design ran one global mix
+  per tick and broadcast the same bytes to every user, including the
+  user whose own voice was in the mix. That self-loop arrived back at
+  the speaker 30–80 ms later and combed against the receiver's own
+  live audio path — at speech peaks the comb-filter sidebands
+  manifested as volume-correlated distortion overlaid on the source
+  signal. With N-1 mix, each recipient hears the sum of every *other*
+  user, never themselves; their own voice never round-trips through
+  the server. As a side effect, the mixer sum stays smaller (less
+  total content per recipient), so soft-clip activations get even
+  rarer in multi-talker rooms. ([Git/server/src/mixer_server.cpp:631](Git/server/src/mixer_server.cpp:631))
+
+  Implementation: `AudioMixer` grew three new methods so the broadcast
+  loop can run one mix per recipient without consuming tracks on
+  every pass — `mixAll(out, n)`, `mixExcluding(uid, out, n)`, and
+  `consumeAllTracks()`. Existing `mix(...)` is now a wrapper around
+  `mixAll + consumeAllTracks` so older tests and call sites still
+  work. CPU: O(N·tracks) per broadcast; for N ≤ 10 this is ~0.05 ms
+  per tick, well below the 5 ms broadcast budget.
+  ([Git/server/src/audio_mixer.h:34](Git/server/src/audio_mixer.h:34))
+
+### Known limitation
+
+The Opus encoding path still uses the global full mix (not N-1).
+That means an Opus-using listener would still hear themselves looped
+back. No production client uses Opus today (web and AppKit both
+default to PCM16), so this is documented and deferred until Opus is
+actually wired up.
+
+### Latency impact
+
+End-to-end audio latency is unchanged. The N-1 mix adds N-1 extra
+mix passes per broadcast tick (~10 µs each at typical sizes); the
+knee change is one constant. Both are well below the latency budget.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` `softClipBuffer` | Raise knee 0.85 → 0.95 |
+| `Git/server/src/audio_mixer.h` `mixAll`, `mixExcluding`, `consumeAllTracks` | Split mix from consume so the broadcast loop can run a clean N-1 mix per recipient |
+| `Git/server/src/mixer_server.cpp` `broadcast_mixed_audio` | Loop recipients, call `mixExcluding` per recipient, encode PCM16 per recipient, send. Consume tracks once at the end. |
+| `Git/server/src/mixer_server_test.cpp` | Add `test_mix_excluding` regression test for the new invariants |
+
 ## [1.0.14] - 2026-04-28
 
 ### Fixed (Web Capture — "失真噪音和源信号混合")

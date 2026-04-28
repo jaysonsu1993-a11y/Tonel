@@ -32,10 +32,28 @@ public:
     void setWeight(const std::string& userId, float weight);
 
     // Mix all tracks into the output buffer.
-    // output must have space for at least frameCount samples.
-    // Each sample is the sum of all track samples multiplied by their weights,
-    // clamped to [-1.0f, 1.0f] to prevent clipping.
+    // Existing semantics: accumulate + soft clip + consume tracks.
+    // Backward-compatible wrapper around mixAll() + consumeAllTracks().
     void mix(float* output, int frameCount);
+
+    // Mix all tracks into output. Applies soft clip. Does NOT consume
+    // tracks (the caller can call mix again, e.g. for a different
+    // recipient with a different exclusion). Use consumeAllTracks()
+    // explicitly when done.
+    void mixAll(float* output, int frameCount);
+
+    // Mix every track *except* the one belonging to excludeUserId. This is
+    // the per-recipient N-1 mix used by the broadcast loop: each user
+    // hears the sum of the *other* users, never themselves looped back.
+    // Eliminates the self-echo round-trip that listeners reported as
+    // "voice + distortion overlay." Applies soft clip. Does NOT consume.
+    void mixExcluding(const std::string& excludeUserId, float* output, int frameCount);
+
+    // Mark all tracks consumed: clears frameCount on tracks that had
+    // fresh data this tick, decays lastRms on silent ones. Call exactly
+    // once per broadcast tick, after every per-recipient mixExcluding
+    // pass has finished reading the tracks.
+    void consumeAllTracks();
 
     // Returns the number of currently active tracks
     size_t trackCount() const;
@@ -57,6 +75,10 @@ private:
     };
 
     std::unordered_map<std::string, Track> tracks_;
+
+    // Internal helpers shared by mix(), mixAll(), mixExcluding().
+    void accumulate(const std::string* excludeUserId, float* output, int frameCount) const;
+    static void softClipBuffer(float* output, int frameCount);
 };
 
 // ============================================================
@@ -98,56 +120,43 @@ inline void AudioMixer::setWeight(const std::string& userId, float weight) {
     }
 }
 
-inline void AudioMixer::mix(float* output, int frameCount) {
-    // 1. Zero the output
+inline void AudioMixer::accumulate(const std::string* excludeUserId, float* output, int frameCount) const {
     std::memset(output, 0, frameCount * sizeof(float));
-
-    // 2. Accumulate all tracks, then mark them consumed.
-    //
-    // Consume-style: a track contributes to *exactly one* mix per addTrack().
-    // Without the post-mix `frameCount = 0`, a track that stops being
-    // refreshed (user mutes, packet loss, client stalls) keeps replaying
-    // its last 5 ms frame on every 5 ms broadcast — a 200 Hz periodic
-    // repetition of a fixed 240-sample slice that listeners hear as a
-    // metallic "电流声" floor noise. Clearing frameCount makes a missing
-    // packet equal to silence rather than to "loop forever."
-    for (auto& kv : tracks_) {
-        Track& t = kv.second;
-        if (t.frameCount == 0) {
-            // Silent tick — decay the cached level so the UI meter falls
-            // off when a user mutes/disconnects instead of staying stuck.
-            t.lastRms *= 0.5f;
-            continue;
-        }
+    for (const auto& kv : tracks_) {
+        if (excludeUserId && kv.first == *excludeUserId) continue;
+        const Track& t = kv.second;
+        if (t.frameCount == 0) continue;
         const float w = t.weight;
         const float* src = t.audio;
         int count = std::min(frameCount, t.frameCount);
         if (w == 1.0f) {
-            for (int i = 0; i < count; ++i) {
-                output[i] += src[i];
-            }
+            for (int i = 0; i < count; ++i) output[i] += src[i];
         } else {
-            for (int i = 0; i < count; ++i) {
-                output[i] += src[i] * w;
-            }
+            for (int i = 0; i < count; ++i) output[i] += src[i] * w;
         }
-        t.frameCount = 0;
     }
+}
 
-    // 3. Soft clip — saturate above the knee instead of hard-clamping.
+inline void AudioMixer::softClipBuffer(float* output, int frameCount) {
+    // Soft clip — saturate above the knee instead of hard-clamping.
     //
     // The previous implementation was a hard clip (clamp to [-1, 1]),
-    // which is what produced the "音量稍大失真噪音" symptom: when two
-    // users spoke simultaneously the sum exceeded ±1.0 and the
-    // brick-wall clip turned the waveform into a square wave full of
-    // odd harmonics, audible as gritty distortion. A knee-based soft
-    // clipper transparently passes anything in [-0.85, 0.85] (so
-    // single-talker audio is byte-identical to before) and uses tanh
-    // to smoothly compress the [0.85, 1.0] region — no harmonics, no
-    // square-wave artifact. Zero added latency; tanh is only invoked
-    // on samples that exceed the knee.
-    constexpr float kKnee  = 0.85f;
-    constexpr float kRoom  = 1.0f - kKnee;  // 0.15
+    // which is what produced the "音量稍大失真噪音" symptom. A
+    // knee-based soft clipper transparently passes anything in
+    // [-kKnee, kKnee] (so normal-volume audio is byte-identical to a
+    // pure linear path) and uses tanh to smoothly compress the
+    // [kKnee, 1.0] region — no harmonics, no square-wave artifact,
+    // zero added latency.
+    //
+    // v1.0.15 raised the knee from 0.85 to 0.95. At 0.85 the soft clip
+    // was visible-on-the-test-bench at peak amplitudes ≥ 0.9
+    // (THD ~0.06% at amp=0.9, ~0.5% at amp=0.95) — voice peaks land
+    // there often enough that listeners reported volume-correlated
+    // distortion. At 0.95 the same peaks pass through linearly; the
+    // tanh region only activates near actual full-scale, so the
+    // saturation kicks in only when it has to, not "just in case."
+    constexpr float kKnee  = 0.95f;
+    constexpr float kRoom  = 1.0f - kKnee;  // 0.05
     for (int i = 0; i < frameCount; ++i) {
         const float x = output[i];
         if (x > kKnee) {
@@ -156,4 +165,39 @@ inline void AudioMixer::mix(float* output, int frameCount) {
             output[i] = -kKnee + kRoom * std::tanh((x + kKnee) / kRoom);
         }
     }
+}
+
+inline void AudioMixer::mixAll(float* output, int frameCount) {
+    accumulate(nullptr, output, frameCount);
+    softClipBuffer(output, frameCount);
+}
+
+inline void AudioMixer::mixExcluding(const std::string& excludeUserId, float* output, int frameCount) {
+    accumulate(&excludeUserId, output, frameCount);
+    softClipBuffer(output, frameCount);
+}
+
+inline void AudioMixer::consumeAllTracks() {
+    // Consume-style: a track contributes to *exactly one* mix tick after
+    // each addTrack(). Without this, a track that stops being refreshed
+    // (user mutes, packet loss, client stalls) keeps replaying its last
+    // 5 ms frame on every 5 ms broadcast — a 200 Hz periodic repetition
+    // of a fixed 240-sample slice that listeners hear as a metallic
+    // "电流声" floor noise. Clearing frameCount makes a missing packet
+    // equal to silence rather than to "loop forever." Silent tracks
+    // additionally decay their cached level so the UI meter falls off
+    // when a user mutes instead of staying stuck.
+    for (auto& kv : tracks_) {
+        Track& t = kv.second;
+        if (t.frameCount == 0) {
+            t.lastRms *= 0.5f;
+        } else {
+            t.frameCount = 0;
+        }
+    }
+}
+
+inline void AudioMixer::mix(float* output, int frameCount) {
+    mixAll(output, frameCount);
+    consumeAllTracks();
 }
