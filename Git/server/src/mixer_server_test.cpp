@@ -368,6 +368,59 @@ static int test_plc_forward_direction_on_ramp() {
     return 0;
 }
 
+// Pitch-synchronous PLC (v1.0.33): on a voiced signal, the mixer
+// detects the pitch period and extends by repeating that one period.
+// 200 Hz sine @ 48 kHz has period exactly 240 samples — square in
+// the [PITCH_MIN=96, PITCH_MAX=480] detection band — so we can verify:
+//   1. The detector locks to the pitch period after enough history.
+//   2. The PLC fill is the "next" period of the sine (i.e. boundary
+//      is bit-exact continuous because period repeats are phase-aligned).
+//   3. The PLC fill RMS matches a sine RMS (A/√2), not silence.
+static int test_plc_pitch_repeat_on_sine() {
+    AudioMixer m;
+    constexpr int   N = 240;            // one frame = one period of 200 Hz @ 48 kHz
+    constexpr float A = 0.3f;
+    auto sine = [&](int idx) -> float {
+        return A * std::sin(2.0f * static_cast<float>(M_PI) * 200.0f * static_cast<float>(idx) / 48000.0f);
+    };
+
+    // Build up 4 frames (960 samples) of contiguous sine = enough history for detect.
+    float frame[N];
+    float out[N];
+    for (int f = 0; f < 4; ++f) {
+        for (int i = 0; i < N; ++i) frame[i] = sine(f * N + i);
+        m.addTrack("u1", frame, N);
+        m.mix(out, N);
+    }
+
+    // Next mix has no fresh frame — PLC fires. With detectedPitch == 240 and
+    // phaseStart=0, fill[0] = prevHistory[720] = sine(720). Since the period
+    // is exactly N, sine(720) ≡ sine(960) — the "should-be" next sample.
+    m.mix(out, N);
+
+    const float expected = sine(4 * N);   // what the next sine sample would be
+    if (std::fabs(out[0] - expected) > 1e-3f) {
+        std::fprintf(stderr,
+            "FAIL: test_plc_pitch_repeat_on_sine — out[0]=%f, expected sine(960)=%f\n",
+            out[0], expected);
+        return 1;
+    }
+    // RMS check: PLC fill should be a full-amplitude sine (not silent / not
+    // attenuated to the unvoiced fallback path).
+    float sumSq = 0.0f;
+    for (int i = 0; i < N; ++i) sumSq += out[i] * out[i];
+    const float rms = std::sqrt(sumSq / N);
+    const float expRms = A / std::sqrt(2.0f);
+    if (std::fabs(rms - expRms) > 0.05f) {
+        std::fprintf(stderr,
+            "FAIL: test_plc_pitch_repeat_on_sine — fill RMS=%f, expected sine RMS=%f\n",
+            rms, expRms);
+        return 1;
+    }
+    std::printf("PASS: test_plc_pitch_repeat_on_sine (out[0]=%f, RMS=%f)\n", out[0], rms);
+    return 0;
+}
+
 // A track that has never received a frame must NOT contribute PLC noise
 // (would otherwise mix uninitialized `prevAudio`). The empty-mixer path
 // stays bit-exact silent.
@@ -398,6 +451,7 @@ static int run_mixer_tests() {
     failures += test_plc_fade_after_consume();
     failures += test_plc_resets_on_fresh_frame();
     failures += test_plc_forward_direction_on_ramp();
+    failures += test_plc_pitch_repeat_on_sine();
     failures += test_plc_no_replay_before_first_frame();
     failures += test_soft_clip_below_knee();
     failures += test_soft_clip_above_knee();

@@ -5,6 +5,112 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.33] - 2026-04-28
+
+### Fixed (Pitch-synchronous PLC — voice signals get phase-aligned replay instead of plain frame repeat)
+
+User retest of v1.0.32 forward PLC still reported "噼里啪啦", and
+normalized FFT confirmed ~7 click events per second remained — every
+PLC fill ends at `prev[L-1]` (5 ms ago) while the next fresh frame
+starts at `F2[0]` (now), and voice changes enough over 5 ms to make
+that join audible as a click.
+
+User chose plan C ("low-latency-first" preserved): improve PLC at
+0 latency cost rather than add a server-side jitter buffer.
+
+### How spectral PLC works
+
+`Track` keeps a 25 ms (1200-sample) sliding history of recent voice in
+addition to the current fresh frame. After each fresh `consumeAllTracks`
+the mixer estimates the pitch period of the recent voice. When the next
+tick fires without a fresh frame, PLC fill becomes a *single-pitch-period
+loop* drawn from the tail of that history:
+
+```
+PLC out[i] = prevHistory[H − P + (decayCount·count + i) mod P]
+```
+
+Because voice is locally pitch-periodic, `prevHistory[H−P] ≈
+prevHistory[H−1]` (P samples ago is the same phase) — so the PLC fill
+starts essentially where the previous tick ended, no synthetic
+interpolation needed. Multiple consecutive PLC ticks chain smoothly:
+the `decayCount·count` accumulator carries the loop position across tick
+boundaries.
+
+For unvoiced segments (whisper, room noise, silence) the detector
+returns 0 and PLC falls back to forward frame repeat — i.e. v1.0.32
+behaviour. Worst case never regresses.
+
+### AMDF detector (and why not autocorrelation)
+
+The first attempt used normalized autocorrelation
+`ncc(lag) = R(lag)·H / (R(0)·(H−lag))`. On a clean 200 Hz sine
+(period 240 samples, exact integer at 48 kHz) the test
+`test_plc_pitch_repeat_on_sine` failed with the detector picking
+lag 242 over lag 240 — `ncc(242) = 1.0014 > ncc(240) = 1.0`.
+
+The bias is a textbook spectral-leakage artifact. The cosine residual
+`Σ cos(2π(2i+lag)/T)` in `R(lag)` doesn't cancel unless `(H−lag)` is an
+exact period multiple, and on lag = 242 it adds ~2 to the numerator,
+producing a fractional-lag winner. Window-based fixes (Hanning the
+correlation) help but slow it down.
+
+Switched to AMDF (Average Magnitude Difference Function):
+`AMDF(lag) = mean_i |hist[i] − hist[i+lag]|`. Bit-exact 0 at the true
+period, no leakage. After the change `test_plc_pitch_repeat_on_sine`
+PASSES with `out[0] = 0.0` (= sine(960) exactly, full phase continuity)
+and PLC fill RMS = A/√2 = 0.2121.
+
+### Detection band and why Layer 1 stays at baseline
+
+`[PITCH_MIN, PITCH_MAX] = [96, 480]` samples = `[100 Hz, 500 Hz]` —
+covers normal voice F0. Layer 1 uses 1 kHz sine (period 48), well
+*outside* this band, so the detector returns 0 and PLC takes the
+unvoiced fallback path. SNR / THD / rate at amp 0.05 / 0.30 / 0.95
+are byte-identical to v1.0.32 baseline (67.26 / 84.01 / 93.44 dB).
+
+### Latency and CPU impact
+
+**Latency: zero.** Same 5 ms broadcast cadence; PLC only fills ticks
+that would otherwise be silent.
+
+**CPU**: AMDF over a 1200-sample history with 384 candidate lags is
+~350k absolute-difference ops per fresh frame, ≈70M ops/s at 200/s.
+On the production x86 server this is < 5 % single-core; well within
+budget.
+
+### New regression test
+
+- `test_plc_pitch_repeat_on_sine`: feeds 4 frames of 200 Hz sine
+  (build up history past the 960-sample detector minimum), then on
+  the next miss verifies `out[0]` matches the would-be next sine
+  sample to ±1e-3 and the fill RMS matches a sine RMS to ±0.05.
+  Locks both AMDF detection and the phase-continuous PLC loop.
+
+### Workflow note
+
+1. Layer 1 baseline before changes.
+2. Implemented pitch PLC with autocorrelation; new sine test FAILED
+   exposing the leakage bias.
+3. Switched detector to AMDF; new test PASSES, out[0] bit-exact 0.
+4. Layer 1 + Layer 2 byte-identical to v1.0.32 baseline.
+
+### Lessons (added to memory)
+
+- **Autocorrelation pitch detectors leak.** The cos((2i+lag)/T) residual
+  doesn't cancel for non-period lags and pushes ncc above 1.0 at
+  fractional-sample offsets. Use AMDF or windowed autocorrelation,
+  not raw normalized autocorrelation.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` Track struct | `prevAudio[480]` → `prevHistory[1200]`; add `historyLen`, `detectedPitch` |
+| `Git/server/src/audio_mixer.h` `accumulate` PLC path | Pitch-loop fill if voiced; forward fallback if not |
+| `Git/server/src/audio_mixer.h` `consumeAllTracks` | Slide history; run AMDF detect |
+| `Git/server/src/audio_mixer.h` `detectPitch` | New AMDF-based pitch detector |
+| `Git/server/src/mixer_server_test.cpp` | Add `test_plc_pitch_repeat_on_sine` |
+| `~/.claude/projects/.../memory/project_pomu_open_issue.md` | Add autocorrelation-leakage lesson |
+
 ## [1.0.32] - 2026-04-28
 
 ### Reverted (Roll back v1.0.31 palindrome PLC — objectively worse than v1.0.30 forward repeat)
