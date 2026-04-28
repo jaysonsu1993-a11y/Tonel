@@ -25,6 +25,12 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const joinedRef = useRef(false)
 
   const [dbg, setDbg] = useState('')
+  // Surface init / connect errors to the UI. Without this, mobile users
+  // hit a silent failure (init throws → catch logs to console only →
+  // user sees the room but no devices, no levels, no latency, and has
+  // no clue why). The banner at least gives them — and the dev — a
+  // human-readable line to debug from.
+  const [initError, setInitError] = useState<string>('')
   // Poll level+latency at 10fps (fast timer), debug info at 1fps (slow timer)
   useEffect(() => {
     const fast = setInterval(() => {
@@ -55,17 +61,44 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     joinedRef.current = true
 
     // 初始化音频并连接混音服务器
+    //
+    // Three-stage flow with the failure modes explicitly decoupled:
+    //   1. callbacks (always succeeds — pure JS state setup)
+    //   2. mic + AudioContext init (can fail on mobile: iOS sample-rate
+    //      restrictions, getUserMedia permission denial, etc.)
+    //   3. mixer WebSockets + capture start (can fail independently:
+    //      WSS handshake, network, etc.)
+    //
+    // Pre-v3.2.2 these were chained inside a single try/catch, so a stage 2
+    // failure on mobile silently aborted stage 3 — the mobile user saw the
+    // peer list (signaling WS, separate path) but no levels/latency/playback
+    // because the mixer WS was never opened. Now stage 3 runs even if stage
+    // 2 throws, so listening still works while we surface the mic error.
     ;(async () => {
+      audioService.onPeerLevel((uid, level) => {
+        setPeerLevels(prev => ({ ...prev, [uid]: level }))
+      })
+      audioService.onLatency((ms) => setLatency(ms))
+
+      let micOk = false
       try {
         await audioService.init()
-        audioService.onPeerLevel((uid, level) => {
-          setPeerLevels(prev => ({ ...prev, [uid]: level }))
-        })
-        audioService.onLatency((ms) => setLatency(ms))
-        await audioService.connectMixer(userId, roomId)
-        audioService.startCapture()
+        micOk = true
       } catch (err) {
-        console.error('[RoomPage] Audio init failed:', err)
+        console.error('[RoomPage] Audio init (mic + AudioContext) failed:', err)
+        const msg = (err instanceof Error ? err.message : String(err)) || 'unknown error'
+        setInitError(`麦克风/音频初始化失败：${msg}`)
+      }
+
+      try {
+        await audioService.connectMixer(userId, roomId)
+        if (micOk) audioService.startCapture()
+      } catch (err) {
+        console.error('[RoomPage] Mixer connect failed:', err)
+        const msg = (err instanceof Error ? err.message : String(err)) || 'unknown error'
+        setInitError(prev =>
+          (prev ? prev + ' / ' : '') + `混音服务器连接失败：${msg}`
+        )
       }
     })()
 
@@ -154,6 +187,28 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
 
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
       </header>
+      {initError && (
+        <div
+          role="alert"
+          style={{
+            background: '#3b0d0d', color: '#fdd', padding: '8px 24px',
+            fontSize: 13, borderTop: '1px solid #7a1a1a',
+            borderBottom: '1px solid #7a1a1a',
+          }}
+        >
+          ⚠ {initError}
+          <button
+            style={{
+              marginLeft: 12, fontSize: 12, padding: '2px 10px',
+              background: 'transparent', color: '#fdd',
+              border: '1px solid #fdd', borderRadius: 3, cursor: 'pointer',
+            }}
+            onClick={() => setInitError('')}
+          >
+            关闭
+          </button>
+        </div>
+      )}
       <div style={{fontSize:'11px',color:'#0f0',padding:'4px 24px',background:'#000',fontFamily:'monospace'}}>
         {dbg}
         <button style={{marginLeft:12,fontSize:10,padding:'2px 8px'}} onClick={() => {

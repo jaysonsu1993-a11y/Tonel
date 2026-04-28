@@ -375,18 +375,45 @@ export class AudioService {
       const userRate = AudioService.readUserRate()
       const requestedRate = userRate ?? SAMPLE_RATE
 
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
+      // Mobile fallback. iOS Safari (some versions) throws on a non-native
+      // AudioContext sample rate, and `getUserMedia` can throw
+      // OverconstrainedError when `sampleRate: 48000` doesn't match the
+      // device. Try the constrained path first for desktop / modern
+      // mobile (where it gives us nice 48 kHz alignment with the wire);
+      // if anything throws, fall back to "let the browser decide" so the
+      // user at least gets *some* audio path. The capture worklet's
+      // resampler handles the rate mismatch transparently — this is
+      // exactly the codepath the desktop 44.1 kHz case already exercises.
+      const tryGetUserMedia = async (constrained: boolean): Promise<MediaStream> => {
+        const audio: MediaTrackConstraints = {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl:  false,
-          sampleRate:       requestedRate,
           channelCount:     CHANNELS,
-        },
-        video: false,
-      })
+        }
+        if (constrained) audio.sampleRate = requestedRate
+        return navigator.mediaDevices.getUserMedia({ audio, video: false })
+      }
+      const tryAudioContext = (constrained: boolean): AudioContext => {
+        return constrained
+          ? new AudioContext({ sampleRate: requestedRate })
+          : new AudioContext()
+      }
 
-      this.audioContext = new AudioContext({ sampleRate: requestedRate })
+      try {
+        this.mediaStream  = await tryGetUserMedia(true)
+        this.audioContext = tryAudioContext(true)
+      } catch (constrainedErr) {
+        console.warn('[Audio] Constrained init failed, retrying without sampleRate hint:', constrainedErr)
+        // Make sure no half-open mic stream from the failed attempt sticks
+        // around — Safari has been known to leak the indicator dot.
+        if (this.mediaStream) {
+          try { this.mediaStream.getAudioTracks().forEach(t => t.stop()) } catch {}
+          this.mediaStream = null
+        }
+        this.mediaStream  = await tryGetUserMedia(false)
+        this.audioContext = tryAudioContext(false)
+      }
       // FIX: Resume the AudioContext to unfreeze it from browser autoplay policy.
       // Without this the context stays in 'suspended' state and no audio flows.
       await this.audioContext.resume()

@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.2] - 2026-04-29
+
+### Fixed — mobile rooms now show levels / latency even when mic init fails
+
+User reported a mobile browser symptom matrix:
+- ✅ peer list visible (signaling WS works)
+- ❌ no input/output device list
+- ❌ no latency display
+- ❌ no peer level meters
+
+Root cause: `RoomPage.tsx` chained `audioService.init()` (mic + AudioContext)
+and `audioService.connectMixer()` (WebSockets) inside a single try/catch.
+Stage 1 throws on mobile (typically iOS Safari rejecting a non-native
+`AudioContext({sampleRate: 48000})` or `getUserMedia` `OverconstrainedError`),
+catch swallows the error to `console.error`, stage 2 never runs. The user
+sees a half-broken room with no signal as to why.
+
+Three independent defensive fixes:
+
+1. **`audioService.init()` retries with relaxed constraints.** First attempt
+   keeps the explicit `sampleRate: 48000` (desktop happy path, wire-aligned,
+   bypasses both resamplers). On any throw it falls back to no `sampleRate`
+   constraint on `getUserMedia` and a default `new AudioContext()` — which
+   gives whatever the device's native rate is (44.1 / 48 kHz on most
+   mobiles), and the existing capture-side resampler handles the
+   mismatch transparently. This is the same code path desktop 44.1 kHz
+   already exercises without issue.
+
+2. **`RoomPage.tsx` decouples init from connectMixer.** Even if the mic +
+   AudioContext init throws, the mixer WSS still gets opened — so the
+   user gets latency, peer levels, and at minimum a clear signal that
+   the server-side path is healthy. `startCapture()` is gated on init
+   success so we don't try to send mic packets we can't produce.
+
+3. **`RoomPage.tsx` surfaces errors to the UI.** A red banner under the
+   room header shows the actual error message (instead of console-only).
+   Without this the mobile user has no diagnostic feedback at all —
+   they see the symptoms in (1) above and have no idea why.
+
+Verified with all three audio test layers (default desktop 48 kHz path
+unchanged: Layer 1 SNR 84 dB / THD 0.006 %, Layer 2 PASS, Layer 1.5
+all PASS). Mobile path requires hand-test on actual device — Playwright's
+Chromium doesn't reproduce iOS Safari's audio quirks.
+
 ## [3.2.1] - 2026-04-29
 
 ### Fixed — `?debug=1` survives the join transition
