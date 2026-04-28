@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.17] - 2026-04-28
+
+### Fixed (Web — RTT display stuck at "--")
+
+The control-WS PING/PONG round-trip was being measured (`pingSentAt`
+recorded) but the PONG handler was a no-op comment — `_audioLatency`
+never updated, so the latency badge in the room header was permanently
+stuck at "--". Wired the PONG handler to compute
+`performance.now() − pingSentAt`, store, and notify subscribers.
+([Git/web/src/services/audioService.ts:714](Git/web/src/services/audioService.ts:714))
+
+The RoomPage was also missing the subscription side: it imported a
+`_setLatency` setter and explicitly threw the function away with
+`void _setLatency  // RTT disabled for now`. Replaced with
+`audioService.onLatency(setLatency)` registered alongside the peer-level
+subscription, so the badge now updates every PING tick (3 s).
+([Git/web/src/pages/RoomPage.tsx:25](Git/web/src/pages/RoomPage.tsx:25))
+
+### Added (Web UI — Settings panel)
+
+- **`SettingsModal` component.** Replaces the inline two-row device
+  picker that lived in the room header. Cleaner layout, room for
+  more options, and out of the way of the mixer view. Opens via a
+  ⚙ button next to the latency badge.
+  ([Git/web/src/components/SettingsModal.tsx](Git/web/src/components/SettingsModal.tsx))
+
+- **User-selectable AudioContext sample rate.** Dropdown in Settings:
+  `自动` (browser default) plus 16/22.05/32/44.1/48 kHz. Stored in
+  `localStorage` so the choice survives reloads; changing the rate
+  triggers a page reload so AudioContext + getUserMedia restart
+  cleanly with the new value. The modal also displays the *actual*
+  negotiated rate (browser may override the request) so users can
+  spot mismatches.
+  ([Git/web/src/services/audioService.ts:205](Git/web/src/services/audioService.ts:205))
+
+### About the residual distortion
+
+The user reported volume-independent distortion remains after v1.0.16.
+Most likely root cause: the linear-interpolation resamplers we run on
+both sides whenever the AudioContext lands at a rate other than the
+48 kHz wire rate (Bluetooth output, system mixer override). Linear
+interpolation is fast and zero-latency but isn't a properly bandlimited
+filter, so it adds a small frequency-dependent THD that's audible on
+sibilants and high-frequency content even at small amplitudes.
+
+The new sample-rate selector is the **diagnostic and the fix** in one:
+picking **48 kHz** in Settings forces both `AudioContext` and
+`getUserMedia` to 48 kHz, which makes both the capture-side and
+worklet-side resamplers no-ops (`fromRate === toRate → return input`).
+If the residual distortion vanishes at 48 kHz, the resamplers are the
+cause and the proper long-term fix is a polyphase resampler. If
+distortion remains, the cause is elsewhere and we have a clean
+baseline to compare against.
+
+### Latency impact
+RTT fix: zero — same PING cadence (3 s), same code path, just the
+PONG arithmetic that was missing. Settings UI: zero — modal-only,
+not in audio path.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` PONG handler | Compute and propagate RTT |
+| `Git/web/src/services/audioService.ts` `readUserRate`/`writeUserRate`/`actualSampleRate` | New: persist user's sample-rate preference, expose actual rate |
+| `Git/web/src/services/audioService.ts` `init` | Honor user-selected rate for both `getUserMedia` and `AudioContext` |
+| `Git/web/src/components/SettingsModal.tsx` | New: device + sample-rate UI |
+| `Git/web/src/pages/RoomPage.tsx` | Drop inline device selector; add ⚙ button + `SettingsModal`; subscribe to `onLatency` |
+| `Git/web/src/styles/globals.css` | Settings modal styling |
+
 ## [1.0.16] - 2026-04-28
 
 ### Fixed (Mixer — solo user heard silence)

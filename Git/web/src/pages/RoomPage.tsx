@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { audioService } from '../services/audioService'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
+import { SettingsModal } from '../components/SettingsModal'
 
 interface Props {
   roomId: string
@@ -18,23 +19,9 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const [soloId, setSoloId] = useState<string | null>(null)  // null = no solo active
   const [isMuted, setIsMuted] = useState(false)
   const [copied, setCopied] = useState(false)
-  const [inputDevices, setInputDevices] = useState<MediaDeviceInfo[]>([])
-  const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([])
-  const [selectedInput, setSelectedInput] = useState<string>('')
-  const [selectedOutput, setSelectedOutput] = useState<string>('')
-  const [latency, _setLatency] = useState<number>(-1)
-  void _setLatency  // RTT disabled for now
+  const [latency, setLatency] = useState<number>(-1)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const joinedRef = useRef(false)
-
-  // Load available audio devices AFTER init (needs permission for labels)
-  const refreshDevices = useCallback(async () => {
-    const inputs = await audioService.getAudioInputDevices()
-    setInputDevices(inputs)
-    if (inputs.length > 0 && !selectedInput) setSelectedInput(inputs[0].deviceId)
-    const outputs = await audioService.getAudioOutputDevices()
-    setOutputDevices(outputs)
-    if (outputs.length > 0 && !selectedOutput) setSelectedOutput(outputs[0].deviceId)
-  }, [selectedInput, selectedOutput])
 
   const [dbg, setDbg] = useState('')
   // Poll level+latency at 10fps (fast timer), debug info at 1fps (slow timer)
@@ -56,10 +43,10 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     ;(async () => {
       try {
         await audioService.init()
-        refreshDevices()
         audioService.onPeerLevel((uid, level) => {
           setPeerLevels(prev => ({ ...prev, [uid]: level }))
         })
+        audioService.onLatency((ms) => setLatency(ms))
         await audioService.connectMixer(userId, roomId)
         audioService.startCapture()
       } catch (err) {
@@ -79,24 +66,6 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       audioService.mute()
     }
     setIsMuted(!isMuted)
-  }
-
-  const handleInputChange = async (deviceId: string) => {
-    setSelectedInput(deviceId)
-    try {
-      await audioService.setInputDevice(deviceId)
-    } catch (err) {
-      console.error('[RoomPage] Failed to switch input device:', err)
-    }
-  }
-
-  const handleOutputChange = async (deviceId: string) => {
-    setSelectedOutput(deviceId)
-    try {
-      await audioService.setOutputDevice(deviceId)
-    } catch (err) {
-      console.error('[RoomPage] Failed to switch output device:', err)
-    }
   }
 
   const copyRoomId = () => {
@@ -145,37 +114,13 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           </button>
         </div>
 
-        {/* 音频设备选择 */}
-        <div className="device-selector">
-          <div className="device-row">
-            <label className="device-label">输入</label>
-            <select
-              value={selectedInput}
-              onChange={e => handleInputChange(e.target.value)}
-              className="device-select"
-            >
-              {inputDevices.map(d => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label || `Input ${d.deviceId.slice(0, 8)}`}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="device-row">
-            <label className="device-label">输出</label>
-            <select
-              value={selectedOutput}
-              onChange={e => handleOutputChange(e.target.value)}
-              className="device-select"
-            >
-              {outputDevices.map(d => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label || `Output ${d.deviceId.slice(0, 8)}`}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
+        <button
+          className="btn-settings"
+          onClick={() => setSettingsOpen(true)}
+          aria-label="设置"
+        >
+          ⚙ 设置
+        </button>
 
         {/* 麦克风静音 */}
         <button
@@ -258,6 +203,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           </div>
         </div>
       </div>
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   )
 }

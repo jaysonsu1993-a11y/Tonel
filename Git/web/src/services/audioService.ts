@@ -148,7 +148,7 @@ function pcm16ToFloat32(pcm: Uint8Array): Float32Array {
 type AudioLevelCallback = (level: number) => void
 type PeerLevelCallback = (userId: string, level: number) => void
 
-class AudioService {
+export class AudioService {
   private audioContext:     AudioContext | null = null
   private mediaStream:       MediaStream | null = null
   private analyser:         AnalyserNode | null = null
@@ -202,6 +202,33 @@ class AudioService {
   // timestamp removed — now using wall-clock ms in SPA1 header for RTT
   // frameBuffer removed — onAudioFrame sends directly from ScriptProcessor data
 
+  // ── User sample-rate preference (persisted in localStorage) ──────────────
+  // null = "auto" (let the browser pick). A specific rate forces both the
+  // mic capture and the AudioContext to that rate, which is useful as both
+  // a feature ("I know my hardware likes 48 kHz") and a diagnostic ("does
+  // distortion go away when I bypass the resampler?").
+  private static readonly RATE_STORAGE_KEY = 'tonel.audio.sampleRate'
+  static readonly SUPPORTED_RATES: readonly number[] = [16000, 22050, 32000, 44100, 48000]
+
+  static readUserRate(): number | null {
+    if (typeof localStorage === 'undefined') return null
+    const v = localStorage.getItem(AudioService.RATE_STORAGE_KEY)
+    if (!v) return null
+    const n = Number(v)
+    return AudioService.SUPPORTED_RATES.includes(n) ? n : null
+  }
+
+  static writeUserRate(rate: number | null): void {
+    if (typeof localStorage === 'undefined') return
+    if (rate === null) localStorage.removeItem(AudioService.RATE_STORAGE_KEY)
+    else localStorage.setItem(AudioService.RATE_STORAGE_KEY, String(rate))
+  }
+
+  /** Actual AudioContext sample rate (after browser negotiation). */
+  get actualSampleRate(): number {
+    return this.audioContext?.sampleRate ?? 0
+  }
+
   async init(): Promise<MediaStream> {
     // Clean up previous state to avoid stale AudioContext/MediaStream pileup
     this.stopCapture()
@@ -218,25 +245,34 @@ class AudioService {
     this.txCount = 0; this.rxCount = 0; this.playCount = 0
 
     try {
+      // User-selectable AudioContext rate. Stored in localStorage so the
+      // choice survives a reload. Null/missing → let the browser pick (its
+      // default, usually the OS audio device's native rate). Explicitly
+      // setting 48000 lines up with the wire rate and bypasses both the
+      // capture-side and worklet-side resamplers entirely — a useful
+      // diagnostic when chasing residual distortion.
+      const userRate = AudioService.readUserRate()
+      const requestedRate = userRate ?? SAMPLE_RATE
+
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl:  false,
-          sampleRate:       SAMPLE_RATE,
+          sampleRate:       requestedRate,
           channelCount:     CHANNELS,
         },
         video: false,
       })
 
-      this.audioContext = new AudioContext({ sampleRate: SAMPLE_RATE })
+      this.audioContext = new AudioContext({ sampleRate: requestedRate })
       // FIX: Resume the AudioContext to unfreeze it from browser autoplay policy.
       // Without this the context stays in 'suspended' state and no audio flows.
       await this.audioContext.resume()
       // The sampleRate hint is best-effort — Bluetooth output / system overrides
       // may force a different rate. Log so we can spot the mismatch.
-      if (this.audioContext.sampleRate !== SAMPLE_RATE) {
-        console.warn(`[Audio] AudioContext rate is ${this.audioContext.sampleRate} Hz, expected ${SAMPLE_RATE}. Web Audio will resample on playback.`)
+      if (this.audioContext.sampleRate !== requestedRate) {
+        console.warn(`[Audio] AudioContext rate is ${this.audioContext.sampleRate} Hz, requested ${requestedRate}. Capture and worklet will resample.`)
       } else {
         console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz`)
       }
@@ -712,7 +748,18 @@ class AudioService {
             }
           }
         } else if (msg.type === 'PONG') {
-          // PONG received — latency is measured via SPA1 timestamps only (matches AppKit)
+          // PONG received — RTT = now − pingSentAt. The control WS goes
+          // through the same TCP path as MIXER_JOIN, so this is the
+          // server-round-trip latency that matches what listeners
+          // perceive as "echo time" for the UDP audio stream.
+          if (this.pingSentAt > 0) {
+            const rtt = Math.round(performance.now() - this.pingSentAt)
+            this._audioLatency = rtt
+            this.pingSentAt = 0
+            for (const cb of this.latencyCallbacks) {
+              try { cb(rtt) } catch (_) {}
+            }
+          }
         }
       } catch (_) {
         console.warn('[Mixer] Non-JSON string:', data)
