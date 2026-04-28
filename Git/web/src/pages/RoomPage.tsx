@@ -3,6 +3,7 @@ import { audioService } from '../services/audioService'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
 import { SettingsModal } from '../components/SettingsModal'
+import { AudioDebugPanel } from '../components/AudioDebugPanel'
 
 interface Props {
   roomId: string
@@ -218,6 +219,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         </div>
       </div>
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <AudioDebugPanel />
     </div>
   )
 }

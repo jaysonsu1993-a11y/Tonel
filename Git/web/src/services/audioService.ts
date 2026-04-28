@@ -195,6 +195,41 @@ export class AudioService {
   public playRateScale    = 1.0 // playback worklet's adaptive rate (1.0 = nominal; ±0.5%)
   public playRingFill     = 0   // current ring fill in samples (target ~1440)
   private rxLastSeq = -1
+
+  // ── Live tuning knobs ────────────────────────────────────────────────────
+  // The numeric defaults match the historical hardcoded constants — see the
+  // PRIME_TARGET / MAX_SCALE comments around initPlaybackWorklet for the
+  // rationale on each value. They live on `this` (rather than as locals in
+  // initPlaybackWorklet) so two things work:
+  //   (1) the worklet template literal can interpolate the current values
+  //       on construction (so a panel-driven change persists across an
+  //       AudioContext rebuild — e.g. sample-rate switch);
+  //   (2) `setPlaybackTuning()` can postMessage updates into a *running*
+  //       worklet without recreating the audio graph, so a slider drag
+  //       doesn't introduce a re-prime click.
+  // serverJitter* are similarly cached locally and reflected to the server
+  // via the MIXER_TUNE control message — see `setServerTuning()`.
+  public tuning = {
+    primeTarget: 1440,    // 30 ms @ 48 kHz; latency cost = ring depth
+    primeMin:    128,     // re-prime floor; below = audible reprime click
+    maxScale:    1.012,
+    minScale:    0.988,
+    rateStep:    0.00002, // integrator step per quantum (rate-loop convergence)
+  }
+  // Server-side per-user jitter buffer. Defaults overwritten by MIXER_JOIN_ACK.
+  public serverTuning = {
+    jitterTarget:   1,    // frames; latency cost = (target − 0.5) × 5 ms
+    jitterMaxDepth: 8,    // frames; cap-drop is 5 ms gone → click
+  }
+  private tuningChangeCallbacks: Array<() => void> = []
+  /** Subscribe to tuning value changes (e.g. from MIXER_JOIN_ACK). UI uses
+   *  this to refresh slider positions without polling. */
+  onTuningChanged(cb: () => void): void { this.tuningChangeCallbacks.push(cb) }
+  private fireTuningChanged(): void {
+    for (const cb of this.tuningChangeCallbacks) {
+      try { cb() } catch (_) {}
+    }
+  }
   get audioWsState(): string {
     const ws = this.audioWs
     if (!ws) return 'null'
@@ -443,16 +478,15 @@ export class AudioService {
     // threshold for "delayed" voice). The audio-thread cost of 480
     // additional buffered samples is zero (Float32Array, pre-allocated).
     const RING_SIZE    = 48000   // 1 second @ wire rate (48 kHz)
-    const PRIME_TARGET = 1440    // 30 ms cushion (v1.0.29: rolled back from 100 ms
-                                 // now that the server-side timer fix in v1.0.28
-                                 // eliminated the rate drift that the bigger
-                                 // cushion was compensating for. With drift
-                                 // fixed (`rate=+0 ppm`, `repri=0` confirmed)
-                                 // the extra 70 ms cushion was buying nothing
-                                 // and adding measurable latency. 30 ms covers
-                                 // ordinary network jitter; the rate loop and
-                                 // server timer handle the rest.
-    const PRIME_MIN    = 128     // re-prime if ring would drop below this
+    // Initial values — pulled from this.tuning so a panel-driven change
+    // persists across an AudioContext rebuild (sample-rate switch). At
+    // runtime they're updated via the 'tune' postMessage in the worklet's
+    // onmessage handler, no graph rebuild required.
+    const PRIME_TARGET = this.tuning.primeTarget
+    const PRIME_MIN    = this.tuning.primeMin
+    const MAX_SCALE    = this.tuning.maxScale
+    const MIN_SCALE    = this.tuning.minScale
+    const RATE_STEP    = this.tuning.rateStep
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
         constructor() {
@@ -479,6 +513,7 @@ export class AudioService {
           // voice, and the slow adaptation rate (0.002 % per quantum)
           // keeps the change inaudible.
           this.targetCount = ${PRIME_TARGET}
+          this.primeMin    = ${PRIME_MIN}
           this.rateScale   = 1.0
           // ±1.2 % rate range (v1.0.27: widened from ±0.8 % since the user
           // saturated the v1.0.26 cap at -8000 ppm). 1.2 % is ~20 cents on
@@ -486,11 +521,34 @@ export class AudioService {
           // listeners reliably miss it (perceptual threshold ~25-35 cents
           // for short-duration speech). At 1.5 % most listeners *can*
           // detect a shift, so we stop here.
-          this.MAX_SCALE   = 1.012
-          this.MIN_SCALE   = 0.988
+          this.MAX_SCALE   = ${MAX_SCALE}
+          this.MIN_SCALE   = ${MIN_SCALE}
+          // Per-quantum nudge magnitude for the rate-tracking integrator.
+          // Bigger = faster convergence to producer rate (good for first
+          // few seconds after join) but proportionally more pitch jitter
+          // around steady state. 2e-5 was the v1.0.25 chosen value.
+          this.rateStep    = ${RATE_STEP}
           this.statsTick   = 0   // post stats periodically for the debug strip
           this.port.onmessage = (ev) => {
-            let samples = ev.data
+            const m = ev.data
+            // Tuning message — runtime knobs from the room debug panel.
+            // Discriminated by an explicit \`type\` field so audio frames
+            // (Float32Array / ArrayBuffer) keep flowing through the fast
+            // path below with one extra check per frame.
+            if (m && m.type === 'tune') {
+              if (typeof m.primeTarget === 'number') this.targetCount = m.primeTarget
+              if (typeof m.primeMin    === 'number') this.primeMin    = m.primeMin
+              if (typeof m.maxScale    === 'number') this.MAX_SCALE   = m.maxScale
+              if (typeof m.minScale    === 'number') this.MIN_SCALE   = m.minScale
+              if (typeof m.rateStep    === 'number') this.rateStep    = m.rateStep
+              // Re-clamp current rateScale into the new band so a tighter
+              // band takes effect immediately instead of waiting for the
+              // next tick to drift back inside.
+              if (this.rateScale > this.MAX_SCALE) this.rateScale = this.MAX_SCALE
+              if (this.rateScale < this.MIN_SCALE) this.rateScale = this.MIN_SCALE
+              return
+            }
+            let samples = m
             if (samples instanceof ArrayBuffer) samples = new Float32Array(samples)
             if (!samples || !samples.length) return
             const len = samples.length
@@ -504,7 +562,7 @@ export class AudioService {
                 this.readPos = (Math.floor(this.readPos) + 1) % ${RING_SIZE}
               }
             }
-            if (!this.primed && this.count >= ${PRIME_TARGET}) {
+            if (!this.primed && this.count >= this.targetCount) {
               this.primed = true
             }
           }
@@ -513,7 +571,7 @@ export class AudioService {
           const channels = outputs[0]
           if (!channels || !channels[0]) return true
           const out0 = channels[0]
-          if (!this.primed || this.count < ${PRIME_MIN}) {
+          if (!this.primed || this.count < this.primeMin) {
             // Cold start / fully drained — emit a clean full-callback silence.
             out0.fill(0)
             for (let c = 1; c < channels.length; c++) channels[c].fill(0)
@@ -544,9 +602,9 @@ export class AudioService {
           // converges to whatever rate matches producer/consumer
           // exactly, no oscillation.
           if (this.count > this.targetCount * 1.3) {
-            this.rateScale = Math.min(this.MAX_SCALE, this.rateScale + 0.00002)
+            this.rateScale = Math.min(this.MAX_SCALE, this.rateScale + this.rateStep)
           } else if (this.count < this.targetCount * 0.7) {
-            this.rateScale = Math.max(this.MIN_SCALE, this.rateScale - 0.00002)
+            this.rateScale = Math.max(this.MIN_SCALE, this.rateScale - this.rateStep)
           }
           const effRatio = this.ratio * this.rateScale
 
@@ -568,7 +626,7 @@ export class AudioService {
             const newIdx     = Math.floor(newReadPos)
             this.count -= (newIdx - idx)
             this.readPos = newReadPos % ${RING_SIZE}
-            if (this.count < ${PRIME_MIN}) {
+            if (this.count < this.primeMin) {
               // Mid-callback underrun. Apply a 240-sample (5 ms) raised-
               // cosine fade to the samples already written before silencing
               // the rest. Cosine taper is smoother than linear at both
@@ -633,6 +691,73 @@ export class AudioService {
     if (this.masterGain) {
       this.masterGain.gain.value = Math.max(0, Math.min(1, gain))
     }
+  }
+
+  /**
+   * Update the playback worklet's tuning knobs live. Each field is optional;
+   * any field omitted retains its current value. Sends a single 'tune'
+   * postMessage so the worklet picks up all the changes atomically (no
+   * mid-callback inconsistency between, say, primeMin and primeTarget).
+   *
+   * Ranges enforced here so an unbounded slider can't put the worklet
+   * into an unrecoverable state:
+   *   primeTarget ∈ [primeMin .. RING_SIZE / 2]
+   *   primeMin    ∈ [0 .. primeTarget]
+   *   minScale    ∈ [0.95, 1.0)
+   *   maxScale    ∈ (1.0, 1.05]
+   *   rateStep    ∈ [0, 0.001]
+   */
+  setPlaybackTuning(t: Partial<AudioService['tuning']>): void {
+    const next = { ...this.tuning, ...t }
+    // Clamp into safe ranges — sliders may land just outside.
+    next.primeMin    = Math.max(0,    Math.min(next.primeTarget, next.primeMin))
+    next.primeTarget = Math.max(next.primeMin, Math.min(24000, next.primeTarget))
+    next.minScale    = Math.max(0.95, Math.min(0.9999, next.minScale))
+    next.maxScale    = Math.min(1.05, Math.max(1.0001, next.maxScale))
+    next.rateStep    = Math.max(0, Math.min(0.001, next.rateStep))
+    this.tuning = next
+    if (this.playbackWorklet) {
+      this.playbackWorklet.port.postMessage({
+        type: 'tune',
+        primeTarget: next.primeTarget,
+        primeMin:    next.primeMin,
+        maxScale:    next.maxScale,
+        minScale:    next.minScale,
+        rateStep:    next.rateStep,
+      })
+    }
+    this.fireTuningChanged()
+  }
+
+  /**
+   * Update the server-side per-user jitter buffer. Sends MIXER_TUNE on the
+   * control WebSocket; the server clamps to its own ceilings and replies
+   * with MIXER_TUNE_ACK carrying the *applied* values (which may differ if
+   * the slider went past the server's max). When the ack arrives we update
+   * `this.serverTuning` to whatever the server actually applied — single
+   * source of truth — and fire the change callback so the UI re-renders.
+   */
+  setServerTuning(t: Partial<AudioService['serverTuning']>): void {
+    const next = { ...this.serverTuning, ...t }
+    if (this.controlWs?.readyState !== WebSocket.OPEN) {
+      // Save the desire even when offline so it gets applied on reconnect.
+      // (Reconnect path doesn't yet replay this; the user can move the slider
+      // again once the WS is up. Acceptable for a debug feature.)
+      this.serverTuning = next
+      this.fireTuningChanged()
+      return
+    }
+    const payload = JSON.stringify({
+      type:             'MIXER_TUNE',
+      room_id:          this.roomId,
+      user_id:          this.userId,
+      jitter_target:    next.jitterTarget,
+      jitter_max_depth: next.jitterMaxDepth,
+    }) + '\n'
+    this.controlWs.send(payload)
+    // Optimistic update — overwritten on MIXER_TUNE_ACK if server clamped.
+    this.serverTuning = next
+    this.fireTuningChanged()
   }
 
   /** Subscribe to remote peer level updates. Callback receives (userId, level 0-1). */
@@ -1127,8 +1252,30 @@ export class AudioService {
         const msg = JSON.parse(data)
         if (msg.type === 'MIXER_JOIN_ACK') {
           console.log('[Mixer] MIXER_JOIN_ACK received, starting capture')
+          // Server reports its current jitter defaults inline so the debug
+          // panel can render slider initial positions matching reality.
+          // Missing fields = older server build → keep our local defaults.
+          if (typeof msg.jitter_target === 'number') {
+            this.serverTuning.jitterTarget = msg.jitter_target
+          }
+          if (typeof msg.jitter_max_depth === 'number') {
+            this.serverTuning.jitterMaxDepth = msg.jitter_max_depth
+          }
+          this.fireTuningChanged()
           this.startCapture()
           this.startPing()
+        } else if (msg.type === 'MIXER_TUNE_ACK') {
+          // Server clamped to its own ceilings; treat the ack as the source
+          // of truth and overwrite local state with what was actually
+          // applied. fireTuningChanged() then re-renders the slider so the
+          // user sees the clamp visually.
+          if (typeof msg.jitter_target === 'number') {
+            this.serverTuning.jitterTarget = msg.jitter_target
+          }
+          if (typeof msg.jitter_max_depth === 'number') {
+            this.serverTuning.jitterMaxDepth = msg.jitter_max_depth
+          }
+          this.fireTuningChanged()
         } else if (msg.type === 'HANDSHAKE_ACK' || msg.type === 'OK') {
           console.log('[Mixer] Handshake ack, starting capture')
           this.startCapture()

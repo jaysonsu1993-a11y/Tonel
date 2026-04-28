@@ -75,7 +75,15 @@ std::string MixerServer::SimpleJson::make_ack(const std::string& type) {
 }
 
 std::string MixerServer::SimpleJson::make_mixer_join_ack(int udp_port) {
-    return std::string("{\"type\":\"MIXER_JOIN_ACK\",\"udp_port\":") + std::to_string(udp_port) + "}";
+    // Surface the per-user jitter defaults inline so the client's debug
+    // panel can initialise sliders to the *actual* server values without
+    // a separate MIXER_TUNE_QUERY round trip. If the server later changes
+    // defaults (or per-deploy overrides), the client picks them up here.
+    return std::string("{\"type\":\"MIXER_JOIN_ACK\",\"udp_port\":")
+        + std::to_string(udp_port)
+        + ",\"jitter_target\":" + std::to_string(JITTER_TARGET_DEFAULT)
+        + ",\"jitter_max_depth\":" + std::to_string(JITTER_MAX_DEPTH_DEFAULT)
+        + "}";
 }
 
 // ============================================================
@@ -447,6 +455,82 @@ void MixerServer::handle_control_message(uv_stream_t* client,
     } else if (j.type == "PING") {
         send_tcp_response(client, "{\"type\":\"PONG\"}\n");
 
+    } else if (j.type == "MIXER_TUNE") {
+        // Per-user runtime tuning of the jitter buffer. Sent by the room's
+        // debug panel (?debug=1) when the user moves a slider; updates
+        // ONLY this user's UserEndpoint, so one tester's experiments don't
+        // leak into other rooms / users sharing the server.
+        //
+        // Wire format (one line, terminated by \n):
+        //   {"type":"MIXER_TUNE","room_id":"<r>","user_id":"<u>",
+        //    "jitter_target":<int>,"jitter_max_depth":<int>}
+        //
+        // Both numeric fields are optional — missing fields are ignored.
+        // Out-of-range values are clamped to [1..MAX] / [1..MAX]; we
+        // don't reject the message, so a slider can drag past the limit
+        // without losing the connection.
+        if (j.room_id.empty() || j.user_id.empty()) {
+            send_tcp_response(client, SimpleJson::make_error("room_id and user_id required"));
+            return;
+        }
+        // Parse the two numeric fields. Track presence with a separate bool
+        // so a literal `-5` (out-of-range, should clamp to 1) isn't confused
+        // with "field omitted" — both have negative numeric values.
+        bool have_target = false, have_cap = false;
+        int new_target = 0, new_max_depth = 0;
+        {
+            std::smatch mm;
+            std::regex tgt_re("\"jitter_target\"\\s*:\\s*(-?\\d+)");
+            if (std::regex_search(msg, mm, tgt_re)) {
+                new_target = std::stoi(mm[1].str());
+                have_target = true;
+            }
+            std::regex cap_re("\"jitter_max_depth\"\\s*:\\s*(-?\\d+)");
+            if (std::regex_search(msg, mm, cap_re)) {
+                new_max_depth = std::stoi(mm[1].str());
+                have_cap = true;
+            }
+        }
+        int applied_target = -1;
+        int applied_cap    = -1;
+        {
+            std::lock_guard<std::mutex> lock(rooms_mutex_);
+            auto room_it = rooms_.find(j.room_id);
+            if (room_it != rooms_.end()) {
+                auto uit = room_it->second->users.find(j.user_id);
+                if (uit != room_it->second->users.end()) {
+                    UserEndpoint& uep = uit->second;
+                    if (have_target) {
+                        uep.jitter_target = std::max(1, std::min(JITTER_TARGET_MAX, new_target));
+                        // Force re-prime on shrink so the queue can settle to
+                        // the new (lower) target instead of running fat.
+                        uep.jitter_primed = false;
+                    }
+                    if (have_cap) {
+                        uep.jitter_max_depth = std::max(1, std::min(JITTER_MAX_DEPTH_MAX, new_max_depth));
+                        // If the current queue is already over the new cap,
+                        // trim immediately so the next tick sees the new shape.
+                        while (uep.jitter_queue.size() > static_cast<size_t>(uep.jitter_max_depth)) {
+                            uep.jitter_queue.pop_front();
+                        }
+                    }
+                    applied_target = uep.jitter_target;
+                    applied_cap    = uep.jitter_max_depth;
+                }
+            }
+        }
+        if (applied_target < 0) {
+            send_tcp_response(client, SimpleJson::make_error("user not in room"));
+            return;
+        }
+        std::string ack = std::string("{\"type\":\"MIXER_TUNE_ACK\",\"jitter_target\":")
+            + std::to_string(applied_target)
+            + ",\"jitter_max_depth\":" + std::to_string(applied_cap) + "}\n";
+        send_tcp_response(client, ack);
+        std::cout << "[MixerServer] MIXER_TUNE " << j.user_id
+                  << " jitter_target=" << applied_target
+                  << " jitter_max_depth=" << applied_cap << std::endl;
+
     } else {
         send_tcp_response(client, SimpleJson::make_error("Unknown type: " + j.type));
     }
@@ -628,11 +712,12 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
                           << " switched to Opus (opus valid=" << uep.opus.valid << ")\n";
             }
 
-            // Enqueue PCM frame for the next mix tick. Cap to JITTER_MAX_DEPTH
-            // by dropping the oldest pending frame if the queue grows past it
-            // (e.g. client TX faster than server tick or short congestion burst).
+            // Enqueue PCM frame for the next mix tick. Cap to jitter_max_depth
+            // (per-user, runtime-tunable via MIXER_TUNE) by dropping the
+            // oldest pending frame if the queue grows past it (e.g. client TX
+            // faster than server tick or short congestion burst).
             uep.jitter_queue.emplace_back(float_buf.begin(), float_buf.begin() + frame_count);
-            while (uep.jitter_queue.size() > static_cast<size_t>(JITTER_MAX_DEPTH)) {
+            while (uep.jitter_queue.size() > static_cast<size_t>(uep.jitter_max_depth)) {
                 uep.jitter_queue.pop_front();
             }
         }
@@ -874,7 +959,7 @@ void MixerServer::handle_mix_timer() {
             for (auto& user_kv : room->users) {
                 UserEndpoint& uep = user_kv.second;
                 if (!uep.jitter_primed) {
-                    if (static_cast<int>(uep.jitter_queue.size()) >= JITTER_TARGET) {
+                    if (static_cast<int>(uep.jitter_queue.size()) >= uep.jitter_target) {
                         uep.jitter_primed = true;
                     } else {
                         continue;   // not primed yet — let PLC fill this tick

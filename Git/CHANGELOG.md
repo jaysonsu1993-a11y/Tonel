@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-04-29
+
+### Added — live audio tuning panel for latency exploration
+
+The five client-side and two server-side constants that gate end-to-end
+audio latency are now adjustable from the room page at runtime, so the
+"can we shave another 10 ms off?" question can be answered with sliders
+instead of a redeploy cycle.
+
+**Web** — `Git/web/src/components/AudioDebugPanel.tsx`
+- Mounts in `RoomPage` when `?debug=1` is in the URL; absent otherwise so
+  ordinary users see no UI change.
+- Five client knobs (postMessage → playback worklet, no AudioContext
+  rebuild, no re-prime click on slider drag):
+  `primeTarget`, `primeMin`, `maxScale`, `minScale`, `rateStep`.
+- Two server knobs (MIXER_TUNE control message → per-user jitter buffer):
+  `jitterTarget`, `jitterMaxDepth`.
+- Shows derived "added latency budget = client cushion + server jitter"
+  in ms — the actual thing being optimised.
+- Live stats (ring fill, rate ppm, reprime/seqGap counters) refreshed at
+  5 Hz so the engineer sees how each knob lands.
+- Sliders re-render after MIXER_JOIN_ACK (server-reported defaults) and
+  after MIXER_TUNE_ACK (server-clamped value), so the panel always shows
+  what's actually applied — not what was last requested.
+
+**Server** — `Git/server/src/mixer_server.{h,cpp}`
+- `JITTER_TARGET` / `JITTER_MAX_DEPTH` moved from class-scoped constexprs
+  to per-`UserEndpoint` mutable fields (`jitter_target`, `jitter_max_depth`).
+  Per-user (rather than global) so each tester's experiments don't leak
+  into other rooms / users sharing the server.
+- New `MIXER_TUNE` JSON control message:
+  ```
+  {"type":"MIXER_TUNE","room_id":"<r>","user_id":"<u>",
+   "jitter_target":<int>,"jitter_max_depth":<int>}
+  ```
+  Both numeric fields optional; out-of-range values clamped to
+  [1..JITTER_TARGET_MAX(16)] / [1..JITTER_MAX_DEPTH_MAX(64)].
+  Server responds with `MIXER_TUNE_ACK` carrying the *applied* values
+  (single source of truth for the UI).
+- Lowering `jitter_target` triggers an immediate re-prime so the queue
+  settles to the new (smaller) shape instead of running fat.
+- Lowering `jitter_max_depth` immediately trims the live deque so the
+  next tick sees the new cap.
+- `MIXER_JOIN_ACK` now embeds `jitter_target` and `jitter_max_depth` so
+  client-side sliders initialise to whatever defaults the running server
+  was built with — no separate query round-trip.
+
+**Worklet refactor** — `Git/web/src/services/audioService.ts`
+- `PRIME_TARGET`, `PRIME_MIN` (formerly `${...}` template constants)
+  are now `this.targetCount` / `this.primeMin` instance fields, written
+  by the new `'tune'` postMessage. The 'tune' message is discriminated
+  from PCM frames by an explicit `type` field so the audio fast path
+  costs one extra typeof check per frame and nothing more.
+- `MAX_SCALE`, `MIN_SCALE`, `rateStep` similarly tunable; `rateStep`
+  was previously a `0.00002` literal in two places, now `this.rateStep`.
+- `setPlaybackTuning()` clamps each field to a safe range before send so
+  an over-eager slider can't put the worklet into an unrecoverable state
+  (e.g. primeMin > primeTarget).
+
+**Defaults unchanged.** All numeric defaults match v3.1.0 exactly
+(client `1440 / 128 / 1.012 / 0.988 / 2e-5`, server `1 / 8`), so audio
+behaviour with no slider movement is byte-identical to before. Verified
+via Layer 1 (1 kHz sine SNR 84 dB, THD 0.006 %), Layer 1.5 (12 jitter
+scenarios all PASS, plc/s within natural variance), Layer 2 (browser
+playback 48 kHz / 44.1 kHz both PASS).
+
+**Security note.** MIXER_TUNE accepts the (room_id, user_id) tuple from
+the JSON body without auth — same posture as MIXER_LEAVE. Acceptable
+for the current single-tenant tonel.io deployment; if multi-tenant
+production is added later, a session token check should gate this
+message before a malicious user can sweep someone else's jitter buffer.
+
 ## [3.1.0] - 2026-04-29
 
 ### Milestone — 破音问题彻底解决，进入 3.x 系列
