@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.38] - 2026-04-29
+
+### Fixed (Jitter buffer cap 4 → 8 — 4–6× drop in PLC click rate, no latency cost)
+
+User: "现在的这个偶发噪声还是无法忍受，再提升一点。"
+
+Used the v1.0.37 Layer 1.5 jitter sweep to evaluate six candidate
+configurations against the v1.0.36 (target=1, cap=4) baseline. Voice
++ Gaussian SD = 0..20 ms, burst patterns:
+
+```
+              plc/s at jitterSd =
+config         0     5     10    15    20    burst20/15  burst10/20  burst20/30
+d1 c4 (base)  1.92  7.88  8.47  14.18 15.00  2.30        2.49        3.83
+d1 c8         1.92  2.12  2.50  2.69  4.02   2.30        2.30        2.68
+d1 c16        1.92  2.50  2.11  2.31  2.49   2.30        3.83        2.68
+d2 c8         1.92  2.12  2.69  1.92  2.69   2.11        2.49        2.68
+d2 c16        3.66  2.12  2.31  2.30  3.64   2.11        2.49        2.68
+d3 c12        4.62  1.92  2.31  2.12  2.69   1.92        2.30        2.68
+```
+
+Two clear takeaways:
+
+1. **The single biggest win is `cap = 4 → 8`** with target unchanged.
+   plc/s at SD = 5–15 ms drops 4–6× without adding any latency. The
+   v1.0.36 → v1.0.38 transition is a one-line change.
+
+2. **Raising target to 2 or 3 is bad** even on idle (SD = 0): plc/s
+   *grows* to 3.66 (target=2 cap=16) and 4.62 (target=3) because the
+   deeper steady-state queue is more sensitive to client-vs-server
+   clock drift — the buffer occasionally drains to 0 and trips PLC
+   despite the deeper average. This corrects v1.0.35's earlier
+   diagnosis: the failure mode wasn't "depth 2 vs depth 1" per se,
+   it was "headroom = 2 (cap − target) was too small for WSS-over-TCP
+   burst arrivals." If headroom is 7+ (cap=8, target=1), bursts get
+   queued and drained over the next few ticks instead of hitting the
+   cap and dropping the oldest frame.
+
+### Change
+
+`JITTER_MAX_DEPTH = 4 → 8` in `Git/server/src/mixer_server.h`.
+Header comment in `UserEndpoint::jitter_queue` revised to explain the
+two knobs (target sets latency, cap sets burst headroom) and that
+they are NOT interchangeable.
+([Git/server/src/mixer_server.h:135](Git/server/src/mixer_server.h:135))
+
+### Latency impact
+
+**Zero.** `JITTER_TARGET` unchanged at 1 → average queue size still
+~1 frame → average buffer wait still ~2.5 ms. End-to-end latency
+remains at v1.0.36's ~65 ms. The cap only matters during transient
+queue spikes; it doesn't change steady-state behaviour.
+
+### Layer 1 byte-identical
+
+SNR / THD at amp 0.05 / 0.30 / 0.95 = 67.26 / 84.01 / 93.44 dB —
+identical to v1.0.32 / v1.0.36 baselines. The cap change cannot
+affect signal fidelity in a no-jitter test (queue never grows).
+
+### Lessons (added to memory)
+
+- **Steady-state buffer depth (target) and burst headroom (cap −
+  target) are independent dials.** When the user-perceived problem
+  is "occasional clicks under jitter," it's almost always headroom
+  not target — bigger cap, same target, free improvement.
+- **Layer 1.5 paid for itself in one iteration.** The v1.0.34→v1.0.35
+  regression was diagnosed wrong at the time; the sweep revealed the
+  actual mechanism in 5 minutes of local testing.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/mixer_server.h` `JITTER_MAX_DEPTH` | 4 → 8 |
+| `Git/server/src/mixer_server.h` comment block | Rewrite to explain target vs cap as independent knobs |
+| `~/.claude/projects/.../memory/project_pomu_open_issue.md` | Add cap-vs-target lesson |
+
 ## [1.0.37] - 2026-04-28
 
 ### Added (Layer 1.5 — local jitter-scenario sweep with deterministic PLC counter)

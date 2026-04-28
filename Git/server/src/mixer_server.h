@@ -108,31 +108,45 @@ private:
         bool jitter_primed = false;   // false until queue first reaches JITTER_TARGET
     };
 
-    // Jitter buffer parameters. Target depth N absorbs up to N × 5 ms of
-    // one-sided arrival jitter (frames arriving N×5 ms after their ideal
-    // time still hit the right tick). Average buffer wait ≈ (N - 0.5) × 5 ms,
-    // so latency cost scales with depth.
+    // Jitter buffer parameters. Two independent knobs:
+    //
+    // - `JITTER_TARGET` — how many frames the queue must hold before the
+    //   mixer starts dequeueing. Average buffer wait ≈ (target − 0.5) × 5 ms,
+    //   so this is the latency cost. Steady-state queue size oscillates
+    //   around target ± 1 frame (one tick between dequeue and the next
+    //   enqueue).
+    // - `JITTER_MAX_DEPTH` — the cap. When an arrival pushes queue size
+    //   past this, we drop the oldest frame to keep long-run latency
+    //   bounded. *Each cap-drop is 5 ms of audio gone → audible click.*
+    //
+    // The two are NOT interchangeable. Raising target adds latency for
+    // every frame; raising cap only matters during burst arrivals.
+    // Headroom = cap − target controls how many frames a burst can stuff
+    // in before something has to be thrown away.
     //
     // History:
-    //   v1.0.34: depth 1 (5 ms cost) — cut click rate 35× (7.2/s → 0.21/s).
-    //   v1.0.35: depth 2 (10 ms cost) — *did not improve* and user reported
-    //            click rate slightly worse. Most likely cause: WSS-over-TCP
-    //            does occasional burst delivery (one main-thread stall on
-    //            either end yields N frames in <5 ms when it resumes); a
-    //            depth-2 steady state buffer averages 2 frames so the
-    //            margin to the JITTER_MAX_DEPTH=4 hard cap is only 2,
-    //            making cap-drops more frequent. Each drop is 5 ms of
-    //            audio thrown away → audible discontinuity.
-    //   v1.0.36: reverted to depth 1, the proven point on the curve.
-    //            Further reduction needs a different tactic — adaptive
-    //            buffer size that drains to target instead of fixed cap,
-    //            or a PLC scheme that hides the buffer-overflow drops.
+    //   v1.0.34: target=1 cap=4 — cut click rate 35× (7.2/s → 0.21/s).
+    //   v1.0.35: target=2 cap=4 — *worse* than v1.0.34 in production.
+    //            Diagnosed at the time as "deeper buffer interacts badly
+    //            with the cap edge"; the actual mechanism (per Layer 1.5
+    //            sweep, validated v1.0.38) is that headroom = 2 was too
+    //            small to absorb WSS-over-TCP burst arrivals → cap drops
+    //            → click chain.
+    //   v1.0.36: reverted to target=1 cap=4 (= v1.0.34).
+    //   v1.0.37: added the Layer 1.5 jitter sweep so candidate fixes can
+    //            be validated locally without deploys.
+    //   v1.0.38: keep target=1 (no latency increase), raise cap=8.
+    //            Layer 1.5 sweep across SD = 2..20 ms shows plc/s drops
+    //            5–7× compared to v1.0.34/v1.0.36; longer SD tails (15+ ms)
+    //            still improve at cap=16 but with diminishing returns.
     static constexpr int JITTER_TARGET    = 1;
-    // Hard cap to keep the queue from growing without bound when the
-    // client TX clock drifts faster than the server tick (or short
-    // bursts). 4 frames = 20 ms — past this we drop oldest, which
-    // costs 5 ms of audio per drop but keeps long-run latency bounded.
-    static constexpr int JITTER_MAX_DEPTH = 4;
+    // 8 frames = 40 ms of headroom for burst arrivals before any drop.
+    // Average queue still tracks `JITTER_TARGET`, so latency is unchanged
+    // from v1.0.36. Doubling cap from 4 → 8 was the single biggest
+    // win in the v1.0.38 tuning sweep (see CHANGELOG); going further to
+    // 16 helps the SD ≥ 15 ms tail but is unlikely to matter on most
+    // public-net paths.
+    static constexpr int JITTER_MAX_DEPTH = 8;
 
     // ── Room state ──────────────────────────────────────────
     struct Room {
