@@ -134,8 +134,26 @@ inline void AudioMixer::mix(float* output, int frameCount) {
         t.frameCount = 0;
     }
 
-    // 3. Limiter — prevent clipping
+    // 3. Soft clip — saturate above the knee instead of hard-clamping.
+    //
+    // The previous implementation was a hard clip (clamp to [-1, 1]),
+    // which is what produced the "音量稍大失真噪音" symptom: when two
+    // users spoke simultaneously the sum exceeded ±1.0 and the
+    // brick-wall clip turned the waveform into a square wave full of
+    // odd harmonics, audible as gritty distortion. A knee-based soft
+    // clipper transparently passes anything in [-0.85, 0.85] (so
+    // single-talker audio is byte-identical to before) and uses tanh
+    // to smoothly compress the [0.85, 1.0] region — no harmonics, no
+    // square-wave artifact. Zero added latency; tanh is only invoked
+    // on samples that exceed the knee.
+    constexpr float kKnee  = 0.85f;
+    constexpr float kRoom  = 1.0f - kKnee;  // 0.15
     for (int i = 0; i < frameCount; ++i) {
-        output[i] = std::max(-1.0f, std::min(1.0f, output[i]));
+        const float x = output[i];
+        if (x > kKnee) {
+            output[i] = kKnee + kRoom * std::tanh((x - kKnee) / kRoom);
+        } else if (x < -kKnee) {
+            output[i] = -kKnee + kRoom * std::tanh((x + kKnee) / kRoom);
+        }
     }
 }

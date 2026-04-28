@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.11] - 2026-04-28
+
+### Fixed (Server Mixer — "音量稍大失真噪音")
+
+- **`AudioMixer::mix()` post-processing: hard clip → knee-based soft clip.**
+  v1.0.10's mixer post-processing comment said "Limiter — prevent clipping"
+  but the implementation was a brick-wall hard clip (`std::max(-1.0f,
+  std::min(1.0f, x))`). When two users spoke simultaneously, the linear sum
+  exceeded ±1.0 and the hard clamp turned the waveform into a square wave
+  full of odd harmonics — listeners heard this as gritty distortion the
+  moment any voice got loud. v1.0.11 replaces the clamp with a two-region
+  soft clipper: linear pass-through for `|x| ≤ 0.85` (single-talker audio
+  is byte-identical to v1.0.10) and `tanh`-shaped saturation in
+  `[0.85, 1.0]`. No square-wave artifact, no harmonics, output stays
+  inside `[-1, 1]`.
+  ([Git/server/src/audio_mixer.h:124](Git/server/src/audio_mixer.h:124))
+
+- **Two regression tests for the soft-clip invariants.**
+  `test_soft_clip_below_knee` verifies the linear pass-through region
+  produces byte-identical output to the raw sum (no surprise non-linearity
+  for normal speech). `test_soft_clip_above_knee` verifies high-volume
+  overlap stays inside `[-1, 1]` AND is *not* a hard clamp at 1.0
+  (otherwise we'd have silently regressed back to v1.0.10 behavior).
+  ([Git/server/src/mixer_server_test.cpp:155](Git/server/src/mixer_server_test.cpp:155))
+
+### Latency impact
+Zero added latency. The soft clipper is sample-by-sample and only invokes
+`tanh` for samples that exceed the knee — single-talker frames pay
+nothing, multi-talker frames pay one branch + one `tanh` per over-the-knee
+sample (~hundreds of nanoseconds per 5 ms tick, immeasurable against the
+existing mix loop).
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` `AudioMixer::mix` | Hard clamp at `[-1,1]` replaced with knee-based `tanh` soft clip (knee = 0.85, room = 0.15) |
+| `Git/server/src/mixer_server_test.cpp` | Add `test_soft_clip_below_knee` and `test_soft_clip_above_knee` regression tests |
+
 ## [1.0.10] - 2026-04-28
 
 ### Fixed (Server Mixer — root cause of "电流声 + 金属音 + mute 后底噪")

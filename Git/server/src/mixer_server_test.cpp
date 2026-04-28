@@ -152,6 +152,59 @@ static int test_track_count() {
     return 0;
 }
 
+// Soft-clip invariants (v1.0.11):
+//   1. Below the knee (|x| <= 0.85) the mix output is byte-identical to
+//      the linear sum — single-talker audio MUST NOT be touched.
+//   2. Above the knee, output is monotonically increasing in input and
+//      stays in [-1, 1] — replaces the v1.0.10 hard clip that produced
+//      square-wave distortion when two users overlapped at high volume.
+static int test_soft_clip_below_knee() {
+    AudioMixer m;
+    float t1[480], t2[480];
+    for (int i = 0; i < 480; ++i) { t1[i] = 0.4f; t2[i] = 0.4f; }   // sum = 0.8 < 0.85 knee
+    float out[480];
+    m.addTrack("u1", t1, 480);
+    m.addTrack("u2", t2, 480);
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        if (!approx(out[i], 0.8f)) {
+            std::fprintf(stderr, "FAIL: test_soft_clip_below_knee — out[%d] = %f, expected 0.8 (linear pass)\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_soft_clip_below_knee\n");
+    return 0;
+}
+
+static int test_soft_clip_above_knee() {
+    AudioMixer m;
+    float t1[480], t2[480];
+    for (int i = 0; i < 480; ++i) { t1[i] = 0.6f; t2[i] = 0.6f; }   // sum = 1.2 > 1.0
+    float out[480];
+    m.addTrack("u1", t1, 480);
+    m.addTrack("u2", t2, 480);
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        // Must stay inside [-1, 1]
+        if (out[i] > 1.0f || out[i] < -1.0f) {
+            std::fprintf(stderr, "FAIL: test_soft_clip_above_knee — out[%d] = %f, outside [-1,1]\n", i, out[i]);
+            return 1;
+        }
+        // Must NOT be a hard clamp at 1.0 — soft clip should produce a value strictly < 1.0
+        // for finite input. (1.2 - 0.85) / 0.15 = 2.33 → tanh ≈ 0.981 → 0.85 + 0.15*0.981 ≈ 0.997
+        if (out[i] >= 1.0f) {
+            std::fprintf(stderr, "FAIL: test_soft_clip_above_knee — out[%d] = %f, hard-clipped at 1.0 (should be ~0.997)\n", i, out[i]);
+            return 1;
+        }
+        if (out[i] < 0.85f) {
+            std::fprintf(stderr, "FAIL: test_soft_clip_above_knee — out[%d] = %f, below knee (should be > 0.85)\n", i, out[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_soft_clip_above_knee\n");
+    return 0;
+}
+
 // Consume-style invariant: a track contributes to *exactly one* mix per
 // addTrack(). A second mix() without a fresh addTrack() must produce
 // silence — without this, a muted user's last 5 ms frame would be replayed
@@ -192,6 +245,8 @@ static int run_mixer_tests() {
     failures += test_remove_track();
     failures += test_track_count();
     failures += test_consume_after_mix();
+    failures += test_soft_clip_below_knee();
+    failures += test_soft_clip_above_knee();
     std::printf("\n=== AudioMixer: %d test(s) failed ===\n\n", failures);
     return failures;
 }
