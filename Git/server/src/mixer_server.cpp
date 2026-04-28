@@ -752,8 +752,20 @@ void MixerServer::handle_mix_timer() {
 
     for (auto& kv : rooms_) {
         Room* room = kv.second.get();
-        if (!room || !room->pending_mix) continue;
+        if (!room || room->users.empty()) continue;
 
+        // Broadcast every tick regardless of input freshness — clients depend
+        // on a continuous 200 Hz packet stream to keep their playback ring
+        // primed. The previous `pending_mix` gate skipped broadcasts in any
+        // 5 ms slot where no new UDP packet had arrived from any user, so
+        // the effective broadcast rate fell to roughly the slowest sender's
+        // input rate (~75–100 Hz under burst-y `ScriptProcessorNode`
+        // callbacks). That undershoot caused the receiving client's
+        // `playTime` to drift past `currentTime`, triggering constant
+        // re-anchor events that listeners hear as continuous "电流静电".
+        // With consume-style mix below, an empty mix is exactly silence
+        // (480 zero bytes), so the cost of broadcasting on idle ticks is
+        // bandwidth, not audio glitches.
         room->pending_mix = false;
         mix_sequence_++;
         broadcast_mixed_audio(room, mix_sequence_, room->latest_timestamp);

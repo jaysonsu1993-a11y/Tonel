@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.10] - 2026-04-28
+
+### Fixed (Server Mixer — root cause of "电流声 + 金属音 + mute 后底噪")
+
+The "电流声 / 金属感 / 人声变噪 / 麦克风关了仍有底噪" symptom v1.0.9 chased
+on the AppKit side was actually a server-side mixer bug. AppKit and Web
+client-side tweaks (RX-ring prime threshold, ScriptProcessor buffer size)
+masked the symptom but didn't fix it. v1.0.10 fixes the source.
+
+- **`AudioMixer::mix()` is now consume-style — each `addTrack()` contributes to
+  exactly one mix.** Previously `addTrack` overwrote the per-user audio buffer
+  but `mix()` never cleared it, so a user who stopped sending UDP packets (mute,
+  packet loss, client stall) had their last 5 ms frame replayed on every 5 ms
+  broadcast. That same 240-sample slice repeating at 200 Hz is exactly the
+  "metallic 电流声 floor noise" listeners reported, and is why turning off the
+  microphone never made the noise stop — the noise was the listener's *own
+  last frame* looping forever inside the server. `mix()` now zeroes
+  `frameCount` after consuming a track; missing packets become silence
+  instead of a held-frame loop. Per-track `lastRms` is computed at
+  `addTrack` time and decayed on silent ticks so the level meter falls off
+  cleanly when a user mutes. ([Git/server/src/audio_mixer.h:73](Git/server/src/audio_mixer.h:73))
+
+- **5 ms broadcast tick is now unconditional — `pending_mix` gate removed.**
+  `handle_mix_timer` previously skipped the broadcast for any room where no
+  user had sent a fresh UDP packet in the last 5 ms slot. Combined with
+  bursty `ScriptProcessorNode` callbacks on the web client (one callback
+  shipping 2 packets back-to-back, then a 5–10 ms gap), the *effective*
+  broadcast rate fell to ~75–100 Hz instead of the design's 200 Hz. The
+  web client's playback timeline depends on a strict 200 Hz packet stream;
+  when packets arrive at 75 Hz, `playTime` falls behind `currentTime` on
+  every callback and the re-anchor branch fires constantly, audible as
+  continuous static. The 5 ms timer now broadcasts as long as a room has
+  any users, and consume-style mix means an idle tick costs 480 zero bytes
+  per recipient instead of an audio glitch. ([Git/server/src/mixer_server.cpp:743](Git/server/src/mixer_server.cpp:743))
+
+- **Regression test for the consume invariant.** `test_consume_after_mix`
+  verifies a second `mix()` without a fresh `addTrack()` produces silence,
+  not a replay of the previous frame. Locks in the v1.0.10 fix against
+  future changes. ([Git/server/src/mixer_server_test.cpp:155](Git/server/src/mixer_server_test.cpp:155))
+
+### Fixed (Web Audio Capture)
+- **Capture `ScriptProcessorNode` buffer size 512 → 256.** v1.0.9's move to
+  512 was a workaround for a bug whose root cause turned out to be in the
+  server, not the browser. With v1.0.10's server fix, 256 is both reliable
+  on the browsers we support *and* the right size — one 5 ms frame per
+  callback aligns with the server's 5 ms broadcast tick and minimizes the
+  chance of `addTrack` overwrites at the server. The "unreliable across
+  browsers" claim from v1.0.9 was based on observing the static noise
+  caused by the server bug. ([Git/web/src/services/audioService.ts:373](Git/web/src/services/audioService.ts:373))
+
+### Latency impact
+End-to-end audio latency is unchanged or marginally improved. The consume
+model is per-tick O(1) extra work (one assignment per active track) on the
+already-existing mix loop, no extra buffering, no extra threads. The
+unconditional 5 ms broadcast adds at most one extra 480-byte packet per
+recipient per silent slot — bandwidth-only cost, no latency cost.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` `AudioMixer::mix` | Consume tracks (set `frameCount = 0`) after accumulating; cache `lastRms` at `addTrack` and decay on silent ticks |
+| `Git/server/src/mixer_server.cpp` `handle_mix_timer` | Drop `pending_mix` gate; broadcast every 5 ms when a room has any users |
+| `Git/server/src/mixer_server_test.cpp` | Add `test_consume_after_mix` regression test |
+| `Git/web/src/services/audioService.ts` `startCaptureWithScriptProcessor` | bufferSize 512 → 256 |
+
 ## [1.0.9] - 2026-04-28
 
 ### Fixed (AppKit Audio)

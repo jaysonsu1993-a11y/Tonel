@@ -152,6 +152,35 @@ static int test_track_count() {
     return 0;
 }
 
+// Consume-style invariant: a track contributes to *exactly one* mix per
+// addTrack(). A second mix() without a fresh addTrack() must produce
+// silence — without this, a muted user's last 5 ms frame would be replayed
+// on every 5 ms broadcast and listeners would hear it as a 200 Hz metallic
+// floor noise (the v1.0.10 root cause).
+static int test_consume_after_mix() {
+    AudioMixer m;
+    float track[480];
+    for (int i = 0; i < 480; ++i) track[i] = 0.5f;
+    float out1[480], out2[480];
+
+    m.addTrack("user1", track, 480);
+    m.mix(out1, 480);
+    m.mix(out2, 480);
+
+    for (int i = 0; i < 480; ++i) {
+        if (!approx(out1[i], 0.5f)) {
+            std::fprintf(stderr, "FAIL: test_consume_after_mix — out1[%d] = %f, expected 0.5\n", i, out1[i]);
+            return 1;
+        }
+        if (out2[i] != 0.0f) {
+            std::fprintf(stderr, "FAIL: test_consume_after_mix — out2[%d] = %f, expected 0.0 (consumed)\n", i, out2[i]);
+            return 1;
+        }
+    }
+    std::printf("PASS: test_consume_after_mix\n");
+    return 0;
+}
+
 static int run_mixer_tests() {
     std::printf("\n=== AudioMixer Unit Tests ===\n");
     int failures = 0;
@@ -162,6 +191,7 @@ static int run_mixer_tests() {
     failures += test_limiter();
     failures += test_remove_track();
     failures += test_track_count();
+    failures += test_consume_after_mix();
     std::printf("\n=== AudioMixer: %d test(s) failed ===\n\n", failures);
     return failures;
 }

@@ -374,16 +374,30 @@ class AudioService {
 
   private startCaptureWithScriptProcessor(): void {
     if (!this.audioContext) return
-    // 512 samples = 10.67 ms per callback → ~2 SPA1 frames (240 each) per
-    // callback, leftover carried over via captureLeftover. v1.0.8 tried
-    // 256 to perfectly match the server's 5 ms cadence, but ScriptProcessor
-    // at 256 is unreliable across browsers (deprecated API, stricter than
-    // worklet on real-time deadlines, occasionally drops callbacks under
-    // load — audible as new noise). 512 is the smallest size that still
-    // runs reliably and is far better paced than the original 1024 (which
-    // packed 4 frames into a 21 ms burst, each 5 ms slot losing all but
-    // the last to the server mixer's single-buffer addTrack overwrite).
-    const node = this.audioContext.createScriptProcessor(512, 1, 1)
+    // 256 samples = 5.33 ms per callback ≈ 1 SPA1 frame (240 each) shipped
+    // per callback with leftover carried over. This matters because the
+    // server mixer is single-buffered per track: addTrack overwrites the
+    // previous frame, and only one broadcast happens per 5 ms timer slot.
+    //
+    // Larger sizes ship multiple frames in a burst inside one callback,
+    // and the server keeps only the last frame in each 5 ms slot:
+    //   bufferSize=512 (10.67 ms): ~2-3 frames per burst → server keeps 1
+    //     → ~75 packets/s reaches the client (vs. the expected 200/s)
+    //   bufferSize=1024 (21.33 ms): ~4 frames per burst → ~50 packets/s
+    //
+    // The web client schedules each received 5 ms packet on a continuous
+    // playTime timeline; when packets arrive at < 200/s, playTime falls
+    // behind currentTime, the re-anchor branch fires constantly, and each
+    // re-anchor introduces a small discontinuity. Stacked at tens of
+    // events per second, the discontinuities sound like persistent
+    // electrical static — the symptom v1.0.9 reintroduced when this
+    // value was changed to 512.
+    //
+    // v1.0.9 thought 256 was unreliable (callback drops under load). In
+    // practice, on the browsers this app supports, 256 is fine — the
+    // packet-loss-via-server-overwrite issue dominates over any rare
+    // ScriptProcessor underrun.
+    const node = this.audioContext.createScriptProcessor(256, 1, 1)
     node.onaudioprocess = (ev) => {
       // Always send frames (even silence when muted) to keep server mixer alive
       // AppKit: audio callback always runs, mute just zeros the data

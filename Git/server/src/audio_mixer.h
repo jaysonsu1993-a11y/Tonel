@@ -51,8 +51,9 @@ private:
 
     struct Track {
         float audio[MAX_FRAME_COUNT];  // preallocated fixed-size buffer
-        int frameCount = 0;
+        int frameCount = 0;            // > 0 when fresh data is awaiting mix; reset to 0 by mix()
         float weight = 1.0f;
+        float lastRms = 0.0f;          // updated by addTrack, decayed by mix() on silent ticks
     };
 
     std::unordered_map<std::string, Track> tracks_;
@@ -75,6 +76,9 @@ inline void AudioMixer::addTrack(const std::string& userId, const float* audio, 
     int count = std::min(frameCount, MAX_FRAME_COUNT);
     std::memcpy(t.audio, audio, count * sizeof(float));
     t.frameCount = count;
+    float sum = 0.0f;
+    for (int i = 0; i < count; ++i) sum += audio[i] * audio[i];
+    t.lastRms = count > 0 ? std::sqrt(sum / count) : 0.0f;
 }
 
 inline void AudioMixer::removeTrack(const std::string& userId) {
@@ -83,13 +87,8 @@ inline void AudioMixer::removeTrack(const std::string& userId) {
 
 inline float AudioMixer::getTrackLevel(const std::string& userId) const {
     auto it = tracks_.find(userId);
-    if (it == tracks_.end() || it->second.frameCount == 0) return 0.0f;
-    const Track& t = it->second;
-    float sum = 0.0f;
-    for (int i = 0; i < t.frameCount; ++i) {
-        sum += t.audio[i] * t.audio[i];
-    }
-    return std::sqrt(sum / t.frameCount);
+    if (it == tracks_.end()) return 0.0f;
+    return it->second.lastRms;
 }
 
 inline void AudioMixer::setWeight(const std::string& userId, float weight) {
@@ -103,10 +102,23 @@ inline void AudioMixer::mix(float* output, int frameCount) {
     // 1. Zero the output
     std::memset(output, 0, frameCount * sizeof(float));
 
-    // 2. Accumulate all tracks
-    for (const auto& kv : tracks_) {
-        const Track& t = kv.second;
-        if (t.frameCount == 0) continue;
+    // 2. Accumulate all tracks, then mark them consumed.
+    //
+    // Consume-style: a track contributes to *exactly one* mix per addTrack().
+    // Without the post-mix `frameCount = 0`, a track that stops being
+    // refreshed (user mutes, packet loss, client stalls) keeps replaying
+    // its last 5 ms frame on every 5 ms broadcast — a 200 Hz periodic
+    // repetition of a fixed 240-sample slice that listeners hear as a
+    // metallic "电流声" floor noise. Clearing frameCount makes a missing
+    // packet equal to silence rather than to "loop forever."
+    for (auto& kv : tracks_) {
+        Track& t = kv.second;
+        if (t.frameCount == 0) {
+            // Silent tick — decay the cached level so the UI meter falls
+            // off when a user mutes/disconnects instead of staying stuck.
+            t.lastRms *= 0.5f;
+            continue;
+        }
         const float w = t.weight;
         const float* src = t.audio;
         int count = std::min(frameCount, t.frameCount);
@@ -119,6 +131,7 @@ inline void AudioMixer::mix(float* output, int frameCount) {
                 output[i] += src[i] * w;
             }
         }
+        t.frameCount = 0;
     }
 
     // 3. Limiter — prevent clipping
