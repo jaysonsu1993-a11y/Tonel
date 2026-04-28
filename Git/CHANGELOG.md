@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.32] - 2026-04-28
+
+### Reverted (Roll back v1.0.31 palindrome PLC — objectively worse than v1.0.30 forward repeat)
+
+User retest of v1.0.31 reported persistent "噼里啪啦" click. FFT
+analysis on the new recording, normalized for signal RMS to remove the
+"user spoke louder this time" confound:
+
+| Metric | v1.0.29 | **v1.0.30** | v1.0.31 |
+|---|---|---|---|
+| Click rate | 13.9 / s | **7.2 / s** | 15.2 / s |
+| Median click jump / signal RMS | 0.41× | **0.20×** | 0.54× |
+| p90 click jump / signal RMS | 0.73× | **0.47×** | 0.95× |
+| Total click energy / signal energy / s | 3.38 | **0.80** | 6.43 |
+
+v1.0.30 forward PLC is best on every objective metric — the
+v1.0.31 palindrome was 8× worse on normalized click energy.
+
+### Why palindrome failed in production despite passing Layer 1
+
+The diagnosis flipped which boundary mattered most. Two PLC boundaries
+exist per fill:
+
+1. **Previous-tick → PLC start.** v1.0.30 forward jumps from prev[L-1]
+   (last 5 ms ago) to prev[0] (start of prev frame, also 5 ms ago).
+   v1.0.31 reverse start from prev[L-1] → prev[L-1] = bit-exact.
+2. **PLC end → next-fresh.** v1.0.30 forward ends at prev[L-1] (5 ms
+   ago), so next fresh F2[0] is a 5 ms voice diff away.
+   v1.0.31 reverse ends at prev[0] (which is *10 ms ago* relative to
+   the upcoming F2[0]), so the jump is 2× the voice movement of the
+   forward case.
+
+Voice signals change more over 10 ms than over 5 ms, so palindrome
+*halved* the easier boundary jump (#1) and *doubled* the harder one
+(#2) — net effect was worse perceived audio.
+
+Layer 1 didn't catch it: SNR/THD measure spectral purity of a 1 kHz
+sine, and time-reversal preserves magnitude spectrum, so SNR was
+byte-identical. The metric that matters here — sample-level
+discontinuity at the PLC→fresh transition — wasn't in the test suite.
+
+### Action
+
+- Reverted `accumulate` PLC path to plain forward repeat.
+- Removed `test_plc_boundary_continuity_on_ramp`, replaced with
+  `test_plc_forward_direction_on_ramp` to lock the simpler invariant.
+- Kept `prevLen`, `hasPrev`, `decayCount`, fade math — all still useful
+  for the cosine fade-out and reset semantics.
+
+### Latency impact
+
+**Zero.** Same 5 ms broadcast cadence as v1.0.30 / v1.0.31.
+
+### Where this leaves the 破音 issue
+
+Forward PLC v1.0.30 is the best zero-latency point on the curve, but
+still has ~7 click events per second on public-net jitter. Further
+reduction requires a latency / quality trade — primary candidates:
+
+1. **Server-side 1-frame jitter buffer** (+5 ms latency, 5 ms = 1 PLC
+   tick): absorbs single-frame jitter completely, eliminates most
+   PLC triggers, ~zero click on typical paths.
+2. **Spectral PLC (LPC / pitch-period repeat)**: 0 ms latency cost,
+   but ~200 lines of new code + harder to test, and the gain over
+   forward repeat is incremental.
+
+Neither is implemented yet — needs a direction call from the user
+since it touches the project's "low-latency-first" guideline.
+
+### Lessons (added to memory)
+
+- **Normalize FFT / click metrics for signal energy.** Two recordings
+  with different speaking volumes are not directly comparable on
+  raw click count. Median click amplitude / signal RMS is the right
+  unit.
+- **There is more than one PLC boundary.** "PLC stitch is continuous"
+  was true for v1.0.31's PLC↔PLC boundary but ignored the more
+  common single-miss case where the PLC↔fresh boundary dominates.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` `accumulate` PLC path | Revert palindrome → plain forward repeat |
+| `Git/server/src/mixer_server_test.cpp` | Replace boundary-continuity test with forward-direction test |
+| `~/.claude/projects/.../memory/project_pomu_open_issue.md` | Add palindrome lesson + normalized metric note |
+
 ## [1.0.31] - 2026-04-28
 
 ### Fixed (PLC palindrome — eliminate the residual 5 ms boundary click v1.0.30 cut in half)

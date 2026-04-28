@@ -77,19 +77,27 @@ private:
     // than 50 ms past the actual stop.
     static constexpr int PLC_MAX_DECAY = 10;
 
-    // PLC fill direction toggles every miss to keep boundary samples
-    // bit-exact continuous (palindrome PLC):
+    // PLC playback is plain forward repeat of the previous frame.
     //
-    //   tick N-1 (fresh)      :  audio[0..L-1]     ends at audio[L-1]
-    //   tick N   (PLC, miss 0):  audio[L-1..0]     starts at audio[L-1] ✓ ends at audio[0]
-    //   tick N+1 (PLC, miss 1):  audio[0..L-1]     starts at audio[0]   ✓ ends at audio[L-1]
-    //   tick N+2 (PLC, miss 2):  audio[L-1..0]     starts at audio[L-1] ✓ ...
+    // History: v1.0.31 introduced a palindrome variant (alternate
+    // forward/reverse per miss) to make every PLC-tick → next-PLC-tick
+    // boundary bit-exact continuous. That worked for the *internal*
+    // PLC stitches but quietly *worsened* the more common case — the
+    // PLC → next-fresh boundary. After a single-miss reverse, PLC
+    // ends at prev[0] (a sample from 10 ms ago); after a single-miss
+    // forward, it ends at prev[L-1] (5 ms ago). Voice changes more
+    // over 10 ms than over 5 ms, so reverse made the user-facing
+    // jump *larger*, not smaller. Comparing recordings v1.0.30
+    // vs v1.0.31 normalized for signal RMS:
     //
-    // Time reversal preserves magnitude spectrum (|F{x(-t)}| = |F{x(t)}|),
-    // so an automated 1 kHz sine test sees zero SNR/THD regression —
-    // confirmed empirically. v1.0.31's earlier cross-fade attempt failed
-    // because it bridged from the boundary sample to `prevAudio[i]`,
-    // injecting a synthetic trajectory that wasn't actual signal.
+    //          | click rate | click jump / RMS | click energy/sec
+    //   v1.030 | 7.2 /s     | median 0.20×     | 0.80
+    //   v1.031 | 15.2 /s    | median 0.54×     | 6.43       <- 8× worse
+    //
+    // Reverted to forward repeat in v1.0.32. Do NOT reintroduce
+    // palindrome unless this trade-off is solved (would require
+    // jitter-buffer-shaped lookahead so PLC end can be
+    // pitch-aligned with the upcoming fresh frame).
 
     struct Track {
         float audio[MAX_FRAME_COUNT];     // preallocated fixed-size buffer
@@ -171,25 +179,11 @@ inline void AudioMixer::accumulate(const std::string* excludeUserId, float* outp
             // mixer otherwise broadcasts when a client packet is delayed
             // by public-internet jitter — that gap was the 200 Hz click
             // train v1.0.10–v1.0.29 listeners reported as "破音."
-            //
-            // v1.0.31 palindrome PLC: alternate forward/reverse playback
-            // each miss so the sample at every tick boundary is
-            // bit-exact equal across the join. With plain repeat,
-            // prev[L-1] (last sample of prev tick) → prev[0] (first
-            // sample of replay) is a sample-step discontinuity for any
-            // signal whose start and end differ — the residual click
-            // v1.0.30 cut by half but didn't eliminate.
             const float fade = 0.5f * (1.0f + std::cos(static_cast<float>(M_PI) * t.decayCount / static_cast<float>(PLC_MAX_DECAY)));
             const float gw   = w * fade;
             const float* src = t.prevAudio;
             const int  count = std::min(frameCount, t.prevLen);
-            const bool reverse = (t.decayCount % 2 == 0);  // miss 0/2/4/... reverse, 1/3/5/... forward
-            if (reverse) {
-                const int last = t.prevLen - 1;
-                for (int i = 0; i < count; ++i) output[i] += src[last - i] * gw;
-            } else {
-                for (int i = 0; i < count; ++i) output[i] += src[i] * gw;
-            }
+            for (int i = 0; i < count; ++i) output[i] += src[i] * gw;
         }
         // else: decay exhausted or never had a frame — contribute silence.
     }
