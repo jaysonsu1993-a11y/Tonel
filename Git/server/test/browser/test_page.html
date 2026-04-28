@@ -38,6 +38,13 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this.primed   = false;
     this.ratio    = 48000 / sampleRate;   // input samples per output sample
     this.reprimeCount = 0;      // mid-callback underrun events (every one is a click)
+    // Adaptive rate compensation — tracks producer/consumer clock drift
+    // (server's 5 ms timer vs. browser audio thread crystal). ≤0.5 %
+    // pitch correction, well under perceptual threshold for voice.
+    this.targetCount = ${PRIME_TARGET};
+    this.rateScale   = 1.0;
+    this.MAX_SCALE   = 1.005;
+    this.MIN_SCALE   = 0.995;
 
     this.port.onmessage = (ev) => {
       let samples = ev.data;
@@ -78,6 +85,16 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       return true;
     }
 
+    // Slow control loop — keep count near targetCount across clock drift
+    if (this.count > this.targetCount * 1.3) {
+      this.rateScale = Math.min(this.MAX_SCALE, this.rateScale + 0.00002);
+    } else if (this.count < this.targetCount * 0.7) {
+      this.rateScale = Math.max(this.MIN_SCALE, this.rateScale - 0.00002);
+    } else {
+      this.rateScale = this.rateScale * 0.9999 + 1.0 * 0.0001;
+    }
+    const effRatio = this.ratio * this.rateScale;
+
     for (let i = 0; i < out0.length; i++) {
       const idxF = this.readPos;
       const idx  = Math.floor(idxF);
@@ -86,15 +103,15 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       const b = this.buf[(idx + 1) % ${RING_SIZE}];
       out0[i] = a + (b - a) * frac;
 
-      const newReadPos = idxF + this.ratio;
+      const newReadPos = idxF + effRatio;
       const newIdx     = Math.floor(newReadPos);
       this.count -= (newIdx - idx);
       this.readPos = newReadPos % ${RING_SIZE};
 
       if (this.count < ${PRIME_MIN}) {
-        // Mid-callback underrun: fade the last 16 samples toward zero
-        // (turns a step-discontinuity into a 330 µs ramp) then silence.
-        const fadeLen = i + 1 < 16 ? i + 1 : 16;
+        // Mid-callback underrun: fade the last 240 samples toward zero
+        // (5 ms ramp at 48 kHz) — perceived as soft attenuation not click.
+        const fadeLen = i + 1 < 240 ? i + 1 : 240;
         for (let f = 0; f < fadeLen; f++) {
           out0[i - f] *= f / fadeLen;
         }

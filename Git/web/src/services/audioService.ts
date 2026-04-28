@@ -450,6 +450,24 @@ export class AudioService {
           this.primed   = false
           this.ratio    = 48000 / sampleRate   // input samples per output sample
           this.reprimeCount = 0      // how many times we've re-primed (silence event)
+
+          // Adaptive rate compensation. The server's 5 ms broadcast timer
+          // and the browser's audio thread run on different physical
+          // clocks (server NTP-synced, browser CPU crystal); both nominally
+          // 48 kHz but in practice off by 50-500 ppm. The mismatch
+          // accumulates: at 100 ppm drift, the ring loses ~5 samples/sec,
+          // so a fixed-rate consumer drifts the ring to empty (and a
+          // reprime click) every ~3 minutes even with no jitter and no
+          // mic input. The user observed reprimes growing while muted —
+          // exactly this mode. We close the loop here: nudge readPos's
+          // step size up/down by ≤0.5 % to track the producer rate. 0.5 %
+          // is well under the perceptual threshold for pitch shift on
+          // voice, and the slow adaptation rate (0.002 % per quantum)
+          // keeps the change inaudible.
+          this.targetCount = ${PRIME_TARGET}
+          this.rateScale   = 1.0
+          this.MAX_SCALE   = 1.005
+          this.MIN_SCALE   = 0.995
           this.port.onmessage = (ev) => {
             let samples = ev.data
             if (samples instanceof ArrayBuffer) samples = new Float32Array(samples)
@@ -488,6 +506,20 @@ export class AudioService {
             this.primed = false
             return true
           }
+          // Slow control loop: nudge rateScale to keep count near target.
+          // Deadband [0.7×, 1.3×] target avoids reacting to ordinary jitter.
+          // Step is 2e-5 per quantum (≈0.0075 in 1 sec) — fast enough to
+          // track typical clock drift, slow enough to be inaudible.
+          if (this.count > this.targetCount * 1.3) {
+            this.rateScale = Math.min(this.MAX_SCALE, this.rateScale + 0.00002)
+          } else if (this.count < this.targetCount * 0.7) {
+            this.rateScale = Math.max(this.MIN_SCALE, this.rateScale - 0.00002)
+          } else {
+            // Inside deadband — drift back toward 1.0
+            this.rateScale = this.rateScale * 0.9999 + 1.0 * 0.0001
+          }
+          const effRatio = this.ratio * this.rateScale
+
           for (let i = 0; i < out0.length; i++) {
             const idxF = this.readPos
             const idx  = Math.floor(idxF)
@@ -495,16 +527,18 @@ export class AudioService {
             const a = this.buf[idx]
             const b = this.buf[(idx + 1) % ${RING_SIZE}]
             out0[i] = a + (b - a) * frac
-            const newReadPos = idxF + this.ratio
+            const newReadPos = idxF + effRatio
             const newIdx     = Math.floor(newReadPos)
             this.count -= (newIdx - idx)
             this.readPos = newReadPos % ${RING_SIZE}
             if (this.count < ${PRIME_MIN}) {
-              // Mid-callback underrun. Fade the last 16 samples we already
-              // wrote (or fewer if i < 16) down to zero — turns a step
-              // discontinuity into a ~330 µs ramp, which the ear hears as
-              // a soft drop instead of a click. Then silence the rest.
-              const fadeLen = i + 1 < 16 ? i + 1 : 16
+              // Mid-callback underrun. Fade the last 240 samples (5 ms at
+              // 48 kHz) we already wrote down to zero — long enough that
+              // the ear can't perceive it as a click, only as a soft
+              // attenuation, then silence the rest. With adaptive rate
+              // compensation above, this branch should fire only on real
+              // network outages (not steady-state drift).
+              const fadeLen = i + 1 < 240 ? i + 1 : 240
               for (let f = 0; f < fadeLen; f++) {
                 out0[i - f] *= f / fadeLen
               }

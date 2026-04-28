@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.24] - 2026-04-28
+
+### Fixed (Slow `repri` growth even with mic muted — clock drift)
+
+User confirmed `gap=0` (no UDP loss/reorder) but `repri` was still
+ticking up at ~1/s **even with the microphone off**. That rules out
+network jitter and signal-related causes. The remaining suspect is the
+clock-skew between the server's 5 ms broadcast timer (NTP-synced) and
+the browser's audio thread (CPU crystal). Both nominally 48 kHz, but
+hardware clocks drift by 50–500 ppm (0.005–0.05 %). Even tiny drift
+accumulates: at 100 ppm the ring loses 5 samples/sec, draining the
+20 ms cushion to empty in roughly two minutes. Worklet then reprimes
+(silence event → click), which is exactly what the user observed.
+
+### Adaptive playback rate compensation
+
+The playback worklet now runs a slow control loop that nudges its
+read step (`effRatio = ratio × rateScale`) up or down within ±0.5 %
+to keep the ring near `targetCount` (= `PRIME_TARGET`):
+
+- Ring above 1.3× target → increase `rateScale` toward 1.005 (consume
+  faster) at 2e-5 per audio quantum.
+- Ring below 0.7× target → decrease toward 0.995 (consume slower).
+- Inside the deadband → drift back to 1.0.
+
+±0.5 % is well below the perceptual threshold for pitch shift on
+voice content, and 2e-5/quantum (~0.0075/sec) is fast enough to track
+typical drift, slow enough to be inaudible on transients. With the
+loop closed, **the only thing that should still trigger a reprime is a
+real network outage** — sustained drift no longer drains the ring.
+
+### Other improvements
+
+- **Fade-out length 16 → 240 samples (≈330 µs → 5 ms).** When a reprime
+  does fire, the soft drop is long enough that the ear perceives it as
+  a brief attenuation, not a click.
+  ([Git/web/src/services/audioService.ts:498](Git/web/src/services/audioService.ts:498))
+
+- **Browser test analysis sweeps for the actual peak fundamental.**
+  The OfflineAudioContext test pre-fills the ring (which only happens
+  in the test, never in real listening) so `rateScale` ramps up by
+  ~0.5 % during the render — Goertzel at exactly the target frequency
+  would under-report due to spectral leakage. Sweeping ±2 % finds the
+  true peak so the test reflects actual signal quality. New output
+  format includes the recovered peak frequency and the implied shift,
+  which is also a useful production diagnostic — a sustained shift
+  that doesn't decay back to ~0 % means real client/server clock drift
+  is present and the adaptive loop is working as designed.
+  ([Git/server/test/browser/browser_audio_test.js:178](Git/server/test/browser/browser_audio_test.js:178))
+
+### Latency impact
+None. Same `PRIME_TARGET` (20 ms cushion) as v1.0.23. The control loop
+runs entirely on the audio thread, no extra latency, no extra buffers.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `PlaybackProcessor` | Adaptive `rateScale` (clock-drift compensation); 5 ms fade-out on underrun |
+| `Git/server/test/browser/test_page.html` | Worklet copy synced |
+| `Git/server/test/browser/browser_audio_test.js` | Sweep ±2 % for actual fundamental; report shift |
+
 ## [1.0.23] - 2026-04-28
 
 ### Fixed (Residual 破音 — playback ring underruns)
