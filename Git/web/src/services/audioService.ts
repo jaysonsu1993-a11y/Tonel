@@ -446,7 +446,17 @@ class AudioService {
       // Always send frames (even silence when muted) to keep server mixer alive
       // AppKit: audio callback always runs, mute just zeros the data
       const input = ev.inputBuffer.getChannelData(0)
-      this.onAudioFrame(this.muted ? new Float32Array(input.length) : new Float32Array(input))
+      const raw   = this.muted ? new Float32Array(input.length) : new Float32Array(input)
+      // Resample mic input to the wire rate (48 kHz) before slicing into
+      // 240-sample frames. Without this, when the AudioContext lands at
+      // 44.1 kHz (Bluetooth output, system mixer override) the 240
+      // samples-per-frame label "5 ms of 48 kHz" is a lie — they're
+      // really 5.44 ms of 44.1 kHz audio. Receivers play that back as
+      // 5 ms at 48 kHz, pitch-shifting by +8.8 %, so the user hears
+      // their own voice come back through the server-side echo at the
+      // wrong pitch overlaid on the correct peer audio. (v1.0.14)
+      const wireSamples = this.resampleCaptureTo48k(raw)
+      if (wireSamples.length > 0) this.onAudioFrame(wireSamples)
     }
     // Connect source → processor so it receives mic audio
     if (this.source) {
@@ -454,6 +464,41 @@ class AudioService {
     }
     node.connect(this.audioContext.destination)
     this.processor = node
+  }
+
+  // ── Capture-side resampler state ───────────────────────────────────────────
+  // Linear-interpolation resampler that converts the mic stream from the
+  // AudioContext's actual sample rate to the wire rate (48 kHz). State is
+  // carried across ScriptProcessor callbacks so packet boundaries don't
+  // drop or duplicate samples. Mirrors the in-worklet playback resampler.
+  private capCarry: Float32Array = new Float32Array(0)
+  private capPhase: number = 0
+
+  private resampleCaptureTo48k(input: Float32Array): Float32Array {
+    if (!this.audioContext) return input
+    const ctxRate = this.audioContext.sampleRate
+    if (ctxRate === SAMPLE_RATE) return input
+    const ratio = ctxRate / SAMPLE_RATE   // input samples per output sample
+    let buf: Float32Array
+    if (this.capCarry.length > 0) {
+      buf = new Float32Array(this.capCarry.length + input.length)
+      buf.set(this.capCarry, 0)
+      buf.set(input, this.capCarry.length)
+    } else {
+      buf = input
+    }
+    const out: number[] = []
+    let phase = this.capPhase
+    while (Math.floor(phase) + 1 < buf.length) {
+      const idx = Math.floor(phase)
+      const frac = phase - idx
+      out.push(buf[idx] + (buf[idx + 1] - buf[idx]) * frac)
+      phase += ratio
+    }
+    const consumedInt = Math.floor(phase)
+    this.capCarry = buf.slice(consumedInt)
+    this.capPhase = phase - consumedInt
+    return new Float32Array(out)
   }
 
   private smoothedLevel = 0
@@ -853,6 +898,8 @@ class AudioService {
   public stopCapture(): void {
     this.isCapturing = false
     this.captureLeftover = new Float32Array(0)
+    this.capCarry = new Float32Array(0)
+    this.capPhase = 0
     this.playTime = 0
     if (this.processor) {
       try { this.processor.disconnect() } catch (_) {}

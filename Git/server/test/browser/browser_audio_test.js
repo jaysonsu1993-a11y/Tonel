@@ -205,6 +205,50 @@ async function runOneRate(page, opts, contextRate) {
   return { ok: pass, snrDb: r.snrDb, thd: r.thd, peakAmp: r.peakAmp };
 }
 
+// ── Capture-path test: confirms the wire-rate label is honest ─────────────
+//
+// The bug we're hunting: ScriptProcessorNode delivers samples at the
+// AudioContext's *real* rate, but production (pre-fix) sliced them into
+// 240-sample frames and labeled them "5 ms of 48 kHz" regardless. If the
+// context is at 44.1 kHz, the receiver's worklet then plays the audio at
+// 48000/44100 = +8.8 % pitch — that's the "源信号 + 失真噪音" the user
+// hears as their own voice echoes back through the server mix.
+//
+// Each context rate is tested twice: once with the resampler off (this
+// is what production v1.0.13 ships — should fail at non-48 k rates) and
+// once with the resampler on (what the fix enables — should pass).
+async function runCaptureTest(page, opts, contextRate, useResampler) {
+  const samples = await page.evaluate((args) => {
+    return window.runCaptureTest(args);
+  }, {
+    contextRate, freq: opts.freq, amp: opts.amp,
+    seconds: opts.seconds, useResampler,
+  });
+  const audio = new Float32Array(samples);
+  // Analyse at the wire rate (48 kHz) — that is how the server and
+  // every receiver interprets the bytes.
+  const skip   = Math.floor(0.05 * 48000);
+  const usable = audio.length - skip;
+  const wholeCycles = Math.floor(usable * opts.freq / 48000);
+  const winLen = Math.floor(wholeCycles * 48000 / opts.freq);
+  if (winLen < 8000) return { ok: false, reason: 'too short' };
+  const window = audio.subarray(skip, skip + winLen);
+  const r = analyse(window, 48000, opts.freq);
+  // Sweep ±10% to find the actual fundamental — exposes pitch shift.
+  let bestPower = r.fundPower, bestFreq = opts.freq;
+  for (let f = opts.freq * 0.9; f <= opts.freq * 1.10; f += 1) {
+    const p = goertzelPower(window, 48000, f);
+    if (p > bestPower) { bestPower = p; bestFreq = f; }
+  }
+  const pitchShiftPct = ((bestFreq - opts.freq) / opts.freq) * 100;
+  const pass = Math.abs(pitchShiftPct) < 0.5;   // 0.5 % tolerance
+  const tag  = useResampler ? 'with resampler' : 'no resampler';
+  console.log(`  capture rate=${contextRate} (${tag}): peak fundamental at ${bestFreq.toFixed(1)} Hz ` +
+              `(shift ${pitchShiftPct >= 0 ? '+' : ''}${pitchShiftPct.toFixed(2)} %) ` +
+              `=> ${pass ? 'PASS' : 'FAIL'}`);
+  return { ok: pass, pitchShiftPct, bestFreq };
+}
+
 async function main() {
   const opts = parseArgs();
   console.log(`[browser-test] ${opts.freq} Hz sine, amp=${opts.amp}, ${opts.seconds}s` +
@@ -227,9 +271,28 @@ async function main() {
   const rates = opts.rate ? [opts.rate] : [48000, 44100];
 
   let allOk = true;
+  console.log('── PLAYBACK PATH (PCM → worklet → speaker) ──');
   for (const r of rates) {
     const res = await runOneRate(page, opts, r);
     if (!res.ok) allOk = false;
+  }
+  console.log('');
+  console.log('── CAPTURE PATH (mic → ScriptProcessor → wire) ──');
+  // For capture, only non-48 k contexts are interesting (48 k is a no-op).
+  for (const r of rates) {
+    if (r === 48000) {
+      const a = await runCaptureTest(page, opts, r, false);
+      if (!a.ok) allOk = false;
+    } else {
+      // Show the bug (no resampler) AND the fix (with resampler).
+      const a = await runCaptureTest(page, opts, r, false);
+      const b = await runCaptureTest(page, opts, r, true);
+      if (!b.ok) allOk = false;   // The fix must pass.
+      if (a.ok && r !== 48000) {
+        // Surprising — the bug should manifest at non-48 k. Note it.
+        console.log(`    note: capture without resampler unexpectedly clean at ${r} Hz`);
+      }
+    }
   }
 
   await browser.close();

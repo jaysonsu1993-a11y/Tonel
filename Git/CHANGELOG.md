@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.14] - 2026-04-28
+
+### Fixed (Web Capture — "失真噪音和源信号混合")
+
+The browser test added in v1.0.13 covered playback only. The remaining
+distortion turned out to be on the **capture** side, and the test was
+extended to expose it before the fix landed. With a fresh capture-path
+test the bug fell out instantly:
+
+| Capture context rate | Recovered fundamental | Pitch shift |
+|----------------------|-----------------------|-------------|
+| 48 000 Hz            | 1000.0 Hz             | 0.00 % ✅   |
+| 44 100 Hz (no fix)   | **1088.0 Hz**         | **+8.80 % ❌** |
+| 44 100 Hz (with fix) | 1000.0 Hz             | 0.00 % ✅   |
+
+### Root cause
+
+`startCaptureWithScriptProcessor` reads samples from
+`AudioContext.sampleRate` and slices them into 240-sample frames
+labelled "5 ms of 48 kHz" before sending to the server. When the
+AudioContext lands at 44.1 kHz (Bluetooth output, system mixer
+override) the frames carry 5.44 ms of audio but claim to be 5 ms — a
+6 % cadence error that the server happily believes. The receiver's
+worklet plays the bytes back at 48 kHz, so every recipient (including
+the sender themselves, via the server's loopback mix) hears the audio
+pitch-shifted up by 8.8 %. Stacked on top of correctly-pitched peer
+audio, that pitch-shifted self-echo sounded like "distortion mixed
+with the source signal" — the user's own voice running through the
+chain at the wrong pitch.
+
+### Fix
+
+- **Stateful linear-interpolation capture resampler.** Mirrors the
+  in-worklet playback resampler but runs the other direction:
+  AudioContext rate → 48 kHz wire rate. Carries a sample boundary
+  across ScriptProcessor callbacks so frame edges don't drop or
+  duplicate samples, then `onAudioFrame` slices the wire-rate stream
+  into honest 240-sample (5 ms at 48 kHz) packets. No-op at 48 kHz
+  contexts. ([Git/web/src/services/audioService.ts:466](Git/web/src/services/audioService.ts:466))
+
+- **Reset on `stopCapture`** so a reconnect starts with empty carry +
+  zero phase. ([Git/web/src/services/audioService.ts:899](Git/web/src/services/audioService.ts:899))
+
+### Added (Audio QA Infrastructure)
+
+- **Capture-path test in the existing browser harness.** Generates a
+  clean 1 kHz tone at the chosen context rate, runs it through
+  capture's slicing logic with the resampler toggled on or off, and
+  measures the recovered fundamental on the wire — so the suite both
+  *demonstrates* the bug (runs without resampler at 44.1 kHz) and
+  *verifies* the fix (runs with resampler). The test fails the suite
+  only on the with-resampler variant; the without-resampler variant
+  is reported for diagnostic value.
+  ([Git/server/test/browser/test_page.html](Git/server/test/browser/test_page.html),
+  [Git/server/test/browser/browser_audio_test.js](Git/server/test/browser/browser_audio_test.js))
+
+### Latency impact
+Negligible. Capture-side resample is O(N) per ScriptProcessor
+callback (~256 samples in, ~278 out at 44.1 kHz contexts); the
+fractional-phase carry adds zero latency beyond a single sample
+of look-ahead at the boundary. End-to-end audio latency is unchanged
+from v1.0.13.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `resampleCaptureTo48k` | New: stateful linear resampler, mic context rate → 48 kHz wire rate |
+| `Git/web/src/services/audioService.ts` `startCaptureWithScriptProcessor` | Run resample before `onAudioFrame` |
+| `Git/web/src/services/audioService.ts` `stopCapture` | Reset `capCarry` and `capPhase` |
+| `Git/server/test/browser/test_page.html` | Add `runCaptureTest`: simulates capture pipeline with toggleable resampler |
+| `Git/server/test/browser/browser_audio_test.js` | Add capture-path sweep: shows the bug at 44.1 kHz without resampler, verifies the fix |
+
 ## [1.0.13] - 2026-04-28
 
 ### Fixed (Web Playback — "几乎听不到人声" v1.0.12 regression)

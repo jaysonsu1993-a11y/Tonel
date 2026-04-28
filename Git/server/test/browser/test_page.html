@@ -127,6 +127,119 @@ function pcm16ToFloat32(pcm) {
   return out;
 }
 
+// ─── Capture-path simulator (mirrors audioService.ts capture loop) ──────
+//
+// Why this lives in the test:
+//   The production capture path runs a ScriptProcessorNode at the
+//   AudioContext's sample rate, then slices the output into 240-sample
+//   frames and labels them "5 ms of 48 kHz" before sending to the
+//   server. If the AudioContext rate is anything other than 48 kHz
+//   (Bluetooth output, system mixer override) the labelling is a lie —
+//   the frames carry contextRate/48k as much real audio as they claim.
+//   Server treats them as 5 ms cells, so the audio comes out
+//   pitch-shifted on every recipient.
+//
+// This test simulates that exact pipeline: generates a clean 1 kHz tone
+// at the context rate, runs it through capture's slicing logic, then
+// "plays it back" by interpreting the resulting PCM at 48 kHz as the
+// server would. We measure the recovered frequency — if capture is
+// broken, it won't be 1 kHz.
+//
+// Mirrors Git/web/src/services/audioService.ts (must be kept in sync).
+const FRAME_SAMPLES = 240;     // 5 ms at 48 kHz wire rate
+
+function float32ToPcm16(f32) {
+  const out = new Uint8Array(f32.length * 2);
+  const view = new DataView(out.buffer);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    view.setInt16(i * 2, Math.round(s * 32767), true);
+  }
+  return out;
+}
+
+window.runCaptureTest = function ({ contextRate, freq, amp, seconds, useResampler }) {
+  // Generate the input the mic would produce at contextRate.
+  const totalSamples = Math.floor(seconds * contextRate);
+  const mic = new Float32Array(totalSamples);
+  for (let n = 0; n < totalSamples; n++) {
+    mic[n] = amp * Math.sin(2 * Math.PI * freq * n / contextRate);
+  }
+
+  // Slice into ScriptProcessor-style 256-sample chunks.
+  const SP_BUF = 256;
+  const chunks = [];
+  for (let off = 0; off + SP_BUF <= mic.length; off += SP_BUF) {
+    chunks.push(mic.subarray(off, off + SP_BUF));
+  }
+
+  // Optional: a stateful linear resampler that converts context rate to
+  // 48 kHz BEFORE slicing into wire-rate frames. This is the fix; we
+  // toggle it via useResampler so the test can demonstrate the bug
+  // (off) and verify the fix (on).
+  let capCarry = new Float32Array(0);
+  let capPhase = 0;
+  function resampleCaptureTo48k(input) {
+    if (contextRate === 48000) return input;
+    const ratio = contextRate / 48000;   // input samples per output sample
+    let buf;
+    if (capCarry.length > 0) {
+      buf = new Float32Array(capCarry.length + input.length);
+      buf.set(capCarry, 0);
+      buf.set(input, capCarry.length);
+    } else {
+      buf = input;
+    }
+    const out = [];
+    let phase = capPhase;
+    while (Math.floor(phase) + 1 < buf.length) {
+      const idx = Math.floor(phase);
+      const frac = phase - idx;
+      out.push(buf[idx] + (buf[idx + 1] - buf[idx]) * frac);
+      phase += ratio;
+    }
+    const consumedInt = Math.floor(phase);
+    capCarry = buf.slice(consumedInt);
+    capPhase = phase - consumedInt;
+    return new Float32Array(out);
+  }
+
+  // Mirror audioService onAudioFrame: concatenate leftover with new
+  // samples, slice into FRAME_SAMPLES (240) chunks, encode to PCM16.
+  let leftover = new Float32Array(0);
+  const wireFrames = [];
+  for (const chunk of chunks) {
+    const ready = useResampler ? resampleCaptureTo48k(chunk) : chunk;
+    let buf;
+    if (leftover.length > 0) {
+      buf = new Float32Array(leftover.length + ready.length);
+      buf.set(leftover, 0);
+      buf.set(ready, leftover.length);
+    } else {
+      buf = ready;
+    }
+    let off = 0;
+    while (off + FRAME_SAMPLES <= buf.length) {
+      const frame = buf.subarray(off, off + FRAME_SAMPLES);
+      wireFrames.push(float32ToPcm16(new Float32Array(frame)));
+      off += FRAME_SAMPLES;
+    }
+    leftover = off < buf.length ? new Float32Array(buf.subarray(off)) : new Float32Array(0);
+  }
+
+  // Concat all wire frames back into one continuous PCM stream — this
+  // is what the server would store and rebroadcast verbatim.
+  const totalWireSamples = wireFrames.length * FRAME_SAMPLES;
+  const reconstructed = new Float32Array(totalWireSamples);
+  for (let f = 0; f < wireFrames.length; f++) {
+    const dv = new DataView(wireFrames[f].buffer);
+    for (let i = 0; i < FRAME_SAMPLES; i++) {
+      reconstructed[f * FRAME_SAMPLES + i] = dv.getInt16(i * 2, true) / 32768;
+    }
+  }
+  return Array.from(reconstructed);
+};
+
 // ─── Test driver: render N frames of PCM through the production worklet ──
 //
 // The "production playPcm16" steps that this test stresses:
