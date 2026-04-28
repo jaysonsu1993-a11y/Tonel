@@ -141,29 +141,6 @@ function pcm16ToFloat32(pcm: Uint8Array): Float32Array {
   return out
 }
 
-// Linear-interpolation resampler — used to match incoming 48 kHz PCM to the
-// AudioContext's actual sample rate when the browser overrides our 48 kHz
-// hint (Bluetooth output, system mixer at 44.1 kHz). Linear is good enough
-// for VoIP-grade content; the alternative — letting Web Audio resample each
-// 5 ms buffer independently — produces a discontinuity at every buffer
-// boundary that listeners hear as a continuous 200 Hz floor noise.
-function linearResample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
-  if (fromRate === toRate) return input
-  const ratio = fromRate / toRate
-  const outLen = Math.floor(input.length / ratio)
-  const out = new Float32Array(outLen)
-  const lastSrc = input.length - 1
-  for (let i = 0; i < outLen; i++) {
-    const srcPos = i * ratio
-    const idx = srcPos | 0
-    const frac = srcPos - idx
-    const a = input[idx]
-    const b = idx < lastSrc ? input[idx + 1] : a
-    out[i] = a + (b - a) * frac
-  }
-  return out
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // AudioService
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,19 +275,43 @@ class AudioService {
   private async initPlaybackWorklet(): Promise<void> {
     if (!this.audioContext || !this.masterGain) return
 
-    // Ring buffer: 48000 samples = 1 second (matches AppKit MixerBridge._rxRing)
-    // Simple write/read — no adaptive skip, just overflow drops oldest
-    const RING_SIZE = 48000
+    // PlaybackProcessor — mirrors AppKit MixerBridge.mm RingBuffer.
+    //
+    // Why this design (vs. the pre-v1.0.13 versions):
+    //   1. Ring stores PCM at the WIRE rate (48 kHz) — no producer-side
+    //      resample. The previous v1.0.12 producer-resampled per packet,
+    //      which dropped the fractional 0.5 sample at every 5 ms boundary
+    //      and shifted the apparent frequency by ~0.23 % at 44.1 kHz
+    //      contexts (1000 Hz → 1002 Hz) plus introduced 200 Hz click
+    //      stream from the per-packet phase discontinuity.
+    //   2. Resample happens INSIDE process(), once, with a fractional
+    //      readPos that advances by ratio = 48000 / sampleRate per output
+    //      sample. Linear interpolation, sample-accurate phase across
+    //      packet boundaries — this is the same approach a real-time
+    //      VoIP playout buffer uses.
+    //   3. Prime / re-prime threshold (10 ms cushion) absorbs network
+    //      jitter. Without it the ring oscillates near empty whenever
+    //      input rate (44 000 samples/s post-resample of 200×220) doesn't
+    //      match output rate (44 100), so any jitter underruns and the
+    //      worklet outputs silence — the v1.0.12 "几乎听不到人声"
+    //      regression. With the new design the ring never goes near
+    //      empty under normal jitter.
+    //   4. Mono input is fanned out to every destination channel so the
+    //      right speaker isn't silent on stereo destinations.
+    const RING_SIZE    = 48000   // 1 second @ wire rate (48 kHz)
+    const PRIME_TARGET = 480     // 10 ms cushion before draining starts
+    const PRIME_MIN    = 128     // re-prime if ring would drop below this
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
         constructor() {
           super()
-          this.buf = new Float32Array(${RING_SIZE})
+          this.buf      = new Float32Array(${RING_SIZE})
           this.writePos = 0
-          this.readPos = 0
-          this.count = 0
+          this.readPos  = 0          // fractional, in input-rate samples
+          this.count    = 0          // input-rate samples currently buffered
+          this.primed   = false
+          this.ratio    = 48000 / sampleRate   // input samples per output sample
           this.port.onmessage = (ev) => {
-            // Handle both Float32Array and transferred ArrayBuffer
             let samples = ev.data
             if (samples instanceof ArrayBuffer) samples = new Float32Array(samples)
             if (!samples || !samples.length) return
@@ -321,23 +322,43 @@ class AudioService {
               if (this.count < ${RING_SIZE}) {
                 this.count++
               } else {
-                this.readPos = (this.readPos + 1) % ${RING_SIZE}
+                // Slide-window overflow: drop the oldest sample.
+                this.readPos = (Math.floor(this.readPos) + 1) % ${RING_SIZE}
               }
+            }
+            if (!this.primed && this.count >= ${PRIME_TARGET}) {
+              this.primed = true
             }
           }
         }
         process(inputs, outputs) {
-          const out = outputs[0][0]
-          if (!out) return true
-          for (let i = 0; i < out.length; i++) {
-            if (this.count > 0) {
-              out[i] = this.buf[this.readPos]
-              this.readPos = (this.readPos + 1) % ${RING_SIZE}
-              this.count--
-            } else {
-              out[i] = 0
+          const channels = outputs[0]
+          if (!channels || !channels[0]) return true
+          const out0 = channels[0]
+          if (!this.primed || this.count < ${PRIME_MIN}) {
+            this.primed = false
+            out0.fill(0)
+            for (let c = 1; c < channels.length; c++) channels[c].fill(0)
+            return true
+          }
+          for (let i = 0; i < out0.length; i++) {
+            const idxF = this.readPos
+            const idx  = Math.floor(idxF)
+            const frac = idxF - idx
+            const a = this.buf[idx]
+            const b = this.buf[(idx + 1) % ${RING_SIZE}]
+            out0[i] = a + (b - a) * frac
+            const newReadPos = idxF + this.ratio
+            const newIdx     = Math.floor(newReadPos)
+            this.count -= (newIdx - idx)
+            this.readPos = newReadPos % ${RING_SIZE}
+            if (this.count < ${PRIME_MIN}) {
+              for (let j = i + 1; j < out0.length; j++) out0[j] = 0
+              this.primed = false
+              break
             }
           }
+          for (let c = 1; c < channels.length; c++) channels[c].set(out0)
           return true
         }
       }
@@ -672,27 +693,16 @@ class AudioService {
     this.rxLevel = Math.sqrt(rxSum / f32.length)
     this.playCount++
 
-    // Preferred path: feed the AudioWorklet's ring buffer.
+    // Preferred path: hand the raw 48 kHz PCM to the AudioWorklet.
     //
-    // The worklet runs at the AudioContext's actual sample rate and emits
-    // a continuous sample stream — consecutive 5 ms frames join with no
-    // boundary, so there's no per-buffer resampling kernel and no
-    // periodic discontinuity. We resample once at the producer side
-    // when the context isn't 48 kHz so the ring doesn't accumulate.
-    //
-    // The previous fallback (createBuffer + AudioBufferSourceNode per
-    // 5 ms frame) made Web Audio resample every buffer independently:
-    // each kernel tail saw zero-padding instead of the next buffer's
-    // first samples, so every 5 ms boundary leaked a small click.
-    // Stacked at 200 Hz the clicks were continuous gritty distortion
-    // independent of voice amplitude — the symptom v1.0.11's soft clip
-    // didn't cure because the source isn't clipping at all, it's
-    // resampling boundary noise.
+    // The worklet stores samples at the wire rate and resamples inside
+    // process() with a fractional readPos that advances continuously
+    // across packet boundaries — so frequency is preserved exactly and
+    // there are no per-packet phase discontinuities. It also has a
+    // prime/re-prime threshold so network jitter doesn't underrun the
+    // ring (the v1.0.12 regression at non-48 kHz contexts).
     if (this.playbackWorklet) {
-      const ctxRate = this.audioContext.sampleRate
-      const out = linearResample(f32, SAMPLE_RATE, ctxRate)
-      // Transferable to avoid copying a 480-byte buffer 200 times/s.
-      this.playbackWorklet.port.postMessage(out, [out.buffer])
+      this.playbackWorklet.port.postMessage(f32, [f32.buffer])
       return
     }
 

@@ -1,0 +1,12 @@
+{
+  "name": "tonel-browser-audio-test",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node browser_audio_test.js"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

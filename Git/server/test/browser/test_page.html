@@ -1,0 +1,199 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tonel browser audio quality test</title>
+<body>
+<pre id="log"></pre>
+<script>
+// ─── Worklet source (must match Git/web/src/services/audioService.ts) ────
+//
+// Design (mirrors AppKit MixerBridge.mm RingBuffer):
+//   1. Ring stores PCM at the WIRE rate (48 kHz). No producer-side
+//      resample; each input packet's 240 samples land verbatim. This
+//      avoids the per-packet phase discontinuity a producer-side
+//      resample would create at every 5 ms boundary (200 Hz click
+//      stream that even tiny rate ratios produce when frames are
+//      resampled in isolation).
+//   2. Resample happens INSIDE process(), once, with a fractional
+//      readPos that advances by ratio = 48000 / sampleRate per output
+//      sample. Linear interpolation, sample-accurate phase across
+//      packet boundaries.
+//   3. Prime / re-prime threshold absorbs network jitter. Without it
+//      the ring oscillates near empty at every context rate where the
+//      input rate doesn't divide cleanly into the output rate, so any
+//      jitter causes underruns and the worklet outputs silence — which
+//      was the v1.0.12 "几乎听不到人声" regression at 44.1 kHz contexts.
+//   4. Mono input is fanned out to every output channel so the right
+//      speaker isn't silent on stereo destinations.
+const RING_SIZE     = 48000;   // 1 second @ wire rate (48 kHz)
+const PRIME_TARGET  = 480;     // 10 ms cushion before draining starts
+const PRIME_MIN     = 128;     // re-prime if ring would drop below this
+const WORKLET_SRC = `
+class PlaybackProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Float32Array(${RING_SIZE});
+    this.writePos = 0;
+    this.readPos  = 0;          // fractional, in input-rate samples
+    this.count    = 0;          // input-rate samples currently buffered
+    this.primed   = false;
+    this.ratio    = 48000 / sampleRate;   // input samples per output sample
+
+    this.port.onmessage = (ev) => {
+      let samples = ev.data;
+      if (samples instanceof ArrayBuffer) samples = new Float32Array(samples);
+      if (!samples || !samples.length) return;
+      const len = samples.length;
+      for (let i = 0; i < len; i++) {
+        this.buf[this.writePos] = samples[i];
+        this.writePos = (this.writePos + 1) % ${RING_SIZE};
+        if (this.count < ${RING_SIZE}) {
+          this.count++;
+        } else {
+          // Slide-window overflow: drop oldest sample.
+          this.readPos = (Math.floor(this.readPos) + 1) % ${RING_SIZE};
+        }
+      }
+      if (!this.primed && this.count >= ${PRIME_TARGET}) {
+        this.primed = true;
+      }
+    };
+  }
+  process(inputs, outputs) {
+    const channels = outputs[0];
+    if (!channels || !channels[0]) return true;
+    const out0 = channels[0];
+
+    // Re-prime if we'd dip below the safety floor — output a clean
+    // full-callback silence rather than mid-callback partial-then-zero
+    // (which produces an audible click).
+    if (!this.primed || this.count < ${PRIME_MIN}) {
+      this.primed = false;
+      out0.fill(0);
+      for (let c = 1; c < channels.length; c++) channels[c].fill(0);
+      return true;
+    }
+
+    for (let i = 0; i < out0.length; i++) {
+      const idxF = this.readPos;
+      const idx  = Math.floor(idxF);
+      const frac = idxF - idx;
+      const a = this.buf[idx];
+      const b = this.buf[(idx + 1) % ${RING_SIZE}];
+      out0[i] = a + (b - a) * frac;
+
+      const newReadPos = idxF + this.ratio;
+      const newIdx     = Math.floor(newReadPos);
+      this.count -= (newIdx - idx);
+      this.readPos = newReadPos % ${RING_SIZE};
+
+      if (this.count < ${PRIME_MIN}) {
+        // Underrun mid-callback — fill the rest with silence and
+        // wait for the ring to refill.
+        for (let j = i + 1; j < out0.length; j++) out0[j] = 0;
+        this.primed = false;
+        break;
+      }
+    }
+    // Mono → fan-out to all destination channels.
+    for (let c = 1; c < channels.length; c++) channels[c].set(out0);
+    return true;
+  }
+}
+registerProcessor('playback-processor', PlaybackProcessor);
+`;
+
+// ─── Mirror of Git/web/src/services/audioService.ts linearResample ───────
+function linearResample(input, fromRate, toRate) {
+  if (fromRate === toRate) return input;
+  const ratio = fromRate / toRate;
+  const outLen = Math.floor(input.length / ratio);
+  const out = new Float32Array(outLen);
+  const lastSrc = input.length - 1;
+  for (let i = 0; i < outLen; i++) {
+    const srcPos = i * ratio;
+    const idx = srcPos | 0;
+    const frac = srcPos - idx;
+    const a = input[idx];
+    const b = idx < lastSrc ? input[idx + 1] : a;
+    out[i] = a + (b - a) * frac;
+  }
+  return out;
+}
+
+function pcm16ToFloat32(pcm) {
+  const out = new Float32Array(pcm.length / 2);
+  const dv  = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  for (let i = 0; i < out.length; i++) out[i] = dv.getInt16(i * 2, true) / 32768.0;
+  return out;
+}
+
+// ─── Test driver: render N frames of PCM through the production worklet ──
+//
+// The "production playPcm16" steps that this test stresses:
+//   1. PCM16 → Float32 conversion at the wire rate (48 kHz).
+//   2. linearResample to AudioContext rate (no-op when ctx is 48 kHz).
+//   3. Transferable postMessage to the worklet.
+//   4. The worklet's ring buffer + process() loop.
+//
+// Steps 1-3 happen on the main thread; step 4 happens on the audio
+// thread. Inside an OfflineAudioContext, the audio thread runs as fast
+// as possible and the rendered output is returned as a Float32Array we
+// can FFT/Goertzel-analyse from Node.
+window.runWebPlaybackTest = async function ({
+  pcmFrames,        // Array<Uint8Array>  PCM16 LE 240-sample frames
+  contextRate,      // number              48000 or 44100
+  wireRate,         // number              48000
+  totalSeconds,     // number              render length in real-time seconds
+}) {
+  const log = (...args) => {
+    const line = args.map(String).join(' ');
+    document.getElementById('log').textContent += line + '\n';
+    console.log(...args);
+  };
+
+  log(`[browser] OfflineAudioContext rate=${contextRate} render=${totalSeconds}s frames=${pcmFrames.length}`);
+  const renderLength = Math.ceil(totalSeconds * contextRate);
+  // Stereo, like a real speaker output. The production worklet writes
+  // outputs[0][0] only; if the destination has 2 channels and the worklet
+  // didn't fan-out, channel 1 will be silent — half the audible signal
+  // simply missing. The test must catch that.
+  const ctx = new OfflineAudioContext({
+    numberOfChannels: 2,
+    sampleRate:       contextRate,
+    length:           renderLength,
+  });
+
+  const blob = new Blob([WORKLET_SRC], { type: 'application/javascript' });
+  const url  = URL.createObjectURL(blob);
+  await ctx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  const node = new AudioWorkletNode(ctx, 'playback-processor');
+  node.connect(ctx.destination);
+
+  // Feed every frame raw at the wire rate — the worklet does the rate
+  // conversion internally with sample-accurate phase across boundaries.
+  // (ignoring the network path here; the Node SPA1 test covers that.)
+  for (const pcmU8 of pcmFrames) {
+    const f32 = pcm16ToFloat32(pcmU8);
+    node.port.postMessage(f32, [f32.buffer]);
+  }
+
+  const rendered = await ctx.startRendering();
+  const ch0 = rendered.getChannelData(0);
+  const ch1 = rendered.getChannelData(1);
+  // Diagnostic: peak per channel — exposes the "only channel 0 wired" bug
+  // where the worklet writes outputs[0][0] but destination has 2 channels.
+  let peak0 = 0, peak1 = 0;
+  for (let i = 0; i < ch0.length; i++) {
+    const a = Math.abs(ch0[i]); if (a > peak0) peak0 = a;
+    const b = Math.abs(ch1[i]); if (b > peak1) peak1 = b;
+  }
+  log(`[browser] rendered ${ch0.length} samples per channel, peakL=${peak0.toFixed(4)} peakR=${peak1.toFixed(4)}`);
+
+  // Return both channels so the analyser can see if the right channel
+  // is silent. Plain array for IPC robustness.
+  return { left: Array.from(ch0), right: Array.from(ch1) };
+};
+</script>
+</body>

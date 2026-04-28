@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Tonel-Desktop-AppKit VERSION 1.0.12 LANGUAGES C CXX)
+project(Tonel-Desktop-AppKit VERSION 1.0.13 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

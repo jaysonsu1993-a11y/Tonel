@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.13] - 2026-04-28
+
+### Fixed (Web Playback — "几乎听不到人声" v1.0.12 regression)
+
+The v1.0.12 worklet path made web playback *worse*, not better. The
+new browser-side automated test (added in this release) caught both
+root causes immediately:
+
+- **Producer-side `linearResample` was dropping the fractional 0.5
+  sample at every 5 ms packet boundary**, causing a 0.23 % cumulative
+  pitch shift (1000 Hz → 1002 Hz at 44.1 kHz contexts) plus a 200 Hz
+  click stream from the per-packet phase discontinuity.
+- **The worklet had no jitter cushion**: at 44.1 kHz contexts, with
+  44 000 input samples/s vs. 44 100 output samples/s, the ring
+  oscillated near empty and any network jitter caused underruns —
+  the worklet's `if (count > 0)` per-sample check then output zeros
+  for most of the callback. End result: mostly silence, occasional
+  audio fragments. That is the "几乎听不到人声" symptom.
+
+### Fixed by
+
+- **`PlaybackProcessor` redesigned to mirror AppKit MixerBridge.mm
+  RingBuffer.** Ring stores PCM at the wire rate (48 kHz). Resample
+  happens INSIDE `process()` with a fractional readPos that advances
+  by `48000 / sampleRate` per output sample — sample-accurate phase
+  across packet boundaries, no per-frame discontinuity, frequency
+  preserved exactly. Prime threshold (10 ms cushion) absorbs network
+  jitter; re-prime on near-underrun outputs a clean full-callback
+  silence rather than a partial-then-zero glitch. Mono input is
+  fanned out to every destination channel so the right speaker is
+  never silent on stereo destinations.
+  ([Git/web/src/services/audioService.ts:298](Git/web/src/services/audioService.ts:298))
+
+- **`linearResample` removed.** With the in-worklet resampler the
+  producer hands raw 48 kHz PCM straight to `port.postMessage`. No
+  more boundary clicks, no more length-truncation drift.
+  ([Git/web/src/services/audioService.ts:135](Git/web/src/services/audioService.ts:135))
+
+### Added (Audio QA Infrastructure — Layer 2)
+
+- **Browser-side automated audio test.** Real Chromium via Playwright
+  loads the production worklet inside an `OfflineAudioContext`, feeds
+  known PCM frames, the rendered output is captured back into Node
+  for SNR/THD analysis. Tests both 48 kHz and 44.1 kHz contexts —
+  the 44.1 kHz path was where every recent web-side audio bug landed
+  but no test covered it before today. The new test catches the
+  "right channel silent" failure mode (worklet writing only
+  `outputs[0][0]`), per-packet phase clicks (frequency drift), and
+  ring underruns (silent output) in seconds, with quantitative
+  numbers instead of "does it sound bad?".
+  ([Git/server/test/browser/](Git/server/test/browser/))
+
+  Current baseline at 1 kHz / amp 0.3:
+  | rate | peakAmp | SNR | THD |
+  |------|---------|-----|-----|
+  | 48 kHz   | 0.27 (vs 0.27 expected) | 69 dB | 0.035 % |
+  | 44.1 kHz | 0.27 (vs 0.27 expected) | 69 dB | 0.034 % |
+
+### Latency impact
+End-to-end latency is unchanged from v1.0.12 (still no createBuffer
+lookahead). The 10 ms prime cushion sits on the receive side of the
+ring; it adds at most 10 ms to first-audio time after a connection
+or after a long silence, and zero ongoing latency once primed.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `PlaybackProcessor` | In-worklet linear resample with fractional readPos; prime/re-prime jitter buffering; mono → multichannel fan-out |
+| `Git/web/src/services/audioService.ts` `playPcm16` | Drop `linearResample`; post raw 48 kHz PCM straight to worklet |
+| `Git/web/src/services/audioService.ts` (top of file) | Remove unused `linearResample` helper |
+| `Git/server/test/browser/test_page.html` | New: standalone test harness — worklet copy + driver |
+| `Git/server/test/browser/browser_audio_test.js` | New: Playwright + Chromium runner with Goertzel SNR/THD analyser |
+| `Git/server/test/browser/run.sh` | New: wrapper that auto-installs Playwright + chromium |
+
 ## [1.0.12] - 2026-04-28
 
 ### Fixed (Web Playback — "音量小也失真" residual distortion)
