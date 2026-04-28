@@ -447,6 +447,18 @@ void SignalingServer::process_create_room(uv_stream_t* client,
         send_response(client, SimpleJson::make_error("Room already exists"));
         return;
     }
+    // The creator is now a member of the room. Without this line, `room->users_`
+    // stays empty until *another* user calls JOIN_ROOM, which makes
+    // process_join_room's PEER_LIST iteration return zero peers (the creator
+    // isn't in `users_`). The joining user then thinks they're alone, and
+    // PEER_JOINED is broadcast to a zero-member set, so the creator never
+    // hears about the new peer either. Symptom: two devices in the same
+    // room, neither sees the other's ChannelStrip — even though both are
+    // visible on the mixer side, which builds its own users map from
+    // MIXER_JOIN. (The client doesn't send a separate JOIN_ROOM after a
+    // successful CREATE_ROOM — and shouldn't have to. The creator IS the
+    // first member by definition.)
+    room->add_user(user_id);
     send_response(client, SimpleJson::make_ack("CREATE_ROOM", room_id));
     std::cout << "[Room] Created: " << room_id << " by " << user_id
               << (password.empty() ? " (no password)" : " (password protected)") << std::endl;

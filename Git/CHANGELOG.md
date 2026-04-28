@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.3] - 2026-04-29
+
+### Fixed — room creator was missing from peer list (signaling)
+
+Two devices joining the same room couldn't see each other's `ChannelStrip`,
+even though both showed up in the mixer's `roomUsers` count.
+
+Root cause in `signaling_server.cpp`:
+`process_create_room` registered the creator only in the global
+`user_manager_`, but never added them to `room->users_`. So:
+
+1. Desktop CREATE_ROOM → `room->users_ = {}` (empty!)
+2. Mobile JOIN_ROOM → server iterates `room->get_users()` to build
+   PEER_LIST, gets `[mobile_u]`, excludes self → empty, no PEER_LIST sent.
+3. Server broadcasts PEER_JOINED to "everyone in room except mobile" →
+   only mobile is in `users_` → broadcast reaches nobody → desktop
+   never learns mobile arrived.
+
+The mixer was unaffected because it builds its own per-room users map
+from MIXER_JOIN messages, which both clients send independently — that's
+why `roomUsers=2` showed in the debug strip while `peers.length=0`.
+
+Fix: `process_create_room` now calls `room->add_user(user_id)` after
+creating the room, so the creator IS the first member by definition.
+Verified end-to-end with a two-client smoke test:
+```
+DESKTOP RECV: PEER_JOINED room_id=tr user_id=mobile_u
+MOBILE  RECV: PEER_LIST  room_id=tr peers=[{user_id:"desktop_u",...}]
+```
+
+This bug has likely existed since CREATE_ROOM was first introduced; it
+was masked by single-user testing (no peers expected) and by the mixer
+maintaining a separate user list that "made things look fine" in the
+debug strip.
+
 ## [3.2.2] - 2026-04-29
 
 ### Fixed — mobile rooms now show levels / latency even when mic init fails
