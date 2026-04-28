@@ -77,52 +77,37 @@ private:
     // than 50 ms past the actual stop.
     static constexpr int PLC_MAX_DECAY = 10;
 
-    // Pitch-synchronous PLC (v1.0.33). For voiced segments the mixer
-    // estimates the pitch period of the recent voice and fills missing
-    // ticks by looping that single period. Because voice is locally
-    // pitch-periodic, prevHistory[H-P] ≈ prevHistory[H-1] (P samples
-    // earlier ≈ same phase), so the PLC fill starts essentially where
-    // the previous tick ended — the 5 ms tick boundary is naturally
-    // continuous, no synthetic interpolation needed.
+    // PLC playback is plain forward repeat of the previous frame.
     //
-    // For unvoiced segments (whisper, room noise, silence) pitch
-    // detection fails by design and PLC falls back to forward frame
-    // repeat (= v1.0.32 behaviour). Worst case never regresses below
-    // v1.0.32; voiced segments — where the click was loudest — improve.
+    // History: v1.0.31 introduced a palindrome variant (alternate
+    // forward/reverse per miss) to make every PLC-tick → next-PLC-tick
+    // boundary bit-exact continuous. That worked for the *internal*
+    // PLC stitches but quietly *worsened* the more common case — the
+    // PLC → next-fresh boundary. After a single-miss reverse, PLC
+    // ends at prev[0] (a sample from 10 ms ago); after a single-miss
+    // forward, it ends at prev[L-1] (5 ms ago). Voice changes more
+    // over 10 ms than over 5 ms, so reverse made the user-facing
+    // jump *larger*, not smaller. Comparing recordings v1.0.30
+    // vs v1.0.31 normalized for signal RMS:
     //
-    // Layer 1 (1 kHz sine, 5 ms period) is *outside* the [100, 500] Hz
-    // detection band so the test exercises only the unvoiced fallback
-    // path — SNR/THD stay at the v1.0.30/v1.0.32 baseline.
+    //          | click rate | click jump / RMS | click energy/sec
+    //   v1.030 | 7.2 /s     | median 0.20×     | 0.80
+    //   v1.031 | 15.2 /s    | median 0.54×     | 6.43       <- 8× worse
     //
-    // Tried and rejected:
-    //   v1.0.31 palindrome: alternate fwd/reverse. Fixed PLC↔PLC
-    //     boundary but doubled PLC↔fresh boundary jump. 8× worse on
-    //     normalized click energy in user recording.
-    //   v1.0.31a cross-fade: linear bridge from boundary sample to
-    //     prevAudio[i]. Injected synthetic trajectory; SNR 84 → 44 dB.
-    static constexpr int PLC_HISTORY_LEN  = 1200; // 25 ms @ 48 kHz — enough for 2 periods of 100 Hz
-    static constexpr int PITCH_MIN        = 96;   // 500 Hz upper bound (lag in samples)
-    static constexpr int PITCH_MAX        = 480;  // 100 Hz lower bound (lag in samples)
-    // AMDF (Average Magnitude Difference Function) threshold relative to the
-    // signal RMS. AMDF(lag) is 0 at the exact pitch period and ≈ √2·RMS at
-    // a fully decorrelated lag. < 0.5 × RMS is a comfortably voiced signal.
-    // Autocorrelation was tried first and rejected: spectral leakage of the
-    // residual cos(2π(2i+lag)/T) sum gave ncc(non-period) values > ncc(period),
-    // selecting fractional-sample lags off by 1–2 samples on a clean sine.
-    // AMDF has no leakage — at the exact period the difference is bit-exact 0.
-    static constexpr float PITCH_AMDF_THRESH = 0.5f;
+    // Reverted to forward repeat in v1.0.32. Do NOT reintroduce
+    // palindrome unless this trade-off is solved (would require
+    // jitter-buffer-shaped lookahead so PLC end can be
+    // pitch-aligned with the upcoming fresh frame).
 
     struct Track {
-        float audio[MAX_FRAME_COUNT];          // current tick's fresh frame
-        float prevHistory[PLC_HISTORY_LEN];    // sliding window of recent voice for PLC + pitch detection
-        int historyLen     = 0;                // valid samples in prevHistory, ≤ PLC_HISTORY_LEN
-        int frameCount     = 0;                // > 0 when fresh data is awaiting mix
-        int prevLen        = 0;                // size of last fresh frame (for unvoiced fallback bounds)
-        int decayCount     = 0;                // # consecutive ticks since last fresh frame, [0 .. PLC_MAX_DECAY]
-        int detectedPitch  = 0;                // pitch period in samples, or 0 = unvoiced / not yet detected
-        bool hasPrev       = false;            // prevHistory is non-empty and ready for PLC
-        float weight       = 1.0f;
-        float lastRms      = 0.0f;
+        float audio[MAX_FRAME_COUNT];     // preallocated fixed-size buffer
+        float prevAudio[MAX_FRAME_COUNT]; // last frame mixed at full amplitude — source for PLC fill
+        int frameCount = 0;               // > 0 when fresh data is awaiting mix; reset to 0 by consumeAllTracks()
+        int prevLen    = 0;               // length of prevAudio when last snapshotted (for boundary lookup)
+        int decayCount = 0;               // # consecutive ticks since last fresh frame, [0 .. PLC_MAX_DECAY]
+        bool hasPrev   = false;           // prevAudio holds a valid frame ready for PLC fill
+        float weight   = 1.0f;
+        float lastRms  = 0.0f;            // updated by addTrack, decayed on silent ticks
     };
 
     std::unordered_map<std::string, Track> tracks_;
@@ -130,10 +115,6 @@ private:
     // Internal helpers shared by mix(), mixAll(), mixExcluding().
     void accumulate(const std::string* excludeUserId, float* output, int frameCount) const;
     static void softClipBuffer(float* output, int frameCount);
-    // Pitch detection on an autocorrelation peak in the [PITCH_MIN, PITCH_MAX]
-    // lag range. Returns the detected period in samples, or 0 if the buffer
-    // is too short / silent / unvoiced.
-    static int  detectPitch(const float* hist, int historyLen);
 };
 
 // ============================================================
@@ -190,34 +171,19 @@ inline void AudioMixer::accumulate(const std::string* excludeUserId, float* outp
             } else {
                 for (int i = 0; i < count; ++i) output[i] += src[i] * w;
             }
-        } else if (t.hasPrev && t.decayCount < PLC_MAX_DECAY && t.historyLen > 0) {
-            // No fresh frame — PLC fill at a cosine-tapered gain.
-            // fade(0)=1.0 (first miss = full replay), fade(PLC_MAX_DECAY-1)≈0
-            // (last miss before silence). Voiced segments use pitch-period
-            // repeat for natural boundary continuity; unvoiced segments
-            // fall back to forward frame repeat (= v1.0.32 behaviour).
+        } else if (t.hasPrev && t.decayCount < PLC_MAX_DECAY && t.prevLen > 0) {
+            // No fresh frame — PLC fill: replay the previous frame at a
+            // cosine-tapered gain. fade(0)=1.0 (first miss = full replay),
+            // fade(PLC_MAX_DECAY-1)≈0 (last miss before silence). This
+            // bounded fade replaces the silent 5 ms gap that the timed
+            // mixer otherwise broadcasts when a client packet is delayed
+            // by public-internet jitter — that gap was the 200 Hz click
+            // train v1.0.10–v1.0.29 listeners reported as "破音."
             const float fade = 0.5f * (1.0f + std::cos(static_cast<float>(M_PI) * t.decayCount / static_cast<float>(PLC_MAX_DECAY)));
             const float gw   = w * fade;
-            const int   count = std::min(frameCount, t.historyLen);
-
-            if (t.detectedPitch > 0 && t.historyLen >= t.detectedPitch) {
-                // Voiced PLC: extend by looping the last pitch period.
-                // phaseStart accumulates across consecutive PLC ticks so
-                // the loop continues smoothly — tick N+1 picks up where
-                // tick N left off, modulo the period.
-                const int P = t.detectedPitch;
-                const int base = t.historyLen - P;
-                const int phaseStart = (t.decayCount * count) % P;
-                for (int i = 0; i < count; ++i) {
-                    const int p = (phaseStart + i) % P;
-                    output[i] += t.prevHistory[base + p] * gw;
-                }
-            } else {
-                // Unvoiced fallback: forward repeat of the last fresh frame.
-                const int   fbCount = std::min(count, t.prevLen);
-                const float* src    = t.prevHistory + t.historyLen - t.prevLen;
-                for (int i = 0; i < fbCount; ++i) output[i] += src[i] * gw;
-            }
+            const float* src = t.prevAudio;
+            const int  count = std::min(frameCount, t.prevLen);
+            for (int i = 0; i < count; ++i) output[i] += src[i] * gw;
         }
         // else: decay exhausted or never had a frame — contribute silence.
     }
@@ -286,62 +252,18 @@ inline void AudioMixer::consumeAllTracks() {
     for (auto& kv : tracks_) {
         Track& t = kv.second;
         if (t.frameCount > 0) {
-            // Fresh frame just mixed: append to the sliding history window
-            // for PLC, then re-detect the pitch over the updated history.
-            const int newLen = t.historyLen + t.frameCount;
-            if (newLen <= PLC_HISTORY_LEN) {
-                std::memcpy(t.prevHistory + t.historyLen, t.audio, t.frameCount * sizeof(float));
-                t.historyLen = newLen;
-            } else {
-                // Slide oldest samples out to make room.
-                const int overflow = newLen - PLC_HISTORY_LEN;
-                std::memmove(t.prevHistory, t.prevHistory + overflow,
-                             (PLC_HISTORY_LEN - t.frameCount) * sizeof(float));
-                std::memcpy(t.prevHistory + (PLC_HISTORY_LEN - t.frameCount), t.audio,
-                            t.frameCount * sizeof(float));
-                t.historyLen = PLC_HISTORY_LEN;
-            }
+            // Fresh frame just mixed: snapshot it for future PLC and reset decay.
+            std::memcpy(t.prevAudio, t.audio, t.frameCount * sizeof(float));
             t.prevLen    = t.frameCount;
             t.hasPrev    = true;
             t.decayCount = 0;
             t.frameCount = 0;
-            t.detectedPitch = detectPitch(t.prevHistory, t.historyLen);
         } else {
             // No fresh frame this tick: advance decay (saturating at PLC_MAX_DECAY).
             if (t.decayCount < PLC_MAX_DECAY) t.decayCount++;
             t.lastRms *= 0.5f;
         }
     }
-}
-
-inline int AudioMixer::detectPitch(const float* hist, int historyLen) {
-    // AMDF (Average Magnitude Difference Function) pitch detector.
-    //
-    //   AMDF(lag) = mean_i |hist[i] - hist[i+lag]|
-    //
-    // Bit-exact 0 at the exact period of any periodic signal; ≈ √(2)·MAD at
-    // fully decorrelated lags. Voiced signals show a deep, narrow null at
-    // their pitch period; unvoiced ones (noise / silence) stay flat.
-    //
-    // Need historyLen ≥ 2 × PITCH_MAX so every candidate lag has at least
-    // PITCH_MAX terms. PLC_HISTORY_LEN = 1200 ≥ 2 × 480 = 960 by design.
-    if (historyLen < 2 * PITCH_MAX) return 0;
-    // Mean-absolute-deviation of the signal — used to normalise AMDF so the
-    // threshold is scale-invariant.
-    double mad = 0.0;
-    for (int i = 0; i < historyLen; ++i) mad += std::fabs(static_cast<double>(hist[i]));
-    mad /= historyLen;
-    if (mad < 1e-6) return 0;            // silent — nothing to detect
-    int    bestLag = 0;
-    double bestAmdf = std::numeric_limits<double>::infinity();
-    for (int lag = PITCH_MIN; lag <= PITCH_MAX; ++lag) {
-        double a = 0.0;
-        const int N = historyLen - lag;
-        for (int i = 0; i < N; ++i) a += std::fabs(static_cast<double>(hist[i]) - hist[i + lag]);
-        a /= N;
-        if (a < bestAmdf) { bestAmdf = a; bestLag = lag; }
-    }
-    return (bestAmdf < PITCH_AMDF_THRESH * mad) ? bestLag : 0;
 }
 
 inline void AudioMixer::mix(float* output, int frameCount) {

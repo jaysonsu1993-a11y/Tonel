@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 #include <array>
+#include <deque>
 
 // ============================================================
 // SPA1 — Simple Packet Audio format (version 1)
@@ -95,7 +96,29 @@ private:
         uint8_t preferred_codec = SPA1_CODEC_PCM16;  // 0=PCM16, 1=OPUS
         OpusCodecState opus;                          // opus encode state per client
         uv_stream_t* tcp_client = nullptr;            // TCP control connection for this user
+
+        // Jitter buffer (v1.0.34). Each PCM packet is enqueued on UDP arrival
+        // and dequeued exactly once per 5 ms broadcast tick before mixing.
+        // The buffer absorbs network jitter at the cost of `JITTER_TARGET ×
+        // 5 ms` extra end-to-end latency. v1.0.32's 0-latency PLC path
+        // could not eliminate the 200 Hz click train at production WSS
+        // jitter levels (~7 click events/s remained, normalized energy 0.8);
+        // a small buffer is the only zero-distortion option.
+        std::deque<std::vector<float>> jitter_queue;
+        bool jitter_primed = false;   // false until queue first reaches JITTER_TARGET
     };
+
+    // Jitter buffer parameters. Target depth = 1 frame trades 5 ms of
+    // end-to-end latency (60 ms → 65 ms baseline) for absorption of
+    // ±2.5 ms of network jitter — covers the typical sub-WAN case.
+    // If empirical jitter is wider, JITTER_TARGET can be raised to 2
+    // (10 ms cost, ±7.5 ms absorbed) without other code changes.
+    static constexpr int JITTER_TARGET    = 1;
+    // Hard cap to keep the queue from growing without bound when the
+    // client TX clock drifts faster than the server tick (or short
+    // bursts). 4 frames = 20 ms — past this we drop oldest, which
+    // costs 5 ms of audio per drop but keeps long-run latency bounded.
+    static constexpr int JITTER_MAX_DEPTH = 4;
 
     // ── Room state ──────────────────────────────────────────
     struct Room {

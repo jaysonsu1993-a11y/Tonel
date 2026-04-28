@@ -580,22 +580,34 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
         if (room_it == rooms_.end()) return;
         Room* target_room = room_it->second.get();
 
-        // Update mixer track and UDP endpoint while still holding the lock.
-        target_room->mixer.addTrack(user_id, float_buf.data(), frame_count);
+        // v1.0.34: enqueue the PCM frame into the per-user jitter buffer
+        // instead of calling mixer.addTrack() directly. The mix timer will
+        // dequeue exactly one frame per 5 ms tick (after priming), so this
+        // single line absorbs ±(JITTER_TARGET × 5 ms) of network jitter
+        // before triggering the PLC fallback path.
         target_room->pending_mix = true;
         target_room->latest_timestamp = ntohs(pkt->timestamp);
         auto it = target_room->users.find(user_id);
         if (it != target_room->users.end()) {
-            it->second.addr = client_addr;
-            it->second.addr_valid = true;
+            UserEndpoint& uep = it->second;
+            uep.addr = client_addr;
+            uep.addr_valid = true;
 
             // Update codec preference and init Opus encoder if needed
-            if (codec == SPA1_CODEC_OPUS && it->second.preferred_codec != SPA1_CODEC_OPUS) {
-                it->second.preferred_codec = SPA1_CODEC_OPUS;
-                opus_state_free(&it->second.opus);
-                opus_state_init(&it->second.opus, 48000, 2, audio_frames_);
+            if (codec == SPA1_CODEC_OPUS && uep.preferred_codec != SPA1_CODEC_OPUS) {
+                uep.preferred_codec = SPA1_CODEC_OPUS;
+                opus_state_free(&uep.opus);
+                opus_state_init(&uep.opus, 48000, 2, audio_frames_);
                 std::cout << "[MixerServer] User " << user_id
-                          << " switched to Opus (opus valid=" << it->second.opus.valid << ")\n";
+                          << " switched to Opus (opus valid=" << uep.opus.valid << ")\n";
+            }
+
+            // Enqueue PCM frame for the next mix tick. Cap to JITTER_MAX_DEPTH
+            // by dropping the oldest pending frame if the queue grows past it
+            // (e.g. client TX faster than server tick or short congestion burst).
+            uep.jitter_queue.emplace_back(float_buf.begin(), float_buf.begin() + frame_count);
+            while (uep.jitter_queue.size() > static_cast<size_t>(JITTER_MAX_DEPTH)) {
+                uep.jitter_queue.pop_front();
             }
         }
         // broadcast_mixed_audio is now called by the 5ms timer (handle_mix_timer)
@@ -816,6 +828,31 @@ void MixerServer::handle_mix_timer() {
         for (auto& kv : rooms_) {
             Room* room = kv.second.get();
             if (!room || room->users.empty()) continue;
+
+            // v1.0.34: Drain one frame per user from the jitter buffer into
+            // the mixer before broadcasting. Priming holds back the first
+            // dequeue until the buffer reaches JITTER_TARGET, after which
+            // every tick consumes one frame (or PLC-fills if the queue is
+            // empty due to a delayed packet).
+            for (auto& user_kv : room->users) {
+                UserEndpoint& uep = user_kv.second;
+                if (!uep.jitter_primed) {
+                    if (static_cast<int>(uep.jitter_queue.size()) >= JITTER_TARGET) {
+                        uep.jitter_primed = true;
+                    } else {
+                        continue;   // not primed yet — let PLC fill this tick
+                    }
+                }
+                if (!uep.jitter_queue.empty()) {
+                    const std::vector<float>& frame = uep.jitter_queue.front();
+                    room->mixer.addTrack(user_kv.first, frame.data(),
+                                         static_cast<int>(frame.size()));
+                    uep.jitter_queue.pop_front();
+                }
+                // else: queue empty (jitter > buffer depth) — mixer.frameCount
+                // stays 0 for this user and the PLC path in accumulate fills
+                // with the previous frame at fade(decayCount).
+            }
 
             // Broadcast unconditionally per 5 ms tick — clients depend on a
             // continuous 200 Hz packet stream to keep their playback ring

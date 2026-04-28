@@ -5,6 +5,98 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.34] - 2026-04-28
+
+### Added (Server-side jitter buffer — first non-zero-latency fix; expected to drop click rate to ~0)
+
+User retest of v1.0.33 showed pitch-synchronous PLC was no better than
+v1.0.32 forward repeat on normalized click metrics — both sat at
+0.8–1.3 click-energy/s no matter what we did inside the PLC fill
+itself. Conclusion in memory: every zero-latency PLC scheme just
+reshapes the click; eliminating PLC *triggers* requires absorbing
+network jitter before it reaches the mixer.
+
+User chose plan A (jitter buffer with +5 ms latency) over plan B
+(further PLC tweaks).
+
+### Reverted: v1.0.33 spectral PLC → v1.0.32 forward PLC
+
+Pitch-synchronous PLC didn't regress, but it didn't help either —
+v1.0.33 normalized energy 1.25 vs v1.0.32 0.80 in the user
+recording. Reverting to forward repeat keeps the fallback path simple
+and minimizes the surface that interacts with the new jitter buffer.
+The pitch-PLC code (1200-sample history, AMDF detector, voiced/
+unvoiced fork) and its `test_plc_pitch_repeat_on_sine` regression
+test are removed; the AMDF-vs-autocorrelation lesson stays in memory.
+
+### Added: per-user jitter buffer in `MixerServer`
+
+`UserEndpoint` gains a `std::deque<std::vector<float>> jitter_queue`
+plus a `jitter_primed` flag.
+
+```
+                       handle_udp_audio
+                        (UDP packet in)
+                              │
+                              ▼
+                    enqueue PCM into deque  ─── cap at JITTER_MAX_DEPTH=4
+                                              (drop oldest on overflow)
+
+                        handle_mix_timer
+                       (5 ms tick, 200/s)
+                              │
+                              ▼
+                  if !primed: wait until queue.size ≥ JITTER_TARGET=1
+                  else:       dequeue front → mixer.addTrack()
+                              │
+                              ▼
+                       broadcast_mixed_audio
+```
+
+If the queue is empty when a tick fires (jitter > buffer depth), the
+mixer's PLC fallback (v1.0.32 forward repeat) fills as before.
+Concretely: jitter ≤ ±2.5 ms is fully absorbed; jitter > 5 ms still
+falls through to PLC at the same frequency as v1.0.32. Buffer depth
+can be raised to 2 (10 ms latency, ±7.5 ms absorbed) by changing one
+constant if production tells us we need it.
+
+### Latency impact
+
+**+5 ms** (60 ms → ~65 ms end-to-end). Trade off accepted by the user:
+the residual ~7 click events/s on v1.0.32 are perceptually worse than
+5 ms of added latency. Memory's `feedback_low_latency_first` is
+respected — every zero-latency option was exhausted first.
+
+### Layer 1 byte-identical to v1.0.32
+
+Localhost loopback has ~0 jitter, so the buffer reaches steady state
+after one tick and dequeue cadence matches enqueue cadence one-for-one.
+SNR/THD across amp 0.05 / 0.30 / 0.95 = 67.26 / 84.01 / 93.45 dB —
+identical to v1.0.32 to within measurement noise. Only the start-up
+prime tick (one 5 ms silent frame at room join) is new, and it's
+swallowed by the 5 s test window.
+
+### Lessons (added to memory)
+
+- **PLC fill quality plateaus around 0.8–1.3 normalized click
+  energy/s in production WSS conditions.** Any zero-latency scheme
+  (forward repeat, palindrome, pitch repeat) sits in this band.
+  Absorbing jitter is the only way below.
+- **A 5 ms jitter buffer is the minimum useful depth** — depth 0
+  (immediate addTrack) gives no absorption; depth 1 absorbs ±2.5 ms
+  one-sided jitter (since the buffer averages 0.5 frames in steady
+  state). For wider jitter, raise to depth 2 or 3 — same code, one
+  constant change.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` | Reverted to v1.0.32 forward PLC (pitch + history + AMDF removed) |
+| `Git/server/src/mixer_server_test.cpp` | Reverted (pitch-sine test removed) |
+| `Git/server/src/mixer_server.h` `UserEndpoint` | Add `jitter_queue` deque + `jitter_primed` flag; `JITTER_TARGET`, `JITTER_MAX_DEPTH` constants |
+| `Git/server/src/mixer_server.cpp` `handle_udp_audio` | Enqueue PCM frame instead of immediate `mixer.addTrack` |
+| `Git/server/src/mixer_server.cpp` `handle_mix_timer` | Drain one frame per user from jitter queue before `broadcast_mixed_audio` |
+| `~/.claude/projects/.../memory/project_pomu_open_issue.md` | Add jitter-buffer + PLC-plateau notes |
+
 ## [1.0.33] - 2026-04-28
 
 ### Fixed (Pitch-synchronous PLC — voice signals get phase-aligned replay instead of plain frame repeat)
