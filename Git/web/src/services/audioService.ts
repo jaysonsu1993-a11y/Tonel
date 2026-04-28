@@ -540,6 +540,13 @@ export class AudioService {
   /** Total mic samples observed at |s| ≥ 1.0 (hardware clipping at the source). */
   get captureClipCountValue(): number { return this.captureClipCount }
 
+  // Which capture path actually took over. Diagnostic — lets us see at a
+  // glance whether we got the audio-thread worklet or fell back to the
+  // main-thread ScriptProcessor (in which case clip detection isn't
+  // running and the worklet-only fixes don't apply).
+  private captureMode: 'idle' | 'worklet' | 'script-processor' = 'idle'
+  get captureModeValue(): 'idle' | 'worklet' | 'script-processor' { return this.captureMode }
+
   public startCapture(): void {
     if (this.isCapturing || !this.audioContext) return
     this.isCapturing = true
@@ -548,9 +555,14 @@ export class AudioService {
     // Try AudioWorklet first; fall back to ScriptProcessor if module
     // registration fails (very old browsers / Worklet-blocking policies).
     void this.initCaptureWorklet().then((ok) => {
-      if (!ok) {
+      if (ok) {
+        this.captureMode = 'worklet'
+        console.log('[Audio] Capture path: AudioWorklet')
+      } else {
         console.warn('[Audio] Capture worklet failed, falling back to ScriptProcessor')
         this.startCaptureWithScriptProcessor()
+        this.captureMode = 'script-processor'
+        console.log('[Audio] Capture path: ScriptProcessor (fallback)')
       }
     })
   }
@@ -1165,6 +1177,7 @@ export class AudioService {
 
   public stopCapture(): void {
     this.isCapturing = false
+    this.captureMode = 'idle'
     this.captureLeftover = new Float32Array(0)
     this.capCarry = new Float32Array(0)
     this.capPhase = 0

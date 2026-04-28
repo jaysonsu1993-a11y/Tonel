@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.21] - 2026-04-28
+
+### Changed (Diagnostic strip — always show capture path + clip count)
+
+v1.0.20 only displayed `micClip=N` when `N > 0`, which was meant to
+keep the strip uncluttered but had an unintended side effect: the
+absence of `micClip` was ambiguous between "worklet is running and
+mic isn't clipping" and "worklet failed silently, fell back to
+ScriptProcessor where clip detection doesn't run." The user couldn't
+tell which.
+
+The room debug strip now always shows two new fields:
+- `cap=wkt` / `cap=sp` / `cap=idle` — which capture path is currently
+  active (AudioWorklet, ScriptProcessor fallback, or not capturing).
+- `micClip=N` — always shown, even when 0, so the worklet's reach
+  is visible.
+
+Console also logs `[Audio] Capture path: AudioWorklet` (or the
+fallback message) when capture starts, for environments where the
+debug strip isn't readable.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` | New `captureMode` field tracking the active capture path; logged at startup |
+| `Git/web/src/pages/RoomPage.tsx` debug strip | Always show `cap=...` and `micClip=N` |
+
 ## [1.0.20] - 2026-04-28
 
 ### Fixed (Web Capture — residual "破音" at 48 kHz context)
