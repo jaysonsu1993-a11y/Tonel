@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.29] - 2026-04-28
+
+### Changed (Roll back the cushion bump that v1.0.28's server fix made unnecessary)
+
+User confirmation on v1.0.28: `rate=+0 ppm`, `repri=0`, `gap=0`,
+`ring=5568 stable` — the absolute-deadline timer fixed the drift
+completely. The 100 ms playback cushion (PRIME_TARGET=4800) was
+sized to compensate for that drift. With drift gone, the extra
+70 ms of latency was pure cost — buying nothing.
+
+`PRIME_TARGET` 4800 → 1440 (100 ms → 30 ms). End-to-end mic→speaker
+latency drops back to ~60 ms.
+
+### Note (open issue: 破音 still present)
+
+User reports residual 破音 on solo loopback even with all known
+sources clean (`rate=0`, `repri=0`, `gap=0`, `micClip=0`, server
+SNR 84 dB). All obvious causes are ruled out. The remaining
+suspect is a path the test suites don't cover —
+`MediaStreamAudioSourceNode → CaptureWorklet` with real Web Audio,
+where Chrome's hidden DSP-on-`getUserMedia`-despite-our-flags is
+the most likely candidate.
+
+State, hypotheses, and "do not repeat these dead ends" notes are
+saved to memory at `project_pomu_open_issue.md` for the next
+session to pick up cold.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `PRIME_TARGET` | 4800 → 1440 |
+| `Git/server/test/browser/test_page.html` | Worklet copy synced |
+| `~/.claude/projects/.../memory/project_pomu_open_issue.md` | New: open-issue handoff doc |
+
 ## [1.0.28] - 2026-04-28
 
 ### Fixed (Server timer drift — root cause of all the prior client-side cushion bumps)

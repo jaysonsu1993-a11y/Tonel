@@ -25,7 +25,7 @@
 //   4. Mono input is fanned out to every output channel so the right
 //      speaker isn't silent on stereo destinations.
 const RING_SIZE     = 48000;   // 1 second @ wire rate (48 kHz)
-const PRIME_TARGET  = 4800;    // 100 ms cushion (v1.0.27: bumped for measured 0.8%+ drift)
+const PRIME_TARGET  = 1440;    // 30 ms cushion (v1.0.29: rolled back after server timer fix)
 const PRIME_MIN     = 128;     // re-prime if ring would drop below this
 const WORKLET_SRC = `
 class PlaybackProcessor extends AudioWorkletProcessor {

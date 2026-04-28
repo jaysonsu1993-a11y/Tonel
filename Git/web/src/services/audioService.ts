@@ -439,17 +439,15 @@ export class AudioService {
     // threshold for "delayed" voice). The audio-thread cost of 480
     // additional buffered samples is zero (Float32Array, pre-allocated).
     const RING_SIZE    = 48000   // 1 second @ wire rate (48 kHz)
-    const PRIME_TARGET = 4800    // 100 ms cushion (v1.0.27: +50 ms over v1.0.26).
-                                 // User's measured rate hit -8000 ppm = the
-                                 // ±0.8 % cap, meaning the actual producer-vs-
-                                 // consumer rate offset is ≥ 0.8 % — likely libuv
-                                 // timer slop on the server (5 ms timer fires at
-                                 // ~5.04 ms intervals under load, delivering ~198
-                                 // packets/s instead of 200). With 100 ms cushion
-                                 // even sustained drift takes ~12 s to drain to
-                                 // PRIME_MIN, plenty of time for the loop to
-                                 // converge. End-to-end ≈ 130 ms, at the upper
-                                 // edge of "imperceptible delay" for voice.
+    const PRIME_TARGET = 1440    // 30 ms cushion (v1.0.29: rolled back from 100 ms
+                                 // now that the server-side timer fix in v1.0.28
+                                 // eliminated the rate drift that the bigger
+                                 // cushion was compensating for. With drift
+                                 // fixed (`rate=+0 ppm`, `repri=0` confirmed)
+                                 // the extra 70 ms cushion was buying nothing
+                                 // and adding measurable latency. 30 ms covers
+                                 // ordinary network jitter; the rate loop and
+                                 // server timer handle the rest.
     const PRIME_MIN    = 128     // re-prime if ring would drop below this
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
