@@ -820,16 +820,65 @@ void MixerServer::handle_mix_timer() {
 }
 
 // ============================================================
-// TCP client cleanup — nullify dangling pointers on disconnect
+// TCP client cleanup — fully evict the user from any room they were in.
+//
+// Previously this only nullified `tcp_client`, leaving the user record in
+// `room->users` until the timeout-less server eventually noticed (which it
+// never did — there's no GC). That orphaned record was the v1.0.18 ghost
+// bug: a web client that closed without sending MIXER_LEAVE (page reload,
+// tab close, network blip) would leave its userId in the room map. When
+// the same browser reconnected — even with a stable userId, but
+// especially with a fresh one — the room briefly had two entries, the
+// solo-loopback fallback turned off, and N-1 mix served the new tab a
+// silent mix of the ghost. Removing the user on TCP close eliminates the
+// ghost at the source, regardless of what the client did.
 // ============================================================
 
 void MixerServer::clear_tcp_client(uv_stream_t* client) {
     std::lock_guard<std::mutex> lock(rooms_mutex_);
+    std::vector<std::string> emptied_rooms;
+
     for (auto& room_kv : rooms_) {
-        for (auto& user_kv : room_kv.second->users) {
+        Room* room = room_kv.second.get();
+        if (!room) continue;
+
+        // Collect userIds to evict — can't erase mid-iteration with the
+        // unordered_map iterator if we also need to clean up satellites.
+        std::vector<std::string> evict;
+        for (auto& user_kv : room->users) {
             if (user_kv.second.tcp_client == client) {
-                user_kv.second.tcp_client = nullptr;
+                evict.push_back(user_kv.first);
             }
         }
+        for (const auto& uid : evict) {
+            auto uit = room->users.find(uid);
+            if (uit != room->users.end()) {
+                opus_state_free(&uit->second.opus);
+                room->users.erase(uit);
+            }
+            room->mixer.removeTrack(uid);
+            user_room_index_.erase(uid);
+            std::cout << "[MixerServer] Evicting " << uid
+                      << " from room " << room_kv.first
+                      << " on TCP close" << std::endl;
+        }
+        if (!evict.empty() && room->users.empty()) {
+            emptied_rooms.push_back(room_kv.first);
+        }
+    }
+
+    // If a room emptied, stop its recording and remove the room.
+    // (Mirrors the MIXER_LEAVE path above.)
+    for (const auto& rid : emptied_rooms) {
+        auto rit = rooms_.find(rid);
+        if (rit == rooms_.end()) continue;
+        Room* room = rit->second.get();
+        if (room && room->recording) {
+            recording_manager_.stopRecording(rid);
+            room->recording = false;
+            std::cout << "[MixerServer] Recording saved for room " << rid
+                      << " (auto-stop on last-user TCP close)" << std::endl;
+        }
+        rooms_.erase(rit);
     }
 }

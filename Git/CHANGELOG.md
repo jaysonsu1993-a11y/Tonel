@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.19] - 2026-04-28
+
+### Fixed (Sample-rate change went silent on the in-place rebuild)
+
+v1.0.18's `changeSampleRate` went through `init()`, which stops the old
+`MediaStream` tracks and re-acquires the mic via a second
+`getUserMedia()` call. In Chromium, two `getUserMedia` calls in quick
+succession with different sample-rate constraints can return tracks
+that look valid but produce no data — the level meter sat at 0, no
+audio left the page, no audio came back. Listeners reported "选了任何
+非默认采样率（包括 48000）后就听不到任何声音" — exactly the symptom.
+
+### Two changes, web + server
+
+- **`changeSampleRate` reuses the existing `MediaStream`.** Only the
+  `AudioContext`-bound graph is rebuilt — analyser, source, masterGain,
+  worklet. The OS-level mic keeps streaming the entire time; only its
+  consumer changes. Web Audio internally resamples between the mic's
+  native rate and the new context rate, so the new `AudioContext` gets
+  honest data immediately. Sidesteps the double-`getUserMedia` failure
+  mode entirely. ([Git/web/src/services/audioService.ts:243](Git/web/src/services/audioService.ts:243))
+
+- **Server-side eviction on TCP close.** `clear_tcp_client` used to
+  only nullify the dangling `tcp_client` pointer, leaving the user's
+  entry in `room->users` indefinitely. With the v1.0.16 N-1 mix in
+  place, that orphan entry was the v1.0.18 ghost: a reload-and-
+  rejoin (or any other path that closes TCP without sending
+  MIXER_LEAVE) left the prior session's userId in the room so the
+  rejoined tab got an N-1 mix of "everyone except me" = ghost =
+  silence. Now the cleanup actually evicts the user — same path as
+  the explicit MIXER_LEAVE handler — and removes the room if it
+  emptied. Defense in depth even after the v1.0.18 persistent guest
+  ID and v1.0.19 in-place rebuild eliminate the most common reload
+  paths. ([Git/server/src/mixer_server.cpp:826](Git/server/src/mixer_server.cpp:826))
+
+### Latency impact
+None. In-place rebuild swap is ~50–100 ms of silence during the
+AudioContext switch — same as v1.0.18, just without the mic
+re-acquisition glitch. Server-side eviction is one extra erase per
+TCP close, irrelevant on the audio path.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `changeSampleRate` | Reuse existing `MediaStream`; only rebuild the AudioContext graph |
+| `Git/server/src/mixer_server.cpp` `clear_tcp_client` | Evict user from room, remove track, close room if last user — same cleanup as MIXER_LEAVE |
+
 ## [1.0.18] - 2026-04-28
 
 ### Fixed (Sample-rate change kicked user out + caused silence on rejoin)

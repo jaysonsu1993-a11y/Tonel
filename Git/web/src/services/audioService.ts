@@ -233,25 +233,73 @@ export class AudioService {
    * Apply a new requested AudioContext sample rate without reloading the page.
    *
    * Why in-place vs. `window.location.reload()`: a reload re-mounts the React
-   * app, which regenerates the guest userId on App init. A user who was in a
-   * room as `Guest_ABCD` would come back as `Guest_WXYZ`. The server's room
-   * still has both — `Guest_ABCD` lingering with stale (no longer arriving)
-   * audio plus `Guest_WXYZ` for the new tab. With ≥ 2 users in the room the
-   * v1.0.16 solo-loopback fallback turns off and the new user receives the
-   * N-1 mix of "everyone except themselves" — i.e. just the lingering ghost,
-   * which is silent. Net effect: rxLvl=0 even though audio is flowing
-   * through the system. The in-place rebuild keeps the WebSocket session
-   * alive, so the userId stays the same, so the room membership is honest.
+   * app, drops the WebSocket sessions, and would regenerate the guest userId
+   * on App init if it weren't persisted in localStorage. The in-place rebuild
+   * keeps the user in the room with a single stable userId, so the server
+   * doesn't see a phantom session lingering and its solo-loopback fallback
+   * keeps working.
    *
-   * Mechanically this is the same teardown init() already does — close
-   * AudioContext, drop the mediaStream, drop the worklet, drop masterGain —
-   * then init() recreates them with the new requested rate (read from
-   * localStorage). audioWs and controlWs are NOT touched.
+   * Implementation: only the AudioContext-bound graph is rebuilt — the
+   * MediaStream is intentionally REUSED. v1.0.18 went through `init()` which
+   * stops the old MediaStream tracks and re-acquires via `getUserMedia()`.
+   * In Chromium, re-acquiring the mic in quick succession with new
+   * sample-rate constraints can return tracks that look valid but produce
+   * no data, so the level meter and capture path go silent. Reusing the
+   * existing MediaStream sidesteps that — the OS-level mic keeps streaming,
+   * and only its target AudioContext changes (Web Audio internally
+   * resamples between mic native rate and context rate).
    */
   async changeSampleRate(rate: number | null): Promise<void> {
     AudioService.writeUserRate(rate)
+
+    // First-time setup or mid-init: fall back to full init.
+    if (!this.audioContext || !this.mediaStream) {
+      await this.init()
+      this.startCapture()
+      return
+    }
+
     const wasCapturing = this.isCapturing
-    await this.init()
+
+    // Disconnect everything tied to the old AudioContext, but keep the
+    // MediaStream alive (don't stop its tracks).
+    this.stopCapture()
+    if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
+    if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
+    if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
+    this.analyser = null
+    this.captureLeftover = new Float32Array(0)
+    this.capCarry = new Float32Array(0)
+    this.capPhase = 0
+
+    const oldCtx = this.audioContext
+    this.audioContext = null
+
+    const requestedRate = (AudioService.readUserRate() ?? SAMPLE_RATE)
+    this.audioContext = new AudioContext({ sampleRate: requestedRate })
+    await this.audioContext.resume()
+
+    if (this.audioContext.sampleRate !== requestedRate) {
+      console.warn(`[Audio] AudioContext rate is ${this.audioContext.sampleRate} Hz, requested ${requestedRate}. Capture and worklet will resample.`)
+    } else {
+      console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz (in-place rebuild)`)
+    }
+
+    this.analyser = this.audioContext.createAnalyser()
+    this.analyser.fftSize = 256
+    this.analyser.smoothingTimeConstant = 0.3
+
+    this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
+    this.source.connect(this.analyser)
+
+    this.masterGain = this.audioContext.createGain()
+    this.masterGain.gain.value = 1.0
+    this.masterGain.connect(this.audioContext.destination)
+    await this.initPlaybackWorklet()
+
+    // Close the old AudioContext after the new one is fully wired.
+    try { oldCtx.close() } catch (_) {}
+
     if (wasCapturing) this.startCapture()
   }
 
