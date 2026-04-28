@@ -337,6 +337,70 @@ static int test_plc_resets_on_fresh_frame() {
     return 0;
 }
 
+// PLC palindrome boundary continuity (v1.0.31): consecutive ticks must
+// have bit-exact equal samples at the join. The mixer alternates
+// forward / reverse playback each miss so prev[L-1] (last sample of
+// the previous tick) equals out[0] of the next tick — eliminates the
+// 5 ms-boundary phase jump that produced residual clicks in v1.0.30.
+//
+// Verified on an ascending ramp because constants are direction-symmetric
+// (forward and reverse give the same buffer) and can't expose the bug.
+//
+// Note: a v1.0.31 cross-fade variant (linear bridge from stitch to
+// prevAudio[i]) was implemented and rejected — Layer 1 SNR fell from
+// 84 dB to 44 dB because the bridge injected a synthetic trajectory
+// not present in the actual signal. Do NOT reintroduce it.
+static int test_plc_boundary_continuity_on_ramp() {
+    AudioMixer m;
+    float ramp[480];
+    for (int i = 0; i < 480; ++i) ramp[i] = 0.1f + 0.5f * (float(i) / 479.0f);   // 0.1..0.6
+    float out1[480], out2[480], out3[480];
+
+    m.addTrack("u1", ramp, 480);
+    m.mix(out1, 480);                  // tick 1: fresh, forward — ends at ramp[479]=0.6
+    m.mix(out2, 480);                  // tick 2: PLC miss 0, REVERSE
+    m.mix(out3, 480);                  // tick 3: PLC miss 1, forward
+
+    // Tick 2 starts at ramp[L-1] (= tick 1's last sample): bit-exact stitch.
+    if (!approx(out2[0], out1[479], 1e-5f)) {
+        std::fprintf(stderr,
+            "FAIL: out2[0]=%f, out1[479]=%f (palindrome stitch broken on miss 0)\n",
+            out2[0], out1[479]);
+        return 1;
+    }
+    // Tick 2 is the reverse of ramp scaled by fade(0)=1.0 → ends at ramp[0].
+    if (!approx(out2[479], ramp[0], 1e-5f)) {
+        std::fprintf(stderr,
+            "FAIL: out2[479]=%f, expected ramp[0]=%f (reverse direction at miss 0)\n",
+            out2[479], ramp[0]);
+        return 1;
+    }
+    // Tick 2 mid-sample must come from the *reversed* prev frame.
+    if (!approx(out2[100], ramp[379], 1e-5f)) {
+        std::fprintf(stderr,
+            "FAIL: out2[100]=%f, expected ramp[379]=%f (reverse mid-sample)\n",
+            out2[100], ramp[379]);
+        return 1;
+    }
+    // Tick 3 flips back to forward. Boundary step = ramp[0] * (1 - fade(1));
+    // fade(1)=0.5*(1+cos(π/10))≈0.9755 so step is ~0.0024 on a 0.1 base —
+    // small, audible only as a faint amplitude flutter, not a click.
+    if (out3[0] >= out2[479]) {
+        std::fprintf(stderr,
+            "FAIL: out3[0]=%f, out2[479]=%f (forward direction on miss 1 should be slightly less)\n",
+            out3[0], out2[479]);
+        return 1;
+    }
+    if (out3[0] <= out2[479] * 0.9f) {
+        std::fprintf(stderr,
+            "FAIL: out3[0]=%f, out2[479]=%f (boundary step too large between miss 0 and miss 1)\n",
+            out3[0], out2[479]);
+        return 1;
+    }
+    std::printf("PASS: test_plc_boundary_continuity_on_ramp\n");
+    return 0;
+}
+
 // A track that has never received a frame must NOT contribute PLC noise
 // (would otherwise mix uninitialized `prevAudio`). The empty-mixer path
 // stays bit-exact silent.
@@ -366,6 +430,7 @@ static int run_mixer_tests() {
     failures += test_track_count();
     failures += test_plc_fade_after_consume();
     failures += test_plc_resets_on_fresh_frame();
+    failures += test_plc_boundary_continuity_on_ramp();
     failures += test_plc_no_replay_before_first_frame();
     failures += test_soft_clip_below_knee();
     failures += test_soft_clip_above_knee();

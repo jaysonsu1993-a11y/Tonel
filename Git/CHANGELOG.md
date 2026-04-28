@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.31] - 2026-04-28
+
+### Fixed (PLC palindrome — eliminate the residual 5 ms boundary click v1.0.30 cut in half)
+
+User retest of v1.0.30 still reported "沙沙" noise. FFT comparison
+between the two recordings:
+
+| Metric | v1.0.29 | v1.0.30 |
+|---|---|---|
+| Click rate | 13.9 / s | **7.2 / s** (halved) |
+| Top click-spacing bucket | 0–0.5 ms | **5–5.5 ms** (still 5 ms dominant) |
+| Click-train FFT 200 Hz peak | -4.99 dB | -3.73 dB (still present) |
+
+PLC v1.0.30 cut click count in half, but the 200 Hz tick-boundary peak
+survived. Diagnosis: PLC repeated `prevAudio[0..L-1]` immediately after
+broadcasting `prevAudio[L-1]`. For any signal whose start and end
+samples differ (every voice frame), that's a sample-step discontinuity
+on the join — a small click instead of the v1.0.29 silent-gap click.
+
+### Why the obvious fix failed first
+
+A linear cross-fade from `prevAudio[L-1]` (= "stitch") to `prevAudio[i]`
+across the first 8 samples seemed promising and was implemented as the
+first v1.0.31 attempt. Layer 1 showed catastrophic regression — SNR
+dropped from 84 dB to 44 dB at amp=0.30, THD jumped 100×. The bridge
+injected a synthetic linear trajectory not present in the actual
+signal; on a 1 kHz sine that trajectory is broadband noise. **Do not
+reintroduce.** The lesson: PLC must always emit *real* signal samples,
+never interpolated synthetic ones.
+
+### Fix: palindrome PLC
+
+Alternate forward and reverse playback of `prevAudio` each miss:
+
+```
+tick N-1 (fresh)      :  audio[0..L-1]      ends at  audio[L-1]
+tick N   (PLC, miss 0):  audio[L-1..0]      starts at audio[L-1] ✓
+tick N+1 (PLC, miss 1):  audio[0..L-1]      starts at audio[0]   ✓
+tick N+2 (PLC, miss 2):  audio[L-1..0]      starts at audio[L-1] ✓
+                                            ...
+```
+
+Every tick boundary is now bit-exact continuous: no sample-step
+discontinuity, no click. Time reversal preserves the magnitude
+spectrum (`|F{x(-t)}| = |F{x(t)}|`), so an automated 1 kHz sine test
+sees zero SNR/THD regression — confirmed empirically: SNR/THD across
+amp 0.05 / 0.30 / 0.95 is byte-identical to v1.0.30.
+
+The cosine fade-out, PLC_MAX_DECAY=10 (50 ms tail), and silence after
+exhaustion are all unchanged. Only the *direction* of replay alternates.
+([Git/server/src/audio_mixer.h:147](Git/server/src/audio_mixer.h:147))
+
+### Latency impact
+
+**Zero.** Same 5 ms broadcast cadence, same fresh-frame fast path
+(byte-identical to v1.0.29 when no frames are missed), no added
+buffering. PLC fills *would-be-silent* ticks with phase-continuous
+replay; "now" audio still arrives at the same wall-clock time.
+
+### Tests
+
+- `test_plc_boundary_continuity_on_ramp` (rewritten): asserts
+  out2[0] == out1[L-1] (palindrome stitch on miss 0), out2[L-1] ==
+  prevAudio[0] (reverse direction), out2[100] == ramp[379]
+  (mid-sample comes from reversed prev frame), and forward direction
+  on miss 1.
+- `test_plc_fade_after_consume` and `test_plc_resets_on_fresh_frame`
+  use constant signals which are direction-symmetric, so they still
+  pass unchanged — they exercise the cosine fade and reset semantics
+  independently of palindrome direction.
+
+### Workflow note
+
+1. Ran both layers BEFORE the fix.
+2. First attempt: linear cross-fade. Caught by Layer 1 immediately
+   (SNR 84 → 44 dB).
+3. Reverted, switched to palindrome.
+4. Layer 1 + Layer 2 byte-identical to v1.0.30 baseline ✓.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` `accumulate` PLC path | Alternate fwd/reverse playback per `decayCount` parity |
+| `Git/server/src/audio_mixer.h` `Track` | Removed `PLC_BOUNDARY_FADE`, added `prevLen` (for reverse indexing) |
+| `Git/server/src/mixer_server_test.cpp` | Rewrote boundary continuity test for palindrome semantics |
+
 ## [1.0.30] - 2026-04-28
 
 ### Fixed (Server mixer PLC — root cause of residual 破音 across v1.0.10–v1.0.29)
