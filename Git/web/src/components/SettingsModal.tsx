@@ -57,15 +57,19 @@ export function SettingsModal({ open, onClose }: Props) {
     catch (err) { console.error('[Settings] output switch failed:', err) }
   }
 
-  const handleRateChange = (raw: string) => {
+  const handleRateChange = async (raw: string) => {
     const value = raw === 'auto' ? null : Number(raw)
     setRequestedRate(value)
-    AudioService.writeUserRate(value)
-    // Reload so the new rate is applied to a fresh AudioContext +
-    // getUserMedia stream. In-place reconfig would be cleaner UX but
-    // requires tearing down and re-establishing every audio node;
-    // the user only changes this rarely, so a reload is fine.
-    setTimeout(() => window.location.reload(), 50)
+    try {
+      // In-place rebuild — does NOT reload the page, so the user
+      // stays in their room and keeps the same userId on the server.
+      // (A reload would regenerate the guest userId, leaving a ghost
+      // entry in the room and breaking the solo-mix fallback.)
+      await audioService.changeSampleRate(value)
+      setActualRate(audioService.actualSampleRate)
+    } catch (err) {
+      console.error('[Settings] sample-rate change failed:', err)
+    }
   }
 
   const rateOptions: Array<{ label: string; value: 'auto' | number }> = [

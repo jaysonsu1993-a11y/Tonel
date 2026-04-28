@@ -8,8 +8,24 @@ import type { PageState, UserProfile } from './types'
 import './index.css'
 
 // 生成免费用户 ID
+// Stable guest userId across reloads. The mixer server tracks users by
+// `roomId:userId`, so a fresh ID on every reload would leave a "ghost"
+// entry in the room (the previous tab's userId) until the server cleans
+// up the dead TCP connection — which breaks the solo-loopback fallback,
+// makes peer lists flicker, and produces silence for the rejoined user.
+// Persisting the guest ID keeps the session identity honest across
+// tab reloads, page refreshes, and sample-rate changes.
+const GUEST_ID_KEY = 'tonel_guest_id'
 function generateGuestId(): string {
-  return `Guest_${Math.random().toString(36).slice(2, 6).toUpperCase()}`
+  const existing = localStorage.getItem(GUEST_ID_KEY)
+  if (existing) return existing
+  const fresh = `Guest_${Math.random().toString(36).slice(2, 6).toUpperCase()}`
+  localStorage.setItem(GUEST_ID_KEY, fresh)
+  return fresh
+}
+function resetGuestId(): string {
+  localStorage.removeItem(GUEST_ID_KEY)
+  return generateGuestId()
 }
 
 // 用户服务 API 地址
@@ -76,7 +92,10 @@ export default function App() {
     localStorage.removeItem('tonel_token')
     setToken('')
     setUserProfile(null)
-    const guestId = generateGuestId()
+    // Logout = identity reset: drop the persisted guest id and mint a new one,
+    // so the post-logout session doesn't carry the same ghost entry into the
+    // mixer's room state if the user had been talking before logging out.
+    const guestId = resetGuestId()
     setUserId(guestId)
     setIsLoggedIn(false)
     if (roomId) {

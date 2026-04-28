@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.18] - 2026-04-28
+
+### Fixed (Sample-rate change kicked user out + caused silence on rejoin)
+
+The v1.0.17 sample-rate selector was hooked up via
+`window.location.reload()`, which:
+
+1. **Kicked the user out of the room** — re-mounting the React app
+   lands you back on the home page, you have to re-enter manually.
+2. **Made rejoining produce silence** — `App.tsx` regenerated the
+   guest userId on every load, so the rejoined session was a *new*
+   user from the server's perspective. The previous session's userId
+   lingered in `room->users` (no MIXER_LEAVE was sent because the
+   page was forcibly reloaded), so the room had two entries: the
+   ghost and the new tab. Two users in the room means v1.0.16's
+   solo-loopback fallback turns off and N-1 mix activates; the new
+   user gets the mix of "everyone except me" = ghost = empty =
+   silence (`tx=N rx=N play=N rxLvl=0.0000`, exactly what listeners
+   reported). The fix is *both* of these:
+
+- **In-place AudioContext rebuild on sample-rate change.** New
+  `audioService.changeSampleRate(rate)` writes the preference, calls
+  `init()` (which already has the teardown/recreate path) and
+  resumes capture if it was running. WebSocket sessions stay open,
+  the userId stays stable, and the room membership doesn't churn.
+  ([Git/web/src/services/audioService.ts:236](Git/web/src/services/audioService.ts:236))
+
+- **Persistent guest userId across reloads.** `generateGuestId` now
+  reads/writes a stable id from `localStorage`. Logout explicitly
+  resets it (logout = identity reset). Reload alone (no logout)
+  preserves the same id, so even other reload paths (browser
+  refresh, crash recovery) won't leave a ghost in the mixer. The
+  fresh-id mint on logout uses the new `resetGuestId()` helper for
+  clarity.
+  ([Git/web/src/App.tsx:11](Git/web/src/App.tsx:11))
+
+- **`SettingsModal` calls `changeSampleRate` instead of reloading.**
+  No more flash + re-entry; the modal stays open, the actual rate
+  display updates inline, and the room session is preserved.
+  ([Git/web/src/components/SettingsModal.tsx:62](Git/web/src/components/SettingsModal.tsx:62))
+
+### Latency impact
+None. The in-place rebuild closes the old `AudioContext` and creates
+a new one (~100 ms gap in the audio stream during the swap), then
+re-primes the worklet ring (10 ms cushion) — same as initial join.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `changeSampleRate` | New in-place rate change that doesn't disturb WS sessions |
+| `Git/web/src/App.tsx` `generateGuestId`, `resetGuestId` | Persist guest id across reloads; explicit reset on logout |
+| `Git/web/src/components/SettingsModal.tsx` | Use `changeSampleRate` instead of `window.location.reload()` |
+
 ## [1.0.17] - 2026-04-28
 
 ### Fixed (Web — RTT display stuck at "--")

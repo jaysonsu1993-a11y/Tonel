@@ -229,6 +229,32 @@ export class AudioService {
     return this.audioContext?.sampleRate ?? 0
   }
 
+  /**
+   * Apply a new requested AudioContext sample rate without reloading the page.
+   *
+   * Why in-place vs. `window.location.reload()`: a reload re-mounts the React
+   * app, which regenerates the guest userId on App init. A user who was in a
+   * room as `Guest_ABCD` would come back as `Guest_WXYZ`. The server's room
+   * still has both — `Guest_ABCD` lingering with stale (no longer arriving)
+   * audio plus `Guest_WXYZ` for the new tab. With ≥ 2 users in the room the
+   * v1.0.16 solo-loopback fallback turns off and the new user receives the
+   * N-1 mix of "everyone except themselves" — i.e. just the lingering ghost,
+   * which is silent. Net effect: rxLvl=0 even though audio is flowing
+   * through the system. The in-place rebuild keeps the WebSocket session
+   * alive, so the userId stays the same, so the room membership is honest.
+   *
+   * Mechanically this is the same teardown init() already does — close
+   * AudioContext, drop the mediaStream, drop the worklet, drop masterGain —
+   * then init() recreates them with the new requested rate (read from
+   * localStorage). audioWs and controlWs are NOT touched.
+   */
+  async changeSampleRate(rate: number | null): Promise<void> {
+    AudioService.writeUserRate(rate)
+    const wasCapturing = this.isCapturing
+    await this.init()
+    if (wasCapturing) this.startCapture()
+  }
+
   async init(): Promise<MediaStream> {
     // Clean up previous state to avoid stale AudioContext/MediaStream pileup
     this.stopCapture()
