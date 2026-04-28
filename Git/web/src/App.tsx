@@ -119,7 +119,12 @@ export default function App() {
     if (deepLinkRoomId) return
     const targetPath = roomId ? `/room/${roomId}` : '/'
     if (window.location.pathname !== targetPath) {
-      window.history.pushState({}, '', targetPath)
+      // Preserve the query string across the join transition so debug
+      // flags like `?debug=1` survive into the room. Without this, the
+      // deep-link → join flow lands on `/room/<id>` (no query), and the
+      // AudioDebugPanel's `?debug=1` check at mount sees nothing.
+      const targetUrl = targetPath + window.location.search + window.location.hash
+      window.history.pushState({}, '', targetUrl)
     }
   }, [roomId, deepLinkRoomId])
 

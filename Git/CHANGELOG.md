@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-04-29
+
+### Fixed — `?debug=1` survives the join transition
+
+Two compounding bugs made the v3.2.0 debug panel unreachable:
+1. `App.tsx` rewrote the URL to `/room/<id>` via `pushState` after join,
+   dropping the query string — so `?debug=1` was gone before the panel
+   ever read it.
+2. `AudioDebugPanel` only checked `?debug=1` once at mount; manually
+   pasting `?debug=1` into the URL bar after joining triggered a full
+   reload → deep-link path → password gate, then dropped the query
+   anyway because of (1).
+
+Fixes:
+- `App.tsx` now preserves `location.search + location.hash` when
+  pushing the room path. `?debug=1` (and any future debug flags) flows
+  through join unchanged.
+- `AudioDebugPanel` re-evaluates enabled state on `popstate` so a
+  query-string change mid-session toggles the panel without remount.
+- Added a keyboard shortcut **Ctrl+Shift+D** (⌘⇧D on macOS) that flips
+  a `sessionStorage` override — sidesteps the password-reentry trap
+  entirely. Works inside the room without touching the URL.
+
 ## [3.2.0] - 2026-04-29
 
 ### Added — live audio tuning panel for latency exploration

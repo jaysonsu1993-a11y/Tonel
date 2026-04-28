@@ -16,11 +16,49 @@ import { audioService } from '../services/audioService'
  * defaults in audioService.ts (PRIME_TARGET / PRIME_MIN) or
  * mixer_server.h (JITTER_TARGET_DEFAULT / JITTER_MAX_DEPTH_DEFAULT).
  */
+// sessionStorage key for the keyboard-toggle override. Survives navigation
+// inside the SPA but not a full reload — matching the panel's "exploratory,
+// not configuration" stance (don't lock end users into seeing it forever).
+const DEBUG_OVERRIDE_KEY = 'tonel.debug.audioPanel'
+
+function readEnabled(): boolean {
+  if (typeof location === 'undefined') return false
+  if (new URLSearchParams(location.search).get('debug') === '1') return true
+  try {
+    return sessionStorage.getItem(DEBUG_OVERRIDE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 export function AudioDebugPanel() {
-  // Check ?debug=1 once at mount. Avoid re-checking — toggling the flag
-  // mid-session would require a remount we don't support.
-  const enabled = typeof location !== 'undefined' &&
-    new URLSearchParams(location.search).get('debug') === '1'
+  // Reactive enable: re-checked on popstate (so navigation that changes
+  // the query string toggles the panel mid-session, not just at mount)
+  // and via a global keyboard shortcut (Ctrl+Shift+D / ⌘⇧D) that flips a
+  // sessionStorage override — the latter sidesteps the deep-link
+  // password reentry that happens when the user manually edits ?debug=1
+  // into the URL bar (full reload → /room/<id> deep-link → password).
+  const [enabled, setEnabled] = useState(readEnabled)
+
+  useEffect(() => {
+    const refresh = () => setEnabled(readEnabled())
+    const onKey = (e: KeyboardEvent) => {
+      // Ctrl+Shift+D (or ⌘⇧D on macOS). KeyD is layout-independent.
+      const mod = e.ctrlKey || e.metaKey
+      if (mod && e.shiftKey && e.code === 'KeyD') {
+        e.preventDefault()
+        const cur = sessionStorage.getItem(DEBUG_OVERRIDE_KEY) === '1'
+        try { sessionStorage.setItem(DEBUG_OVERRIDE_KEY, cur ? '0' : '1') } catch {}
+        refresh()
+      }
+    }
+    window.addEventListener('popstate', refresh)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('popstate', refresh)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [])
 
   // Local mirror of audioService tuning, refreshed on every change so
   // server-acked clamps and MIXER_JOIN_ACK defaults flow into the UI.
