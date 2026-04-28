@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.27] - 2026-04-28
+
+### Fixed (Rate-scale cap saturation at user's 0.8 %+ drift)
+
+User's `rate=-8000 ppm` reading on v1.0.26 told us their actual
+producer/consumer rate offset is **at or above 0.8 %** — the
+client's rate loop was saturated against the cap and couldn't
+fully keep up. Likely cause: server-side libuv timer slop. The
+5 ms `uv_timer` actually fires at ~5.04 ms intervals on average,
+delivering ~198 packets/s instead of 200 — a 0.8 % shortfall the
+client compensates by slowing its own consumer.
+
+### Two changes (client-side compensation)
+
+- **`PRIME_TARGET` 2400 → 4800 (50 ms → 100 ms cushion).** Even
+  with the loop saturated, the wider buffer absorbs sustained
+  drift for ~12 s before reaching `PRIME_MIN`. Combined with
+  the cap widening below, the loop should converge inside the
+  range and ring stays near target.
+  ([Git/web/src/services/audioService.ts:415](Git/web/src/services/audioService.ts:415))
+
+- **Rate range widened ±0.8 % → ±1.2 %.** 1.2 % is ~20 cents on
+  pitch — measurable on a tuner but consistently below the
+  perceptual threshold for short-duration speech (~25-35 cents
+  for voice; sustained tones are more sensitive but voice has
+  enough frequency variation to mask it).
+  ([Git/web/src/services/audioService.ts:478](Git/web/src/services/audioService.ts:478))
+
+### Note (server-side timer is the upstream cause)
+
+The actual fix should be on the server: replacing `uv_timer` with
+a higher-precision timer driven by `clock_gettime(CLOCK_MONOTONIC)`,
+or computing each broadcast's deadline from the start time rather
+than from the previous fire. Deferred — that's a server change with
+its own test risk, and the client-side compensation works as long
+as the drift stays within ±1.2 %.
+
+### Latency impact
++50 ms playback latency from the cushion bump. End-to-end mic→
+speaker now ~130 ms. At the upper edge of "imperceptible delay"
+for voice but still within the range users tolerate well in WSS
+conferencing apps (Discord, Zoom, etc. are typically 100-200 ms).
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `PlaybackProcessor` | PRIME_TARGET 2400→4800; rate range ±0.008→±0.012 |
+| `Git/server/test/browser/test_page.html` | Worklet copy synced |
+
 ## [1.0.26] - 2026-04-28
 
 ### Fixed (Reprime drift at the rate-scale cap)

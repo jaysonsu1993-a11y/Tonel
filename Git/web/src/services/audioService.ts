@@ -439,15 +439,17 @@ export class AudioService {
     // threshold for "delayed" voice). The audio-thread cost of 480
     // additional buffered samples is zero (Float32Array, pre-allocated).
     const RING_SIZE    = 48000   // 1 second @ wire rate (48 kHz)
-    const PRIME_TARGET = 2400    // 50 ms cushion (v1.0.26: +20 ms over v1.0.25).
-                                 // User's actual measured clock drift was -4619 ppm
-                                 // (0.46 %), within 92 % of v1.0.25's ±0.5 % rate
-                                 // cap. With less than 0.05 % of headroom left, any
-                                 // network burst >30 ms pushed the ring under
-                                 // PRIME_MIN. 50 ms tolerates bursts up to ~50 ms,
-                                 // covers virtually all WSS-over-internet jitter.
-                                 // End-to-end mic→speaker latency is ~70 ms, still
-                                 // under the voice-perception "delayed" threshold.
+    const PRIME_TARGET = 4800    // 100 ms cushion (v1.0.27: +50 ms over v1.0.26).
+                                 // User's measured rate hit -8000 ppm = the
+                                 // ±0.8 % cap, meaning the actual producer-vs-
+                                 // consumer rate offset is ≥ 0.8 % — likely libuv
+                                 // timer slop on the server (5 ms timer fires at
+                                 // ~5.04 ms intervals under load, delivering ~198
+                                 // packets/s instead of 200). With 100 ms cushion
+                                 // even sustained drift takes ~12 s to drain to
+                                 // PRIME_MIN, plenty of time for the loop to
+                                 // converge. End-to-end ≈ 130 ms, at the upper
+                                 // edge of "imperceptible delay" for voice.
     const PRIME_MIN    = 128     // re-prime if ring would drop below this
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
@@ -476,12 +478,14 @@ export class AudioService {
           // keeps the change inaudible.
           this.targetCount = ${PRIME_TARGET}
           this.rateScale   = 1.0
-          // ±0.8 % rate range (v1.0.26: widened from ±0.5 % since the user's
-          // observed drift was already pushing 92 % of the v1.0.25 cap).
-          // 0.8 % is at the upper edge of imperceptible-pitch-shift on voice;
-          // 1 % starts being noticeable on sustained tones, so we hold here.
-          this.MAX_SCALE   = 1.008
-          this.MIN_SCALE   = 0.992
+          // ±1.2 % rate range (v1.0.27: widened from ±0.8 % since the user
+          // saturated the v1.0.26 cap at -8000 ppm). 1.2 % is ~20 cents on
+          // pitch — measurable on a tuner, but on conversational voice
+          // listeners reliably miss it (perceptual threshold ~25-35 cents
+          // for short-duration speech). At 1.5 % most listeners *can*
+          // detect a shift, so we stop here.
+          this.MAX_SCALE   = 1.012
+          this.MIN_SCALE   = 0.988
           this.statsTick   = 0   // post stats periodically for the debug strip
           this.port.onmessage = (ev) => {
             let samples = ev.data
