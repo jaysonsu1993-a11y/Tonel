@@ -20,6 +20,10 @@ import { audioService } from '../services/audioService'
 // inside the SPA but not a full reload — matching the panel's "exploratory,
 // not configuration" stance (don't lock end users into seeing it forever).
 const DEBUG_OVERRIDE_KEY = 'tonel.debug.audioPanel'
+// Custom event the panel listens to as a "re-check enabled state" trigger.
+// Any place that flips DEBUG_OVERRIDE_KEY (keyboard shortcut here, triple-tap
+// in RoomPage) dispatches this so the panel re-renders without remount.
+const DEBUG_TOGGLE_EVENT = 'tonel:debug-toggle'
 
 function readEnabled(): boolean {
   if (typeof location === 'undefined') return false
@@ -29,6 +33,22 @@ function readEnabled(): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Flip the debug-panel override and tell the panel to re-evaluate. Exported
+ * so any UI surface — keyboard shortcut, triple-tap on room id, future
+ * gesture — can trigger the same toggle without duplicating the
+ * sessionStorage logic. The custom event is the cross-component nudge;
+ * `popstate` would technically work but is semantically wrong (we're
+ * not changing the URL).
+ */
+export function toggleAudioDebugPanel(): void {
+  try {
+    const cur = sessionStorage.getItem(DEBUG_OVERRIDE_KEY) === '1'
+    sessionStorage.setItem(DEBUG_OVERRIDE_KEY, cur ? '0' : '1')
+  } catch {}
+  window.dispatchEvent(new CustomEvent(DEBUG_TOGGLE_EVENT))
 }
 
 export function AudioDebugPanel() {
@@ -47,16 +67,16 @@ export function AudioDebugPanel() {
       const mod = e.ctrlKey || e.metaKey
       if (mod && e.shiftKey && e.code === 'KeyD') {
         e.preventDefault()
-        const cur = sessionStorage.getItem(DEBUG_OVERRIDE_KEY) === '1'
-        try { sessionStorage.setItem(DEBUG_OVERRIDE_KEY, cur ? '0' : '1') } catch {}
-        refresh()
+        toggleAudioDebugPanel()
       }
     }
     window.addEventListener('popstate', refresh)
     window.addEventListener('keydown', onKey)
+    window.addEventListener(DEBUG_TOGGLE_EVENT, refresh as EventListener)
     return () => {
       window.removeEventListener('popstate', refresh)
       window.removeEventListener('keydown', onKey)
+      window.removeEventListener(DEBUG_TOGGLE_EVENT, refresh as EventListener)
     }
   }, [])
 

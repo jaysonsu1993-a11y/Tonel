@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-04-29
+
+### Added — triple-tap room ID to toggle debug panel (mobile)
+
+Mobile browsers have no Ctrl+Shift+D, leaving `?debug=1` as the only
+trigger — awkward to type in a mobile URL bar. Now: tap the room ID
+three times within 600 ms total to toggle the debug panel.
+
+- 600 ms rolling window between taps; gap > 600 ms resets the counter
+  so an accidental brush doesn't accumulate state.
+- Same `sessionStorage` flag as Ctrl+Shift+D, same custom-event
+  re-render path. Either trigger toggles either device.
+- `toggleAudioDebugPanel()` extracted from `AudioDebugPanel.tsx` so
+  RoomPage can invoke it without duplicating the storage logic.
+  Custom event `tonel:debug-toggle` is the cross-component nudge
+  (popstate would have worked but is semantically wrong — we're not
+  changing the URL).
+- Room-ID element now has `userSelect: none` so a triple-tap doesn't
+  start a text-selection drag on iOS.
+- Title attribute `(三连点切换调试面板)` is the only documentation;
+  hover on desktop, long-press on iOS reveals it.
+
 ## [3.3.0] - 2026-04-29
 
 ### Added — per-room debug-panel tuning persistence + mic-init retry button

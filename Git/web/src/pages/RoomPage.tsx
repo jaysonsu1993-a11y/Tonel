@@ -3,7 +3,7 @@ import { audioService } from '../services/audioService'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
 import { SettingsModal } from '../components/SettingsModal'
-import { AudioDebugPanel } from '../components/AudioDebugPanel'
+import { AudioDebugPanel, toggleAudioDebugPanel } from '../components/AudioDebugPanel'
 
 interface Props {
   roomId: string
@@ -174,13 +174,36 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
 
   const selfPeak = selfLevel > 0 ? selfLevel * 1.1 : 0
 
+  // Triple-tap the room ID to toggle the debug panel. Mobile-only path —
+  // desktop uses Ctrl+Shift+D, both end up calling toggleAudioDebugPanel().
+  // 600 ms window between consecutive taps; resets if the gap exceeds it
+  // so a single tap (e.g. accidental brush) doesn't accumulate state.
+  const tapTimes = useRef<number[]>([])
+  const onRoomIdTap = useCallback(() => {
+    const now = performance.now()
+    // Drop taps older than 600 ms relative to this one.
+    tapTimes.current = tapTimes.current.filter(t => now - t < 600)
+    tapTimes.current.push(now)
+    if (tapTimes.current.length >= 3) {
+      tapTimes.current = []
+      toggleAudioDebugPanel()
+    }
+  }, [])
+
   return (
     <div className="room-page">
       <header className="room-header">
         <div className="room-info">
           <div>
             <div className="room-label">房间号</div>
-            <div className="room-id">{roomId}</div>
+            <div
+              className="room-id"
+              onClick={onRoomIdTap}
+              style={{ userSelect: 'none', cursor: 'default' }}
+              title="(三连点切换调试面板)"
+            >
+              {roomId}
+            </div>
           </div>
           <button className="btn-copy" onClick={copyRoomId}>
             {copied ? '已复制' : '复制'}
