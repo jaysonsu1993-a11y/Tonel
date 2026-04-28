@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.22] - 2026-04-28
+
+### Fixed (Possible mic→speaker local loopback in capture worklet)
+
+User report: `rxLvl=0.0000` (server returning silence) **but still hearing
+audio with very low latency** — exactly the signature of a local
+mic→speaker loopback bypassing the server. The capture `AudioWorklet`
+connected its output to `audioContext.destination` to keep the audio
+thread invoking `process()`, and although the worklet's `process()`
+never explicitly wrote to outputs, an unmodified output buffer's
+contents are not always reliably zero across browsers.
+
+### Two layers of defense
+
+- **Worklet explicitly zeros outputs every quantum.** Capture-only
+  processor; we never want our outputs reaching the speaker.
+  ([Git/web/src/services/audioService.ts:578](Git/web/src/services/audioService.ts:578))
+
+- **Worklet routes through a 0-gain `GainNode` before destination.**
+  Defense in depth — even if the worklet's output ever held real
+  data, a hard 0-gain sink guarantees nothing reaches the speaker.
+  ([Git/web/src/services/audioService.ts:631](Git/web/src/services/audioService.ts:631))
+
+### Improved diagnostics in the room debug strip
+
+`rxLvl` was the RMS of just the *last* received packet. With voice,
+that toggles between speech levels and zero in the gaps between
+syllables — catching it at zero made it look like the server was
+silent when it actually wasn't. Replaced with `rxPeak` (peak-hold
+with slow decay; reads near zero only when the server has been
+silent for ~350 ms or more — true silence, not a momentary gap).
+
+Also added two fields that disambiguate "why is rx silent":
+- `roomUsers=N` — how many users the SERVER thinks are in this
+  room (from the LEVELS broadcast). `roomUsers=1` means solo mode
+  is active; `roomUsers=2+` means N-1 mix and a peer must be
+  audible for `rxPeak > 0`.
+- `MUTED` flag — appears when the user has muted; tx packets are
+  zeroed by design when muted, so server-side mix is silent for
+  this user.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` capture worklet `process()` | Explicit `outputs[0][c].fill(0)` |
+| `Git/web/src/services/audioService.ts` `initCaptureWorklet` | Route through `captureSink` GainNode (gain=0) → destination |
+| `Git/web/src/services/audioService.ts` `stopCapture` | Disconnect captureSink on teardown |
+| `Git/web/src/services/audioService.ts` `rxLevelPeak` | Peak-hold with slow decay |
+| `Git/web/src/services/audioService.ts` `serverPeerCount` | Expose `peerLevels.size` for debug strip |
+| `Git/web/src/pages/RoomPage.tsx` debug strip | `rxPeak` + `roomUsers=N` + `MUTED` |
+
 ## [1.0.21] - 2026-04-28
 
 ### Changed (Diagnostic strip — always show capture path + clip count)

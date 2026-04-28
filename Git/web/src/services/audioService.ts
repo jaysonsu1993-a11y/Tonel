@@ -182,7 +182,10 @@ export class AudioService {
   public rxCount = 0   // received SPA1 audio packets from server
   public txCount = 0   // sent SPA1 audio packets to server
   public playCount = 0 // packets sent to playback
-  public rxLevel = 0   // RMS of last received audio (0 = silence)
+  public rxLevel = 0      // RMS of last received audio (0 = silence)
+  public rxLevelPeak = 0  // peak-hold of rxLevel — useful when packets alternate
+                          // between speech and gaps; raw rxLevel can be 0 between
+                          // syllables and mislead debugging.
   get audioWsState(): string {
     const ws = this.audioWs
     if (!ws) return 'null'
@@ -515,6 +518,12 @@ export class AudioService {
     return this.peerLevels.get(userId) ?? 0
   }
 
+  /** How many users the SERVER thinks are in this room (from the LEVELS broadcast).
+   *  Includes self. > 1 means N-1 mix is active; 1 means solo loopback. */
+  get serverPeerCount(): number {
+    return this.peerLevels.size
+  }
+
   // ── Capture: AudioWorklet → 5 ms frames → SPA1 encode → send ─────────────
   //
   // The chain runs an AudioWorklet on the audio thread (NOT the deprecated
@@ -535,6 +544,8 @@ export class AudioService {
   // at buffer 256 is at the lower edge of where Chromium reliably calls it,
   // and any callback-drop or main-thread-jank-induced underrun would land on
   // signal peaks where listeners hear it as breaking sound.
+
+  private captureSink: GainNode | null = null  // 0-gain sink, prevents mic→speaker leak
 
   private captureClipCount = 0  // mic samples observed at |s| >= 1.0
   /** Total mic samples observed at |s| ≥ 1.0 (hardware clipping at the source). */
@@ -586,7 +597,17 @@ export class AudioService {
           this.peakBlock  = 0      // running peak |sample| inside the current frame
           this.clips      = 0      // samples observed at |s| >= 1.0 (hardware clip)
         }
-        process(inputs) {
+        process(inputs, outputs) {
+          // Capture-only: we read inputs and post frames back to the
+          // main thread. We never want our outputs to reach the speaker.
+          // Explicitly zero outputs every quantum — an unmodified output
+          // buffer's contents are spec'd to be zero, but we don't trust
+          // that across all browser builds. Combined with the 0-gain
+          // sink the main thread routes our output through, this gives
+          // a hard guarantee against any local mic→speaker loopback.
+          if (outputs && outputs[0]) {
+            for (let c = 0; c < outputs[0].length; c++) outputs[0][c].fill(0)
+          }
           const input = inputs[0]
           if (!input || !input[0] || input[0].length === 0) return true
           const block = input[0]
@@ -650,10 +671,17 @@ export class AudioService {
         this.sendCapturedFrame(frame as Float32Array)
       }
       this.source.connect(node)
-      // AudioWorkletNode must be connected somewhere downstream for process()
-      // to be called by the audio thread. Connect to destination — the worklet
-      // doesn't write to its outputs so destination receives zero, no audio leak.
-      node.connect(this.audioContext.destination)
+      // AudioWorkletNode needs to be connected somewhere downstream for the
+      // audio thread to keep invoking process(). Route through a 0-gain
+      // GainNode before destination — this guarantees no mic→speaker
+      // loopback regardless of what the worklet's outputs contain. The
+      // worklet zeroes them too (defense in depth), but a ground-truth
+      // 0-gain sink is the version that survives every browser quirk.
+      const sink = this.audioContext.createGain()
+      sink.gain.value = 0
+      node.connect(sink)
+      sink.connect(this.audioContext.destination)
+      this.captureSink = sink
       this.processor = node
       return true
     } catch (err) {
@@ -1016,6 +1044,10 @@ export class AudioService {
     let rxSum = 0
     for (let i = 0; i < f32.length; i++) rxSum += f32[i] * f32[i]
     this.rxLevel = Math.sqrt(rxSum / f32.length)
+    // Peak-hold with slow decay — at 200 packets/s, decay factor 0.99 means
+    // the peak halves every ~70 packets (~350 ms). Good window for "did any
+    // recent packet have audio?" diagnostics.
+    this.rxLevelPeak = Math.max(this.rxLevelPeak * 0.99, this.rxLevel)
     this.playCount++
 
     // Preferred path: hand the raw 48 kHz PCM to the AudioWorklet.
@@ -1189,6 +1221,10 @@ export class AudioService {
       }
       ;(this.processor as ScriptProcessorNode).onaudioprocess = null
       this.processor = null
+    }
+    if (this.captureSink) {
+      try { this.captureSink.disconnect() } catch (_) {}
+      this.captureSink = null
     }
   }
 
