@@ -114,13 +114,20 @@ private:
     // so latency cost scales with depth.
     //
     // History:
-    //   v1.0.34: depth 1 (5 ms cost, ≤5 ms jitter absorbed) — cut click
-    //            rate 35× (7.2/s → 0.21/s) but residual events from
-    //            occasional WSS-over-Cloudflare jitter spikes > 5 ms.
-    //   v1.0.35: depth 2 (10 ms cost, ≤10 ms jitter absorbed) — covers
-    //            the long tail of public-net jitter at the cost of
-    //            ~5 ms more end-to-end latency (65 ms → 70 ms).
-    static constexpr int JITTER_TARGET    = 2;
+    //   v1.0.34: depth 1 (5 ms cost) — cut click rate 35× (7.2/s → 0.21/s).
+    //   v1.0.35: depth 2 (10 ms cost) — *did not improve* and user reported
+    //            click rate slightly worse. Most likely cause: WSS-over-TCP
+    //            does occasional burst delivery (one main-thread stall on
+    //            either end yields N frames in <5 ms when it resumes); a
+    //            depth-2 steady state buffer averages 2 frames so the
+    //            margin to the JITTER_MAX_DEPTH=4 hard cap is only 2,
+    //            making cap-drops more frequent. Each drop is 5 ms of
+    //            audio thrown away → audible discontinuity.
+    //   v1.0.36: reverted to depth 1, the proven point on the curve.
+    //            Further reduction needs a different tactic — adaptive
+    //            buffer size that drains to target instead of fixed cap,
+    //            or a PLC scheme that hides the buffer-overflow drops.
+    static constexpr int JITTER_TARGET    = 1;
     // Hard cap to keep the queue from growing without bound when the
     // client TX clock drifts faster than the server tick (or short
     // bursts). 4 frames = 20 ms — past this we drop oldest, which

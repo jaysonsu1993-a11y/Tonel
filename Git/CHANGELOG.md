@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.36] - 2026-04-28
+
+### Reverted (Jitter buffer depth 2 → 1 — depth 2 didn't help and may have hurt)
+
+User retest of v1.0.35 (depth 2): "延迟感受不明显，但是噪音频率似乎没变 甚至噪音稍微增大了."
+
+The math predicted depth 2 should reduce click rate further by absorbing
+≤10 ms jitter (vs depth 1's ≤5 ms), but production behaviour disagreed.
+Likely cause: WSS-over-TCP delivers in occasional bursts (main-thread
+stall on either side → N frames arrive in <5 ms when it resumes). With
+depth 1 the steady-state buffer averages 1 frame and the headroom to
+the `JITTER_MAX_DEPTH=4` hard cap is 3 frames. With depth 2 the
+steady-state averages 2 frames, headroom is only 2, and burst arrivals
+are more likely to push the queue past 4 → drop oldest → 5 ms of audio
+thrown away → click. The trade-off is unfavourable: doubled latency
+(5 → 10 ms cost, 65 → 70 ms total) bought no improvement and possibly
+new cap-drop clicks.
+
+### Reverted
+
+`JITTER_TARGET = 2 → 1`. Back to v1.0.34 known-good state. End-to-end
+latency back to ~65 ms.
+
+### What v1.0.34 actually delivered (recap)
+
+- Click rate 7.2 /s → 0.21 /s (35× reduction)
+- Normalized click energy 0.80 → 0.062 (13× reduction)
+- User: "几乎彻底解决了噪音"
+
+The 0.21 click/s residual is jitter > 5 ms events that fell through to
+PLC fallback. Eliminating those without re-introducing the cap-drop
+clicks needs a smarter buffer (adaptive trim to target, or burst-aware
+overflow handling), not just a deeper static cap.
+
+### Lessons (added to memory)
+
+- **A bigger buffer isn't unconditionally better.** Steady-state depth +
+  burst headroom + hard cap interact: doubling target depth halves
+  cap headroom, and if delivery is bursty the cap-drop click rate
+  can outweigh the jitter-absorption gain. Measure with a recording,
+  don't extrapolate from the one-sided-jitter math.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/mixer_server.h` `JITTER_TARGET` | 2 → 1 |
+
 ## [1.0.35] - 2026-04-28
 
 ### Tuned (Jitter buffer depth 1 → 2 — absorb the long tail of WSS jitter)
