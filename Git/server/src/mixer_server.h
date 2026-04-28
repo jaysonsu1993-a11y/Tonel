@@ -175,10 +175,18 @@ private:
     std::unordered_map<std::string, std::string> user_room_index_;  // user_id → room_id (O(1) lookup)
     mutable std::mutex rooms_mutex_;
 
-    // Timed mixing: 5ms interval for stable frame boundaries
+    // Timed mixing: 5 ms interval, anchored to an absolute deadline so the
+    // average broadcast rate stays at 200/s regardless of libuv timer slop.
+    // (The default `uv_timer_start(..., 5, 5)` schedules each fire as
+    // `now + 5 ms`, which compounds whatever delay the event loop took
+    // to dispatch the previous fire — typically ~0.2 ms but occasionally
+    // bigger. Over hours that drift accumulates to ~0.5–1 % rate offset
+    // that the client has to compensate via pitch shift.)
     uv_timer_t mix_timer_;
-    uint16_t mix_sequence_ = 0;
-    int level_tick_counter_ = 0;  // throttle level broadcasts to ~20Hz
+    uint16_t   mix_sequence_       = 0;
+    int        level_tick_counter_ = 0;  // throttle level broadcasts to ~20Hz
+    uint64_t   mix_next_deadline_us_ = 0;  // wall-clock target for next broadcast (us, uv_hrtime base)
+    static constexpr uint64_t MIX_INTERVAL_US = 5000;  // 5 ms in microseconds
 
     // Recording
     RecordingManager recording_manager_;

@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.28] - 2026-04-28
+
+### Fixed (Server timer drift — root cause of all the prior client-side cushion bumps)
+
+User's `rate=-12000 ppm` reading on v1.0.27 confirmed the loop was
+saturating against the cap *again*: actual server-vs-client rate
+offset is ≥ 1.2 %. We can't keep widening the rate cap (already at
+the perceptual edge for pitch shift). The real issue is on the
+server: `uv_timer_start(handle, cb, 5, 5)` schedules each fire as
+"now + 5 ms after this fire", so any libuv dispatch slop (typically
+~0.1–0.2 ms, plus event-loop overhead under load) compounds
+indefinitely. On production that compounded to ~0.8 % rate offset
+(198.4/s instead of 200/s); on top of any browser-side clock skew,
+the total exceeded the client's 1.2 % compensation range.
+
+### Server fix: absolute-deadline scheduling
+
+Replaced the repeating `uv_timer` with one-shot timers re-armed
+against an absolute deadline (`mix_next_deadline_us_`) tracked in
+`uv_hrtime()`-based microseconds. Each broadcast tick:
+
+1. Process every deadline that has already passed (catches up if the
+   event loop was delayed; usually one iteration in normal ops).
+2. Advance `mix_next_deadline_us_` by exactly 5 ms per broadcast.
+3. Re-arm the timer for `max(0, deadline - now)` rounded to ms.
+
+Net effect: average broadcast rate is **exactly 200/s** anchored to
+the start time, with per-fire jitter of ≤ 1 ms (libuv's timer
+granularity) but **no compounding drift**.
+([Git/server/src/mixer_server.cpp:786](Git/server/src/mixer_server.cpp:786))
+
+### New regression test
+
+`audio_quality_e2e.js` now measures the actual broadcast rate from
+receive timestamps and asserts it stays within ±5000 ppm (±0.5 %)
+of 200/s. With v1.0.28 the local-mixer rate measures **+1105 ppm**
+on a 5-second sample (5× tighter than the v1.0.27 baseline of
+~+1.8 %). Catches any future timer regression in CI.
+([Git/server/test/audio_quality_e2e.js:280](Git/server/test/audio_quality_e2e.js:280))
+
+### Workflow note (per `tonel-audio-testing` skill)
+
+Followed the skill's bisect-fix-lock methodology:
+1. Ran both layers BEFORE the change (baseline).
+2. Implemented the fix.
+3. Ran both layers AFTER (Layer 1: rate now 200.22/s vs baseline
+   ~201.8/s; SNR/THD unchanged. Layer 2: unchanged).
+4. Added the broadcast-rate regression test so the invariant is
+   locked in.
+
+### Latency impact
+None. Same 5 ms broadcast cadence; just the cadence is now actually
+5 ms instead of 5.04 ms.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/mixer_server.h` | Add `mix_next_deadline_us_`, `MIX_INTERVAL_US` |
+| `Git/server/src/mixer_server.cpp` start | Initialise deadline; one-shot timer arm |
+| `Git/server/src/mixer_server.cpp` `handle_mix_timer` | Catch-up loop, absolute-deadline re-arm |
+| `Git/server/test/audio_quality_e2e.js` | Measure broadcast rate; assert ≤ ±5000 ppm |
+
 ## [1.0.27] - 2026-04-28
 
 ### Fixed (Rate-scale cap saturation at user's 0.8 %+ drift)

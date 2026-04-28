@@ -244,10 +244,14 @@ void MixerServer::start() {
                   << udp_port_ << std::endl;
     }
 
-    // ── Timer: 5ms periodic mixing ─────────────────────────────────
-    uv_timer_start(&mix_timer_, &MixerServer::on_mix_timer, 5, 5);
+    // ── Timer: 5ms periodic mixing, absolute-deadline anchored ────
+    // First fire 5 ms from now; thereafter handle_mix_timer re-arms with
+    // a one-shot delay that's computed against the absolute deadline,
+    // not against "now after the previous fire".
+    mix_next_deadline_us_ = uv_hrtime() / 1000ULL + MIX_INTERVAL_US;
+    uv_timer_start(&mix_timer_, &MixerServer::on_mix_timer, 5, 0);
     std::cout << "[MixerServer] Timed mixing enabled (5ms interval, "
-              << audio_frames_ << " frames/packet)" << std::endl;
+              << audio_frames_ << " frames/packet, absolute-deadline scheduled)" << std::endl;
 }
 
 // ============================================================
@@ -786,37 +790,60 @@ void MixerServer::on_mix_timer(uv_timer_t* handle) {
 void MixerServer::handle_mix_timer() {
     std::lock_guard<std::mutex> lock(rooms_mutex_);
 
-    bool send_levels = false;
-    level_tick_counter_++;
-    if (level_tick_counter_ >= 10) {  // every 10 ticks (50ms) ≈ 20Hz
-        level_tick_counter_ = 0;
-        send_levels = true;
-    }
+    // Absolute-deadline scheduling: process every deadline that has already
+    // passed. In normal operation this loop runs once (we're roughly on
+    // schedule). Under load — main thread blocked, GC pause, etc. — we
+    // catch up by firing all overdue broadcasts in a burst, then re-anchor
+    // to the next-up deadline. Net effect: average broadcast rate stays
+    // *exactly* 200/s anchored to the start time, no compounding drift.
+    //
+    // The previous `uv_timer_start(..., 5, 5)` approach scheduled each
+    // fire as `now + 5 ms` after the previous fire, so libuv timer slop
+    // (typical ~0.2 ms, plus event-loop overhead) compounded indefinitely.
+    // On the production server that compounded to ~0.8 % rate offset
+    // (198.4/s instead of 200/s), which the client had to compensate by
+    // pitch-shifting playback ≥ 1.2 % — outside the cap, causing reprime.
+    uint64_t now_us = uv_hrtime() / 1000ULL;
 
-    for (auto& kv : rooms_) {
-        Room* room = kv.second.get();
-        if (!room || room->users.empty()) continue;
-
-        // Broadcast every tick regardless of input freshness — clients depend
-        // on a continuous 200 Hz packet stream to keep their playback ring
-        // primed. The previous `pending_mix` gate skipped broadcasts in any
-        // 5 ms slot where no new UDP packet had arrived from any user, so
-        // the effective broadcast rate fell to roughly the slowest sender's
-        // input rate (~75–100 Hz under burst-y `ScriptProcessorNode`
-        // callbacks). That undershoot caused the receiving client's
-        // `playTime` to drift past `currentTime`, triggering constant
-        // re-anchor events that listeners hear as continuous "电流静电".
-        // With consume-style mix below, an empty mix is exactly silence
-        // (480 zero bytes), so the cost of broadcasting on idle ticks is
-        // bandwidth, not audio glitches.
-        room->pending_mix = false;
-        mix_sequence_++;
-        broadcast_mixed_audio(room, mix_sequence_, room->latest_timestamp);
-
-        if (send_levels) {
-            broadcast_levels(room);
+    while (now_us >= mix_next_deadline_us_) {
+        bool send_levels = false;
+        level_tick_counter_++;
+        if (level_tick_counter_ >= 10) {  // every 10 ticks (50 ms) ≈ 20 Hz
+            level_tick_counter_ = 0;
+            send_levels = true;
         }
+
+        for (auto& kv : rooms_) {
+            Room* room = kv.second.get();
+            if (!room || room->users.empty()) continue;
+
+            // Broadcast unconditionally per 5 ms tick — clients depend on a
+            // continuous 200 Hz packet stream to keep their playback ring
+            // primed. With consume-style mix, an empty mix is exactly
+            // silence (480 zero bytes), so the cost of broadcasting on
+            // idle ticks is bandwidth, not audio glitches.
+            room->pending_mix = false;
+            mix_sequence_++;
+            broadcast_mixed_audio(room, mix_sequence_, room->latest_timestamp);
+
+            if (send_levels) {
+                broadcast_levels(room);
+            }
+        }
+
+        mix_next_deadline_us_ += MIX_INTERVAL_US;
+        now_us = uv_hrtime() / 1000ULL;  // refresh — broadcasts can take a moment
     }
+
+    // Re-arm the timer for the next deadline. libuv's timeout granularity is
+    // 1 ms, so we round to the nearest ms; the deadline anchoring above
+    // means any per-fire rounding error doesn't accumulate.
+    int64_t delay_us = static_cast<int64_t>(mix_next_deadline_us_) - static_cast<int64_t>(now_us);
+    if (delay_us < 0) delay_us = 0;
+    uint64_t delay_ms = static_cast<uint64_t>((delay_us + 500) / 1000);
+    if (delay_ms < 1) delay_ms = 1;     // libuv treats 0 as "immediately"; keep one-tick gap
+
+    uv_timer_start(&mix_timer_, &MixerServer::on_mix_timer, delay_ms, 0);
 }
 
 // ============================================================

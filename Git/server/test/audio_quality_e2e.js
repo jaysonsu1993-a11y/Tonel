@@ -274,11 +274,18 @@ async function main() {
   const totalFrames = Math.ceil(opts.seconds * (1000 / FRAME_INTERVAL_MS));
   const captureFloat = new Float32Array((totalFrames + 200) * FRAME_SAMPLES);
   let captured = 0;
-  let firstRxTime = 0;
+  let firstRxTime = 0n;
   const rxLossWindow = new Map();   // sequence → arrival index
 
+  // Track first/last receive times so we can compute the server's actual
+  // broadcast rate. With the v1.0.28 absolute-deadline timer, the rate
+  // should be very close to 200/s; the previous `uv_timer_start(.., 5, 5)`
+  // approach drifted by ~1 % depending on host load.
+  let lastRxTime = 0n;
   receiver.onAudio = (payload, pkt) => {
-    if (firstRxTime === 0) firstRxTime = process.hrtime.bigint();
+    const t = process.hrtime.bigint();
+    if (firstRxTime === 0n) firstRxTime = t;
+    lastRxTime = t;
     rxLossWindow.set(pkt.sequence, captured);
     const f32 = pcm16BufToFloat(payload);
     if (captured + f32.length <= captureFloat.length) {
@@ -333,8 +340,19 @@ async function main() {
 
   const r = analyse(window, opts.freq);
   console.log('');
+  // Measure the server's actual broadcast rate from receive timestamps.
+  // Should be ~200/s with the v1.0.28 absolute-deadline timer; significant
+  // deviation indicates timer drift has crept back in.
+  const rxDurationSec = Number(lastRxTime - firstRxTime) / 1e9;
+  const broadcastRate = rxDurationSec > 0 ? rxLossWindow.size / rxDurationSec : 0;
+  const ratePpm = broadcastRate > 0 ? Math.round((broadcastRate / 200 - 1) * 1e6) : 0;
+  const ratePpmSign = ratePpm >= 0 ? '+' : '';
+  const RATE_PPM_BUDGET = 5000;  // ≤ 0.5 % away from 200/s
+
   console.log(`[test] tx frames:  ${txCount}`);
   console.log(`[test] rx packets: ${rxLossWindow.size}`);
+  console.log(`[test] broadcast rate: ${broadcastRate.toFixed(2)}/s ` +
+              `(${ratePpmSign}${ratePpm} ppm vs 200/s, budget ±${RATE_PPM_BUDGET})`);
   console.log(`[test] window:     ${window.length} samples (${(window.length / SAMPLE_RATE).toFixed(3)} s, ${wholeCycles} cycles of ${opts.freq} Hz)`);
   console.log(`[test] peak amp:   ${r.peakAmp.toFixed(4)}  (sent amplitude=${opts.amp.toFixed(4)})`);
   console.log(`[test] SNR:        ${r.snrDb.toFixed(2)} dB    (pass ≥ ${opts.snrPass})`);
@@ -348,7 +366,11 @@ async function main() {
     console.log(`         H${h.n} (${h.freq} Hz):  ${h.rel.toFixed(2)} dB`);
   }
 
-  const pass = r.snrDb >= opts.snrPass && r.thd <= opts.thdPass;
+  const ratePass = Math.abs(ratePpm) <= RATE_PPM_BUDGET;
+  const pass = r.snrDb >= opts.snrPass && r.thd <= opts.thdPass && ratePass;
+  if (!ratePass) {
+    console.log(`[test] rate FAIL: drift exceeds ±${RATE_PPM_BUDGET} ppm — server timer regression?`);
+  }
   console.log('');
   console.log(`[test] ${pass ? 'PASS' : 'FAIL'}`);
   process.exit(pass ? 0 : 1);
