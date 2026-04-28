@@ -188,6 +188,8 @@ export class AudioService {
                           // syllables and mislead debugging.
   public playReprimeCount = 0   // playback worklet underrun events (every one is a click)
   public rxSeqGapCount    = 0   // received SPA1 packets out-of-order or missing
+  public playRateScale    = 1.0 // playback worklet's adaptive rate (1.0 = nominal; ±0.5%)
+  public playRingFill     = 0   // current ring fill in samples (target ~1440)
   private rxLastSeq = -1
   get audioWsState(): string {
     const ws = this.audioWs
@@ -437,7 +439,10 @@ export class AudioService {
     // threshold for "delayed" voice). The audio-thread cost of 480
     // additional buffered samples is zero (Float32Array, pre-allocated).
     const RING_SIZE    = 48000   // 1 second @ wire rate (48 kHz)
-    const PRIME_TARGET = 960     // 20 ms cushion before draining starts
+    const PRIME_TARGET = 1440    // 30 ms cushion (v1.0.25: +10 ms over v1.0.23 to
+                                 // absorb main-thread GC pauses and WS bursts that
+                                 // exceed 20 ms — the events that still triggered
+                                 // sporadic reprime even with adaptive rate)
     const PRIME_MIN    = 128     // re-prime if ring would drop below this
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
@@ -468,6 +473,7 @@ export class AudioService {
           this.rateScale   = 1.0
           this.MAX_SCALE   = 1.005
           this.MIN_SCALE   = 0.995
+          this.statsTick   = 0   // post stats periodically for the debug strip
           this.port.onmessage = (ev) => {
             let samples = ev.data
             if (samples instanceof ArrayBuffer) samples = new Float32Array(samples)
@@ -507,18 +513,34 @@ export class AudioService {
             return true
           }
           // Slow control loop: nudge rateScale to keep count near target.
-          // Deadband [0.7×, 1.3×] target avoids reacting to ordinary jitter.
-          // Step is 2e-5 per quantum (≈0.0075 in 1 sec) — fast enough to
-          // track typical clock drift, slow enough to be inaudible.
+          //
+          // v1.0.24 had a deadband around target where rateScale drifted
+          // back toward 1.0. That was wrong — once the loop converged to,
+          // say, rateScale = 1.003 (compensating ~0.3 % clock drift), any
+          // ring that landed inside the deadband would pull rateScale
+          // back, ring would refill from drift, drift the rate back,
+          // refill, ... a slow oscillation that occasionally clipped
+          // PRIME_MIN and fired a reprime even when no real issue was
+          // present.
+          //
+          // v1.0.25 holds rateScale once we're inside the deadband. The
+          // loop is now an integrator (+ saturation): outside the
+          // deadband the rate moves; inside, it stays. Steady state
+          // converges to whatever rate matches producer/consumer
+          // exactly, no oscillation.
           if (this.count > this.targetCount * 1.3) {
             this.rateScale = Math.min(this.MAX_SCALE, this.rateScale + 0.00002)
           } else if (this.count < this.targetCount * 0.7) {
             this.rateScale = Math.max(this.MIN_SCALE, this.rateScale - 0.00002)
-          } else {
-            // Inside deadband — drift back toward 1.0
-            this.rateScale = this.rateScale * 0.9999 + 1.0 * 0.0001
           }
           const effRatio = this.ratio * this.rateScale
+
+          // Periodic stats: post ~3× per second so the debug strip updates
+          // without flooding the message channel.
+          if (++this.statsTick >= 128) {
+            this.statsTick = 0
+            this.port.postMessage({ type: 'stats', rateScale: this.rateScale, count: this.count })
+          }
 
           for (let i = 0; i < out0.length; i++) {
             const idxF = this.readPos
@@ -562,7 +584,13 @@ export class AudioService {
       if (!this.audioContext || !this.masterGain) return
       this.playbackWorklet = new AudioWorkletNode(this.audioContext, 'playback-processor')
       this.playbackWorklet.port.onmessage = (ev) => {
-        if (ev.data?.type === 'reprime') this.playReprimeCount = ev.data.count
+        const d = ev.data
+        if (!d) return
+        if (d.type === 'reprime') this.playReprimeCount = d.count
+        else if (d.type === 'stats') {
+          this.playRateScale = d.rateScale
+          this.playRingFill  = d.count
+        }
       }
       this.playbackWorklet.connect(this.masterGain)
     } catch (err) {

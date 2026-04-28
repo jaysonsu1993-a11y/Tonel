@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.25] - 2026-04-28
+
+### Fixed (Residual reprime drift in v1.0.24's adaptive loop)
+
+User reported `repri=16` over 6 minutes (down 19× from v1.0.23 but
+still non-zero), with `gap=0` and mic muted — confirming the cause was
+clock drift, not network or signal. v1.0.24's adaptive loop converged
+the rate correctly when ring drifted outside the 0.7×–1.3× target
+deadband, but **inside the deadband it slowly drifted `rateScale` back
+to 1.0**. So as soon as the ring returned to nominal, the rate
+correction undid itself, drift resumed, ring drifted out again,
+correction reapplied, ... a slow oscillation that occasionally
+clipped `PRIME_MIN` even with no real network problem.
+
+### Two changes
+
+- **Hold `rateScale` inside the deadband** instead of drifting back to
+  1.0. The loop is now an integrator with saturation: outside the
+  deadband the rate moves; inside, it stays. Steady state converges
+  to whatever rate matches producer/consumer exactly, then holds —
+  no oscillation, no slow re-drain.
+  ([Git/web/src/services/audioService.ts:482](Git/web/src/services/audioService.ts:482))
+
+- **`PRIME_TARGET` 960 → 1440 (20 ms → 30 ms cushion).** Extra 10 ms
+  of headroom absorbs main-thread GC pauses, WebSocket bursts, and
+  other non-drift events that can briefly drop the ring below
+  `PRIME_MIN` even when the rate loop is correct.
+  ([Git/web/src/services/audioService.ts:415](Git/web/src/services/audioService.ts:415))
+
+### New diagnostics
+
+Debug strip now also shows:
+- `ring=N` — current ring fill (target 1440 = 30 ms)
+- `rate=±NNNppm` — current `rateScale` offset from 1.0 in parts per
+  million; 1000 ppm = 0.1 % rate correction, 5000 ppm = 0.5 % cap.
+  In steady state this should converge to a small non-zero value
+  (the actual clock drift between this browser and the server).
+
+### Latency impact
++10 ms playback latency (from the cushion bump). End-to-end mic→speaker
+~50 ms, still under the perceptual-delay threshold for voice.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `PlaybackProcessor` | Drop deadband drift-to-1.0; bump `PRIME_TARGET` 960→1440; emit periodic stats |
+| `Git/web/src/services/audioService.ts` | Expose `playRateScale`, `playRingFill` |
+| `Git/web/src/pages/RoomPage.tsx` debug strip | New `ring=N rate=±NNNppm` fields |
+| `Git/server/test/browser/test_page.html` | Worklet copy synced |
+
 ## [1.0.24] - 2026-04-28
 
 ### Fixed (Slow `repri` growth even with mic muted — clock drift)

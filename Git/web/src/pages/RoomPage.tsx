@@ -34,12 +34,16 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
                 : audioService.captureModeValue === 'script-processor' ? 'sp'
                 : 'idle'
       const muteFlag = audioService.isMuted ? ' MUTED' : ''
+      // rateScale shown as ppm offset from 1.0 — easier to read than 1.00237
+      const ratePpm = ((audioService.playRateScale - 1.0) * 1e6) | 0
+      const rateStr = ratePpm >= 0 ? `+${ratePpm}` : `${ratePpm}`
       setDbg(
         `tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
         `rxPeak=${audioService.rxLevelPeak.toFixed(3)} ws=${audioService.audioWsState} ` +
         `cap=${cap} micClip=${audioService.captureClipCountValue} ` +
         `roomUsers=${audioService.serverPeerCount} ` +
-        `repri=${audioService.playReprimeCount} gap=${audioService.rxSeqGapCount}${muteFlag}`
+        `repri=${audioService.playReprimeCount} gap=${audioService.rxSeqGapCount} ` +
+        `ring=${audioService.playRingFill} rate=${rateStr}ppm${muteFlag}`
       )
     }, 2000)
     return () => { clearInterval(fast); clearInterval(slow) }
