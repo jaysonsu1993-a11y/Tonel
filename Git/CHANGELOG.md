@@ -5,6 +5,97 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.30] - 2026-04-28
+
+### Fixed (Server mixer PLC — root cause of residual 破音 across v1.0.10–v1.0.29)
+
+User submitted a 10-second recording of solo loopback distortion. FFT
+analysis surfaced an unmistakable signature:
+
+- Inter-click intervals clustered at 5 / 10 / 15 / 20 / 25 ms (5 ms multiples)
+- Click-train FFT peak at **200 Hz** (= 1 / 5 ms = server broadcast tick rate)
+- No clipping (`|x|>0.95 = 0` samples); normal vowel formant spectrum
+- ~14 clicks/s riding atop voice content
+
+This is a textbook 5 ms tick-boundary discontinuity. Mechanism:
+
+When a client PCM packet is delayed by public-internet jitter (WSS over
+Cloudflare Tunnel routinely sees ±10 ms variance), it misses its
+broadcast tick. The mixer's consume-style invariant (added in v1.0.10
+to prevent stale-frame-replay buzz) then broadcast a 5 ms zero-pad in
+place of the missing frame — voice → silence → voice = sample-step
+discontinuity = audible click. At network-jitter rates this stacks
+into the continuous "破音" listeners reported.
+
+The Layer 1 automated test runs on localhost loopback (~0 ms jitter)
+so this never showed up in CI. The user-facing telemetry (`gap=0`,
+`repri=0`) was correct — no UDP loss, no client-ring underrun — the
+bad audio was inside the server's own broadcast.
+
+### Fix: cosine-tapered PLC in `AudioMixer`
+
+`Track` gains `prevAudio[MAX_FRAME_COUNT]`, `decayCount`, `hasPrev`.
+
+1. **Fresh frame** (`frameCount > 0`): normal full-amplitude mix.
+   Byte-identical to v1.0.29 on this path.
+2. **Missing frame, `decayCount < PLC_MAX_DECAY` (10 ticks = 50 ms)**:
+   replay `prevAudio` with cosine-tapered gain
+   `fade(k) = 0.5 · (1 + cos(πk / PLC_MAX_DECAY))`. fade(0)=1.0 → first
+   miss is a full-amplitude replay (not silence); fade(9)≈0.024 → last
+   replay before silence.
+3. **`decayCount ≥ PLC_MAX_DECAY`**: contribute silence — bounded decay
+   protects against the v1.0.10 200 Hz-buzz hazard the original consume
+   invariant was guarding against.
+4. **Fresh frame mid-decay**: snaps back to full amplitude, snapshots
+   the new frame to `prevAudio`, resets `decayCount`. Models the common
+   "one packet delayed, stream resumes" case.
+
+`accumulate` reads `decayCount` without modifying it so multiple
+per-recipient mixes within one tick all see the same fade gain; state
+advances exactly once per tick in `consumeAllTracks`.
+([Git/server/src/audio_mixer.h:123](Git/server/src/audio_mixer.h:123))
+
+### Latency impact
+
+**Zero.** PLC is byte-identical to v1.0.29 on the fresh-frame path.
+Layer 1 baselines (SNR 67 / 84 / 93 dB at amp 0.05 / 0.30 / 0.95)
+are unchanged because no frames are dropped on the loopback test.
+
+The 50 ms PLC tail does NOT add to end-to-end latency — it fills in
+ticks that *would otherwise have been silent.* "Now" audio still
+arrives at the same wall-clock time as v1.0.29; the change is that
+previously-silent 5 ms ticks now contain decaying replay instead of
+zero-pad.
+
+### New regression tests
+
+- `test_plc_fade_after_consume`: full-amp first mix, then 10 PLC fills
+  monotonically decaying, silent by mix #12. Locks PLC_MAX_DECAY.
+- `test_plc_resets_on_fresh_frame`: track mid-decay snaps back to full
+  amplitude when its packet finally arrives, including PLC restart on
+  the new prev frame.
+- `test_plc_no_replay_before_first_frame`: empty mixer stays
+  bit-exact silent (guards against uninitialized `prevAudio` mixing).
+- `test_mix_excluding`: updated — consume+mix expects PLC fade(0)=1.0
+  (=0.9) instead of the v1.0.29 silence assertion.
+
+### Workflow note (per `tonel-audio-testing` skill)
+
+1. Ran both layers BEFORE — baseline snapshot (SNR 84 dB, browser PASS).
+2. User recording → FFT diagnosed 200 Hz click-train signature.
+3. Implemented PLC.
+4. Ran both layers AFTER — SNR/THD/rate identical to v1.0.29 baseline
+   (PLC doesn't trigger when no frames are missed in localhost loopback).
+5. Added 3 new unit tests + updated 1 to lock PLC behaviour.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` `Track` struct | Add `prevAudio`, `decayCount`, `hasPrev` |
+| `Git/server/src/audio_mixer.h` `accumulate` | Cosine-fade PLC fill on missing frame |
+| `Git/server/src/audio_mixer.h` `consumeAllTracks` | Snapshot fresh frame; advance decay |
+| `Git/server/src/mixer_server_test.cpp` | 3 new PLC tests + 1 updated consume test |
+| `~/.claude/projects/.../memory/project_pomu_open_issue.md` | Marked resolved + lessons learned |
+
 ## [1.0.29] - 2026-04-28
 
 ### Changed (Roll back the cushion bump that v1.0.28's server fix made unnecessary)

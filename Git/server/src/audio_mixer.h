@@ -67,11 +67,24 @@ public:
 private:
     static constexpr int MAX_FRAME_COUNT = 480;  // 10ms @ 48kHz (max for 5ms x2 safety)
 
+    // PLC (packet loss concealment) decay length, in tick-sized frames.
+    // When a tick fires with no fresh frame for a track, mix the previous
+    // frame at a cosine-tapered gain instead of contributing silence. After
+    // PLC_MAX_DECAY consecutive misses the track contributes nothing and
+    // stays silent until a fresh addTrack() arrives. 10 frames @ 5 ms =
+    // 50 ms — long enough for the natural envelope decay of held vowels
+    // and short enough that a real silence (user muted) doesn't leak more
+    // than 50 ms past the actual stop.
+    static constexpr int PLC_MAX_DECAY = 10;
+
     struct Track {
-        float audio[MAX_FRAME_COUNT];  // preallocated fixed-size buffer
-        int frameCount = 0;            // > 0 when fresh data is awaiting mix; reset to 0 by mix()
-        float weight = 1.0f;
-        float lastRms = 0.0f;          // updated by addTrack, decayed by mix() on silent ticks
+        float audio[MAX_FRAME_COUNT];     // preallocated fixed-size buffer
+        float prevAudio[MAX_FRAME_COUNT]; // last frame mixed at full amplitude — source for PLC fill
+        int frameCount = 0;               // > 0 when fresh data is awaiting mix; reset to 0 by consumeAllTracks()
+        int decayCount = 0;               // # consecutive ticks since last fresh frame, [0 .. PLC_MAX_DECAY]
+        bool hasPrev   = false;           // prevAudio holds a valid frame ready for PLC fill
+        float weight   = 1.0f;
+        float lastRms  = 0.0f;            // updated by addTrack, decayed on silent ticks
     };
 
     std::unordered_map<std::string, Track> tracks_;
@@ -125,15 +138,31 @@ inline void AudioMixer::accumulate(const std::string* excludeUserId, float* outp
     for (const auto& kv : tracks_) {
         if (excludeUserId && kv.first == *excludeUserId) continue;
         const Track& t = kv.second;
-        if (t.frameCount == 0) continue;
         const float w = t.weight;
-        const float* src = t.audio;
-        int count = std::min(frameCount, t.frameCount);
-        if (w == 1.0f) {
-            for (int i = 0; i < count; ++i) output[i] += src[i];
-        } else {
-            for (int i = 0; i < count; ++i) output[i] += src[i] * w;
+        if (t.frameCount > 0) {
+            // Fresh frame this tick — normal full-gain mix.
+            const float* src = t.audio;
+            int count = std::min(frameCount, t.frameCount);
+            if (w == 1.0f) {
+                for (int i = 0; i < count; ++i) output[i] += src[i];
+            } else {
+                for (int i = 0; i < count; ++i) output[i] += src[i] * w;
+            }
+        } else if (t.hasPrev && t.decayCount < PLC_MAX_DECAY) {
+            // No fresh frame — PLC fill: replay the previous frame at a
+            // cosine-tapered gain. fade(0)=1.0 (first miss = full replay),
+            // fade(PLC_MAX_DECAY-1)≈0 (last miss before silence). This
+            // bounded fade replaces the silent 5 ms gap that the timed
+            // mixer otherwise broadcasts when a client packet is delayed
+            // by public-internet jitter — that gap was the 200 Hz click
+            // train v1.0.10–v1.0.29 listeners reported as "破音."
+            const float fade = 0.5f * (1.0f + std::cos(static_cast<float>(M_PI) * t.decayCount / static_cast<float>(PLC_MAX_DECAY)));
+            const float gw   = w * fade;
+            const float* src = t.prevAudio;
+            int count = std::min(frameCount, MAX_FRAME_COUNT);
+            for (int i = 0; i < count; ++i) output[i] += src[i] * gw;
         }
+        // else: decay exhausted or never had a frame — contribute silence.
     }
 }
 
@@ -178,21 +207,37 @@ inline void AudioMixer::mixExcluding(const std::string& excludeUserId, float* ou
 }
 
 inline void AudioMixer::consumeAllTracks() {
-    // Consume-style: a track contributes to *exactly one* mix tick after
-    // each addTrack(). Without this, a track that stops being refreshed
-    // (user mutes, packet loss, client stalls) keeps replaying its last
-    // 5 ms frame on every 5 ms broadcast — a 200 Hz periodic repetition
-    // of a fixed 240-sample slice that listeners hear as a metallic
-    // "电流声" floor noise. Clearing frameCount makes a missing packet
-    // equal to silence rather than to "loop forever." Silent tracks
-    // additionally decay their cached level so the UI meter falls off
-    // when a user mutes instead of staying stuck.
+    // End-of-tick bookkeeping. Two roles:
+    //
+    // 1. Consume-style invariant: a fresh `addTrack()` contributes to
+    //    *exactly one* full-amplitude mix tick. Without this, a stalled
+    //    track would replay its last 5 ms on every 5 ms broadcast —
+    //    a 200 Hz repetition of a fixed 240-sample slice that listeners
+    //    hear as metallic "电流声" floor noise (the v1.0.10 root cause).
+    //
+    // 2. PLC: a stalled track does NOT immediately go silent (which is
+    //    the 200 Hz click pattern listeners reported through v1.0.29).
+    //    Instead, after the one full-amplitude tick, the track keeps
+    //    contributing the *previous* frame at a cosine-tapered gain for
+    //    PLC_MAX_DECAY ticks (50 ms), then goes silent. The fade is
+    //    computed in accumulate() from `decayCount`; here we just
+    //    advance `decayCount` and snapshot fresh frames into `prevAudio`.
+    //
+    // The 200 Hz buzz hazard from (1) is bounded: PLC fades to zero in
+    // 50 ms, so a stalled track contributes at most 10 progressively
+    // quieter copies of the same frame, never an infinite loop.
     for (auto& kv : tracks_) {
         Track& t = kv.second;
-        if (t.frameCount == 0) {
-            t.lastRms *= 0.5f;
-        } else {
+        if (t.frameCount > 0) {
+            // Fresh frame just mixed: snapshot it for future PLC and reset decay.
+            std::memcpy(t.prevAudio, t.audio, t.frameCount * sizeof(float));
+            t.hasPrev    = true;
+            t.decayCount = 0;
             t.frameCount = 0;
+        } else {
+            // No fresh frame this tick: advance decay (saturating at PLC_MAX_DECAY).
+            if (t.decayCount < PLC_MAX_DECAY) t.decayCount++;
+            t.lastRms *= 0.5f;
         }
     }
 }

@@ -187,11 +187,14 @@ static int test_mix_excluding() {
         return 1;
     }
 
-    // consumeAllTracks then mix → silence.
+    // consumeAllTracks then mix → PLC replay at fade(0)=1.0, so the next
+    // mixAll equals the previous full-amplitude mix (0.9). PLC tested in
+    // detail by test_plc_*; here we just verify mixExcluding's semantics
+    // remain compatible with the bookkeeping done by consumeAllTracks.
     m.consumeAllTracks();
     m.mixAll(out, 480);
-    if (out[0] != 0.0f) {
-        std::fprintf(stderr, "FAIL: test_mix_excluding — after consumeAllTracks, mixAll gave %f, expected 0\n", out[0]);
+    if (!approx(out[0], 0.9f)) {
+        std::fprintf(stderr, "FAIL: test_mix_excluding — after consumeAllTracks, mixAll gave %f, expected 0.9 (PLC fade(0)=1.0)\n", out[0]);
         return 1;
     }
     std::printf("PASS: test_mix_excluding\n");
@@ -251,32 +254,103 @@ static int test_soft_clip_above_knee() {
     return 0;
 }
 
-// Consume-style invariant: a track contributes to *exactly one* mix per
-// addTrack(). A second mix() without a fresh addTrack() must produce
-// silence — without this, a muted user's last 5 ms frame would be replayed
-// on every 5 ms broadcast and listeners would hear it as a 200 Hz metallic
-// floor noise (the v1.0.10 root cause).
-static int test_consume_after_mix() {
+// PLC (packet loss concealment) — v1.0.30. Replaces the v1.0.10
+// consume-style invariant ("second mix is silence") with a bounded
+// fade-out version. The original silent-second-mix design produced a
+// 200 Hz click train when public-internet jitter delayed any 5 ms
+// packet past its tick, because the mixer broadcast a 5 ms zero gap
+// in place of the missing frame; users heard that as continuous "破音".
+//
+// PLC behaviour, per addTrack():
+//   mix #1 (fresh)        : full amplitude
+//   mix #2 .. #11 (misses): cosine-tapered replay of the previous frame,
+//                           starting at fade(0)=1.0 and dropping monotonically
+//                           to fade(9)≈0.024 over PLC_MAX_DECAY=10 ticks
+//   mix #12+ (still missing): silent — the bounded decay protects against
+//                              the 200 Hz buzz hazard the original consume
+//                              invariant was guarding against.
+static int test_plc_fade_after_consume() {
     AudioMixer m;
     float track[480];
     for (int i = 0; i < 480; ++i) track[i] = 0.5f;
-    float out1[480], out2[480];
+    float out[480];
 
-    m.addTrack("user1", track, 480);
-    m.mix(out1, 480);
-    m.mix(out2, 480);
+    m.addTrack("u1", track, 480);
+    m.mix(out, 480);
+    if (!approx(out[0], 0.5f)) {
+        std::fprintf(stderr, "FAIL: test_plc_fade_after_consume — first mix = %f, expected 0.5\n", out[0]);
+        return 1;
+    }
 
-    for (int i = 0; i < 480; ++i) {
-        if (!approx(out1[i], 0.5f)) {
-            std::fprintf(stderr, "FAIL: test_consume_after_mix — out1[%d] = %f, expected 0.5\n", i, out1[i]);
+    // Subsequent mixes without addTrack: PLC replay, monotonically decreasing,
+    // reaching silence by mix #12 (after PLC_MAX_DECAY=10 consecutive misses).
+    float prev = 0.5f;
+    int silent_at = -1;
+    for (int k = 1; k <= 13; ++k) {
+        m.mix(out, 480);
+        const float v = out[0];
+        if (v > prev + 1e-5f) {
+            std::fprintf(stderr, "FAIL: test_plc_fade_after_consume — mix #%d = %f, expected <= prev %f (monotonic decay)\n", k+1, v, prev);
             return 1;
         }
-        if (out2[i] != 0.0f) {
-            std::fprintf(stderr, "FAIL: test_consume_after_mix — out2[%d] = %f, expected 0.0 (consumed)\n", i, out2[i]);
+        if (v <= 1e-6f && silent_at < 0) silent_at = k + 1;
+        prev = v;
+    }
+    if (silent_at < 0 || silent_at > 12) {
+        std::fprintf(stderr, "FAIL: test_plc_fade_after_consume — track did not reach silence by mix #12 (silent_at=%d)\n", silent_at);
+        return 1;
+    }
+    std::printf("PASS: test_plc_fade_after_consume (silent at mix #%d)\n", silent_at);
+    return 0;
+}
+
+// PLC must reset on a fresh frame: a track mid-decay snaps back to full
+// amplitude as soon as its packet arrives. Models the common public-net
+// case where one packet is delayed but the stream resumes.
+static int test_plc_resets_on_fresh_frame() {
+    AudioMixer m;
+    float t1[480], t2[480];
+    for (int i = 0; i < 480; ++i) { t1[i] = 0.5f; t2[i] = 0.3f; }
+    float out[480];
+
+    m.addTrack("u1", t1, 480);
+    m.mix(out, 480);             // full mix at 0.5
+    m.mix(out, 480);             // PLC #1
+    m.mix(out, 480);             // PLC #2
+    m.mix(out, 480);             // PLC #3
+
+    m.addTrack("u1", t2, 480);   // late-arriving fresh frame
+    m.mix(out, 480);
+    if (!approx(out[0], 0.3f)) {
+        std::fprintf(stderr, "FAIL: test_plc_resets_on_fresh_frame — fresh frame after misses = %f, expected 0.3 (reset to full)\n", out[0]);
+        return 1;
+    }
+
+    // After the fresh frame, PLC restarts from fade(0)=1.0: next mix replays
+    // the *new* prev (0.3) at full amplitude, not the old 0.5.
+    m.mix(out, 480);
+    if (!approx(out[0], 0.3f)) {
+        std::fprintf(stderr, "FAIL: test_plc_resets_on_fresh_frame — first PLC after reset = %f, expected 0.3 (fade(0)=1.0 of new prev)\n", out[0]);
+        return 1;
+    }
+    std::printf("PASS: test_plc_resets_on_fresh_frame\n");
+    return 0;
+}
+
+// A track that has never received a frame must NOT contribute PLC noise
+// (would otherwise mix uninitialized `prevAudio`). The empty-mixer path
+// stays bit-exact silent.
+static int test_plc_no_replay_before_first_frame() {
+    AudioMixer m;
+    float out[480];
+    m.mix(out, 480);
+    for (int i = 0; i < 480; ++i) {
+        if (out[i] != 0.0f) {
+            std::fprintf(stderr, "FAIL: test_plc_no_replay_before_first_frame — out[%d]=%f, expected 0\n", i, out[i]);
             return 1;
         }
     }
-    std::printf("PASS: test_consume_after_mix\n");
+    std::printf("PASS: test_plc_no_replay_before_first_frame\n");
     return 0;
 }
 
@@ -290,7 +364,9 @@ static int run_mixer_tests() {
     failures += test_limiter();
     failures += test_remove_track();
     failures += test_track_count();
-    failures += test_consume_after_mix();
+    failures += test_plc_fade_after_consume();
+    failures += test_plc_resets_on_fresh_frame();
+    failures += test_plc_no_replay_before_first_frame();
     failures += test_soft_clip_below_knee();
     failures += test_soft_clip_above_knee();
     failures += test_mix_excluding();
