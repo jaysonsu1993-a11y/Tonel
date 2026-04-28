@@ -439,10 +439,15 @@ export class AudioService {
     // threshold for "delayed" voice). The audio-thread cost of 480
     // additional buffered samples is zero (Float32Array, pre-allocated).
     const RING_SIZE    = 48000   // 1 second @ wire rate (48 kHz)
-    const PRIME_TARGET = 1440    // 30 ms cushion (v1.0.25: +10 ms over v1.0.23 to
-                                 // absorb main-thread GC pauses and WS bursts that
-                                 // exceed 20 ms — the events that still triggered
-                                 // sporadic reprime even with adaptive rate)
+    const PRIME_TARGET = 2400    // 50 ms cushion (v1.0.26: +20 ms over v1.0.25).
+                                 // User's actual measured clock drift was -4619 ppm
+                                 // (0.46 %), within 92 % of v1.0.25's ±0.5 % rate
+                                 // cap. With less than 0.05 % of headroom left, any
+                                 // network burst >30 ms pushed the ring under
+                                 // PRIME_MIN. 50 ms tolerates bursts up to ~50 ms,
+                                 // covers virtually all WSS-over-internet jitter.
+                                 // End-to-end mic→speaker latency is ~70 ms, still
+                                 // under the voice-perception "delayed" threshold.
     const PRIME_MIN    = 128     // re-prime if ring would drop below this
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
@@ -471,8 +476,12 @@ export class AudioService {
           // keeps the change inaudible.
           this.targetCount = ${PRIME_TARGET}
           this.rateScale   = 1.0
-          this.MAX_SCALE   = 1.005
-          this.MIN_SCALE   = 0.995
+          // ±0.8 % rate range (v1.0.26: widened from ±0.5 % since the user's
+          // observed drift was already pushing 92 % of the v1.0.25 cap).
+          // 0.8 % is at the upper edge of imperceptible-pitch-shift on voice;
+          // 1 % starts being noticeable on sustained tones, so we hold here.
+          this.MAX_SCALE   = 1.008
+          this.MIN_SCALE   = 0.992
           this.statsTick   = 0   // post stats periodically for the debug strip
           this.port.onmessage = (ev) => {
             let samples = ev.data
@@ -554,15 +563,18 @@ export class AudioService {
             this.count -= (newIdx - idx)
             this.readPos = newReadPos % ${RING_SIZE}
             if (this.count < ${PRIME_MIN}) {
-              // Mid-callback underrun. Fade the last 240 samples (5 ms at
-              // 48 kHz) we already wrote down to zero — long enough that
-              // the ear can't perceive it as a click, only as a soft
-              // attenuation, then silence the rest. With adaptive rate
-              // compensation above, this branch should fire only on real
-              // network outages (not steady-state drift).
+              // Mid-callback underrun. Apply a 240-sample (5 ms) raised-
+              // cosine fade to the samples already written before silencing
+              // the rest. Cosine taper is smoother than linear at both
+              // ends — no bend in the envelope's first or last derivative —
+              // so the residual artifact is below the ear's click-detection
+              // threshold even at quiet listening levels.
               const fadeLen = i + 1 < 240 ? i + 1 : 240
               for (let f = 0; f < fadeLen; f++) {
-                out0[i - f] *= f / fadeLen
+                // Half-cosine from 1 (at start of fade) to 0 (at end of fade).
+                // f/fadeLen ∈ [0,1); cos transitions 1 → 0 over 0 → π/2.
+                const w = 0.5 * (1 + Math.cos(Math.PI * (1 - f / fadeLen)))
+                out0[i - f] *= w
               }
               for (let j = i + 1; j < out0.length; j++) out0[j] = 0
               this.primed = false

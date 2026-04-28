@@ -25,7 +25,7 @@
 //   4. Mono input is fanned out to every output channel so the right
 //      speaker isn't silent on stereo destinations.
 const RING_SIZE     = 48000;   // 1 second @ wire rate (48 kHz)
-const PRIME_TARGET  = 1440;    // 30 ms cushion (v1.0.25: bumped for GC/burst headroom)
+const PRIME_TARGET  = 2400;    // 50 ms cushion (v1.0.26: bumped to absorb measured clock drift)
 const PRIME_MIN     = 128;     // re-prime if ring would drop below this
 const WORKLET_SRC = `
 class PlaybackProcessor extends AudioWorkletProcessor {
@@ -43,8 +43,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     // pitch correction, well under perceptual threshold for voice.
     this.targetCount = ${PRIME_TARGET};
     this.rateScale   = 1.0;
-    this.MAX_SCALE   = 1.005;
-    this.MIN_SCALE   = 0.995;
+    this.MAX_SCALE   = 1.008;
+    this.MIN_SCALE   = 0.992;
 
     this.port.onmessage = (ev) => {
       let samples = ev.data;
@@ -109,11 +109,12 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       this.readPos = newReadPos % ${RING_SIZE};
 
       if (this.count < ${PRIME_MIN}) {
-        // Mid-callback underrun: fade the last 240 samples toward zero
-        // (5 ms ramp at 48 kHz) — perceived as soft attenuation not click.
+        // Mid-callback underrun: 5 ms raised-cosine fade-out (smoother
+        // than linear, no kinks in derivative — below click threshold).
         const fadeLen = i + 1 < 240 ? i + 1 : 240;
         for (let f = 0; f < fadeLen; f++) {
-          out0[i - f] *= f / fadeLen;
+          const w = 0.5 * (1 + Math.cos(Math.PI * (1 - f / fadeLen)));
+          out0[i - f] *= w;
         }
         for (let j = i + 1; j < out0.length; j++) out0[j] = 0;
         this.primed = false;

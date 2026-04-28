@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.26] - 2026-04-28
+
+### Fixed (Reprime drift at the rate-scale cap)
+
+User's `rate=-4619 ppm` reading on v1.0.25 told us their browser's
+audio thread runs ~0.46 % slower than the server's broadcast clock —
+within 92 % of the v1.0.25 ±0.5 % rate cap. With less than 0.05 %
+of headroom left, any short network burst pushed the ring under
+`PRIME_MIN` and reprimed.
+
+### Three changes
+
+- **`PRIME_TARGET` 1440 → 2400 (30 ms → 50 ms cushion).** Most network
+  bursts on WSS-over-public-internet are well under 50 ms; this
+  effectively kills the burst-driven reprime case.
+  ([Git/web/src/services/audioService.ts:415](Git/web/src/services/audioService.ts:415))
+
+- **Rate range widened ±0.5 % → ±0.8 %.** 0.8 % is at the upper edge
+  of imperceptible pitch shift on voice (~14 cents); 1 % starts being
+  noticeable on sustained tones. The wider band gives the loop room
+  to fully compensate the user's measured 0.46 % drift instead of
+  saturating against the cap.
+  ([Git/web/src/services/audioService.ts:476](Git/web/src/services/audioService.ts:476))
+
+- **Reprime fade-out: linear → raised-cosine.** Cosine taper has zero
+  derivative at both endpoints — the envelope's first derivative
+  doesn't kink, which means no spectral splatter on the way to
+  silence. At quiet listening levels (e.g. solo loopback of room
+  ambient at -38 dB), the linear ramp could still be perceived as a
+  faint blip; the cosine is below the ear's click threshold even
+  there.
+  ([Git/web/src/services/audioService.ts:528](Git/web/src/services/audioService.ts:528))
+
+### Note (the "底噪 only when mic is on" report)
+
+That's not a code bug. Solo loopback echoes the user's own mic back
+through the server. With `noiseSuppression: false` (intentionally —
+the suppression algorithms add ≥ 30 ms of latency we can't afford),
+the room's natural ambient noise floor — HVAC, computer fan,
+electrical hum, the mic preamp's self-noise — is also captured and
+played back. Disable mic → no input → silent loopback. This is the
+same behavior every conferencing app has when monitoring is on with
+processing disabled. Quieter room = quieter loopback.
+
+### Latency impact
++20 ms from the cushion bump. End-to-end mic→server→speaker now
+~70 ms. Still under voice's "delayed" perception threshold.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `PlaybackProcessor` | PRIME_TARGET 1440→2400; rate range ±0.005→±0.008; cosine fade-out |
+| `Git/server/test/browser/test_page.html` | Worklet copy synced |
+
 ## [1.0.25] - 2026-04-28
 
 ### Fixed (Residual reprime drift in v1.0.24's adaptive loop)
