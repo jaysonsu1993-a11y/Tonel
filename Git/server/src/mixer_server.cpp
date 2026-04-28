@@ -623,6 +623,16 @@ void MixerServer::broadcast_mixed_audio(Room* room,
                                          uint16_t timestamp) {
     const int frame_count = audio_frames_;
 
+    // Test instrumentation: count tracks that will use the PLC fill on
+    // this tick (no fresh frame queued + has prevAudio + decay window
+    // open). This runs AFTER the mix-timer's jitter-buffer dequeue, so
+    // it correctly attributes "this user's frame didn't make it / wasn't
+    // ready in time." Production clients ignore the reserved byte; the
+    // automated jitter-scenario test reads it to count PLC events
+    // exactly, with no statistical inference needed.
+    const int   plc_count = room->mixer.countPlcEligibleTracks();
+    const bool  plc_fired = plc_count > 0;
+
     // Per-recipient N-1 mix.
     //
     // Each user receives the sum of every *other* user's audio, with
@@ -738,6 +748,7 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         std::strncpy(reinterpret_cast<char*>(out_pkt->userId), uid_key.c_str(), 63);
         out_pkt->codec      = codec;
         out_pkt->dataSize   = htons(static_cast<uint16_t>(audio_bytes));
+        out_pkt->reserved   = plc_fired ? 1 : 0;   // test-only PLC flag (production clients ignore)
         memcpy(out_pkt->data, audio_data, audio_bytes);
 
         const size_t pkt_len = sizeof(SPA1Packet) + audio_bytes;

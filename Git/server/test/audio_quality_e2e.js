@@ -54,6 +54,11 @@ function parseArgs() {
     sigma:        0,           // additional white noise (0 = pure sine)
     snrPass:      40,          // dB
     thdPass:      0.01,        // ratio
+    jitterSd:     0,           // Gaussian sender-side jitter, SD in ms (0 = no jitter)
+    burstEvery:   0,           // every N frames, suspend then burst (0 = off). Simulates WSS-over-TCP main-thread stall.
+    burstHoldMs:  20,          // when burstEvery > 0, this is the suspend duration in ms
+    summary:      'human',     // 'human' | 'csv' (csv prints one line for sweep aggregation)
+    signal:       'sine',      // 'sine' | 'noise' | 'voice'
   };
   for (let i = 0; i < args.length; i += 2) {
     const k = args[i].replace(/^--/, '');
@@ -63,6 +68,13 @@ function parseArgs() {
     }
   }
   return opts;
+}
+
+// Box-Muller. Returns N(0, 1).
+function gaussianStd() {
+  const u1 = Math.max(1e-9, Math.random());
+  const u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 
 // ── SPA1 packet encoding ────────────────────────────────────────────────────
@@ -92,6 +104,11 @@ function parseSpa1(buf) {
     userId:     buf.slice(8, 72).toString('utf8').replace(/\0.*$/, ''),
     codec:      buf.readUInt8(72),
     dataSize:   buf.readUInt16BE(73),
+    // SPA1 byte 75 is "reserved" in production. The mixer (server)
+    // repurposes it for test instrumentation: bit 0 set ⇨ at least one
+    // track on this tick was PLC-filled (no fresh frame, replay-with-fade
+    // path). Production clients don't read this byte, so it's safe.
+    plcFired:   (buf.readUInt8(75) & 0x01) !== 0,
     payload:    buf.slice(SPA1_HEADER_SIZE, SPA1_HEADER_SIZE + buf.readUInt16BE(73)),
   };
 }
@@ -207,6 +224,62 @@ function* sineFrames(freq, amp, sigma, sampleRate, framesTotal) {
   }
 }
 
+// Voice-like signal for jitter / PLC tests.
+//
+// Design: a 200 Hz carrier (period exactly 240 samples = one frame) with
+// a 5 Hz amplitude-modulation envelope on top. Per-frame phase stays
+// continuous, so a clean broadcast looks like a smooth AM-modulated sine
+// — the click detector reports 0 events. But when a PLC tick fires, the
+// mixer repeats the previous frame: the carrier phase still aligns at
+// the boundary (because the period is one frame), but the *amplitude*
+// is the prev frame's amplitude, while the next-real-frame's amplitude
+// would have been different by a few percent. That mismatch shows up
+// as a sample-step at the boundary, exactly the kind of signature the
+// 6σ d2 detector flags.
+//
+// Why not noise: white noise's per-sample d2 magnitude is so large that
+// the local-std threshold drowns out the PLC-boundary step entirely.
+// The detector is unbiased but not informative.
+//
+// Why not pure sine: 1 kHz sine has period 48 samples (5 cycles per
+// frame), so PLC repeat is phase-aligned and looks bit-exact like a
+// continuation. No detectable click even when PLC fires every frame.
+function* voiceFrames(amp, sampleRate, framesTotal) {
+  const f0 = 200;                                 // carrier — period = 240 samples
+  const dPhase = 2 * Math.PI * f0 / sampleRate;
+  const envHz = 5;                                // 5 Hz AM envelope (200 ms cycle)
+  let phase = 0;
+  for (let f = 0; f < framesTotal; f++) {
+    const t = (f * FRAME_INTERVAL_MS) / 1000;     // seconds
+    const env = 0.5 + 0.5 * Math.sin(2 * Math.PI * envHz * t);
+    const frameAmp = amp * env;
+    const out = Buffer.alloc(FRAME_BYTES);
+    for (let i = 0; i < FRAME_SAMPLES; i++) {
+      const s = frameAmp * Math.sin(phase);
+      out.writeInt16LE(Math.round(s * 32767), i * 2);
+      phase += dPhase;
+    }
+    yield out;
+  }
+}
+
+// White-noise frames (kept for completeness; click detector can't see
+// PLC events on this signal because the signal's own d2 magnitude
+// dominates the local-std threshold).
+function* noiseFrames(amp, sampleRate, framesTotal) {
+  void sampleRate;
+  for (let f = 0; f < framesTotal; f++) {
+    const out = Buffer.alloc(FRAME_BYTES);
+    for (let i = 0; i < FRAME_SAMPLES; i++) {
+      // Uniform in [-amp, amp). Cheaper than Gaussian and the spectral
+      // shape (white) is what we actually care about for the test.
+      const s = (Math.random() * 2 - 1) * amp;
+      out.writeInt16LE(Math.round(s * 32767), i * 2);
+    }
+    yield out;
+  }
+}
+
 // ── Signal analysis (Goertzel for specific frequencies) ─────────────────────
 
 function goertzelPower(samples, sampleRate, targetFreq) {
@@ -240,6 +313,84 @@ function pcm16BufToFloat(buf) {
   return out;
 }
 
+// Frame-boundary click detector for PLC / buffer-drop events.
+//
+// Failure modes we care about both manifest at the boundary between two
+// 240-sample server-tick packets in the receiver's capture buffer.
+// First-difference at that boundary is *not* a useful signature for our
+// voice-like test signal: the AM-modulated 200 Hz sine has period equal
+// to the frame, so sample[boundary] and sample[boundary+1] are both 0
+// either way (PLC fill or fresh frame). The signature shows up in the
+// *second* derivative — the transition into the next sample's slope is
+// where the amplitude change between A_prev and A_next becomes visible.
+//
+// Procedure:
+//   d2[i] = x[i+1] − 2·x[i] + x[i−1]
+//   threshold = 6 × median(|d2| within frames, ignoring boundaries)
+//   click = |d2[k·FS]| > threshold, for each frame boundary k ≥ 1
+//
+// On a clean voice broadcast, frame-boundary d2 and within-frame d2 are
+// drawn from the same distribution → 0 click events. Inject jitter or
+// induce PLC and the boundary d2 jumps by a factor proportional to the
+// amplitude change per frame, easily clearing the 6× threshold.
+function detectClicks(samples) {
+  const FS = FRAME_SAMPLES;
+  const N = samples.length;
+  if (N < FS * 4) return { count: 0, rate: 0, median: 0, p90: 0, max: 0, normEnergy: 0, signalRms: 0, durationSec: 0, threshold: 0, boundaryCount: 0 };
+
+  let sigSumSq = 0;
+  for (let i = 0; i < N; i++) sigSumSq += samples[i] * samples[i];
+  const signalRms   = Math.sqrt(sigSumSq / N);
+  const durationSec = N / SAMPLE_RATE;
+  const signalPower = sigSumSq / durationSec;
+
+  const numFrames = Math.floor(N / FS);
+
+  // Calibrate threshold from within-frame |d2|, excluding a small guard
+  // around boundaries so a single bad boundary doesn't pollute the median.
+  const guard = 4;
+  const withinD2 = [];
+  for (let k = 0; k < numFrames; k++) {
+    const start = k * FS + guard;
+    const end   = (k + 1) * FS - guard;
+    for (let i = start; i < end; i++) {
+      const d2 = samples[i + 1] - 2 * samples[i] + samples[i - 1];
+      withinD2.push(Math.abs(d2));
+    }
+  }
+  if (withinD2.length === 0) return { count: 0, rate: 0, median: 0, p90: 0, max: 0, normEnergy: 0, signalRms, durationSec, threshold: 0, boundaryCount: 0 };
+  withinD2.sort((a, b) => a - b);
+  const medianD2 = withinD2[Math.floor(withinD2.length / 2)] || 1e-9;
+  const threshold = 6 * medianD2;
+
+  const jumps = [];
+  let clickEnergy = 0;
+  for (let k = 1; k < numFrames; k++) {
+    const idx = k * FS;
+    if (idx <= 0 || idx >= N - 1) continue;
+    const d2 = Math.abs(samples[idx + 1] - 2 * samples[idx] + samples[idx - 1]);
+    if (d2 > threshold) {
+      jumps.push(d2);
+      clickEnergy += d2 * d2;
+    }
+  }
+
+  jumps.sort((a, b) => a - b);
+  const normEnergy = signalPower > 0 ? clickEnergy / signalPower : 0;
+  return {
+    count:       jumps.length,
+    rate:        jumps.length / durationSec,
+    median:      jumps.length ? jumps[Math.floor(jumps.length / 2)] : 0,
+    p90:         jumps.length ? jumps[Math.floor(jumps.length * 0.9)] : 0,
+    max:         jumps.length ? jumps[jumps.length - 1] : 0,
+    normEnergy,
+    signalRms,
+    durationSec,
+    threshold,
+    boundaryCount: numFrames - 1,
+  };
+}
+
 function analyse(samples, fundamental) {
   const sr = SAMPLE_RATE;
   const fundPower = goertzelPower(samples, sr, fundamental);
@@ -263,9 +414,11 @@ function analyse(samples, fundamental) {
 
 async function main() {
   const opts = parseArgs();
-  console.log(`[test] mixer @ ${opts.host}:${opts.tcp}/${opts.udp}, room=${opts.room}`);
-  console.log(`[test] signal: ${opts.freq} Hz sine, amp=${opts.amp}, ${opts.seconds}s` +
-              (opts.sigma ? `, +N(0,${opts.sigma}) noise` : ''));
+  if (opts.summary !== 'csv') {
+    console.log(`[test] mixer @ ${opts.host}:${opts.tcp}/${opts.udp}, room=${opts.room}`);
+    console.log(`[test] signal: ${opts.signal === 'sine' ? `${opts.freq} Hz sine` : opts.signal}, amp=${opts.amp}, ${opts.seconds}s` +
+                (opts.sigma ? `, +N(0,${opts.sigma}) noise` : ''));
+  }
 
   const sender   = new Spa1Client(opts.host, opts.tcp, opts.udp, opts.room, 'sender');
   const receiver = new Spa1Client(opts.host, opts.tcp, opts.udp, opts.room, 'receiver');
@@ -282,11 +435,20 @@ async function main() {
   // should be very close to 200/s; the previous `uv_timer_start(.., 5, 5)`
   // approach drifted by ~1 % depending on host load.
   let lastRxTime = 0n;
+  let plcFiredCount = 0;       // packets where the server flagged ≥ 1 PLC track
+  let primingTicks = 0;         // packets received before the first non-PLC tick (jitter-buffer priming)
+  let primed = false;           // becomes true on the first non-PLC packet, after which PLC count is "real" misses
   receiver.onAudio = (payload, pkt) => {
     const t = process.hrtime.bigint();
     if (firstRxTime === 0n) firstRxTime = t;
     lastRxTime = t;
     rxLossWindow.set(pkt.sequence, captured);
+    if (!primed) {
+      if (pkt.plcFired) primingTicks++;
+      else primed = true;
+    } else if (pkt.plcFired) {
+      plcFiredCount++;
+    }
     const f32 = pcm16BufToFloat(payload);
     if (captured + f32.length <= captureFloat.length) {
       captureFloat.set(f32, captured);
@@ -301,24 +463,108 @@ async function main() {
   await new Promise((r) => setTimeout(r, 50));
 
   // Pace the sender at 5 ms intervals — the same cadence as a real client.
+  // With jitter / burst options, we simulate adverse network conditions in
+  // a controlled, repeatable way so we can measure jitter-buffer / PLC
+  // behaviour locally instead of depending on a production recording.
   const startTx = process.hrtime.bigint();
-  const gen = sineFrames(opts.freq, opts.amp, opts.sigma, SAMPLE_RATE, totalFrames);
+  const gen =
+      opts.signal === 'noise' ? noiseFrames(opts.amp, SAMPLE_RATE, totalFrames)
+    : opts.signal === 'voice' ? voiceFrames(opts.amp, SAMPLE_RATE, totalFrames)
+    :                           sineFrames(opts.freq, opts.amp, opts.sigma, SAMPLE_RATE, totalFrames);
   let txCount = 0;
+  const generatedFrames = [];
+  for (const f of gen) generatedFrames.push(f);
+
+  // Build a per-frame send schedule (in ms from startTx).
+  //
+  // - `jitterSd` adds zero-mean Gaussian jitter to each frame's send time,
+  //   simulating ordinary network jitter. Average TX rate stays exactly
+  //   200/s because the schedule is anchored to ideal-time, not previous-send.
+  //
+  // - `burstEvery` simulates a main-thread stall + burst recovery: every N
+  //   frames, the sender pauses for `burstHoldMs` and then sends all the
+  //   queued frames back-to-back. This is the failure mode we suspect in
+  //   WSS-over-TCP delivery (post-v1.0.34 residual clicks).
+  const schedule = new Array(generatedFrames.length);
+  for (let i = 0; i < schedule.length; i++) {
+    const ideal = i * FRAME_INTERVAL_MS;
+    let delay = 0;
+    if (opts.jitterSd > 0) delay += gaussianStd() * opts.jitterSd;
+    if (opts.burstEvery > 0) {
+      const phase = i % opts.burstEvery;
+      // Frames in [N-1 .. N-1 + ceil(holdMs/intervalMs)) are held back to
+      // the boundary tick; they release in a single burst at frame index
+      // N-1 + holdMs/intervalMs.
+      if (phase < opts.burstEvery - 1) {
+        // Normal frame, no extra delay (other than gauss jitter above).
+      } else {
+        // Last frame of every "stall window" — release right at the
+        // burstHoldMs boundary along with the previous (burstHoldMs/5 - 1)
+        // frames that were also released here.
+        delay += opts.burstHoldMs;
+      }
+    }
+    schedule[i] = Math.max(0, ideal + delay);
+  }
+
+  // Sort by schedule time so a frame whose jitter pushes it past the next
+  // frame still goes out in chronological order — this matches typical
+  // network behaviour (UDP can reorder, but TCP/WSS preserves order).
+  const order = schedule.map((t, i) => ({ t, i })).sort((a, b) => a.t - b.t);
+
+  // Debug: report the actual jitter we'll inject. setTimeout has ~1 ms
+  // granularity in Node, so an SD-1 ms request realises as ~1 ms minimum;
+  // if injected jitter < 1 ms it's below pacing resolution.
+  if (opts.summary !== 'csv' && (opts.jitterSd > 0 || opts.burstEvery > 0)) {
+    const intervals = [];
+    for (let i = 1; i < order.length; i++) intervals.push(order[i].t - order[i - 1].t);
+    let mn = Infinity, mx = -Infinity, mean = 0;
+    for (const v of intervals) { if (v < mn) mn = v; if (v > mx) mx = v; mean += v; }
+    mean /= intervals.length;
+    let varSum = 0;
+    for (const v of intervals) varSum += (v - mean) * (v - mean);
+    const sd = Math.sqrt(varSum / intervals.length);
+    console.log(`[test] sched intervals (ms): mean=${mean.toFixed(3)} sd=${sd.toFixed(3)} min=${mn.toFixed(2)} max=${mx.toFixed(2)}`);
+  }
+  // Track actual send times to compare to schedule.
+  const sendActualMs = new Float64Array(order.length);
+
   await new Promise((resolve) => {
+    let next = 0;
     const tick = () => {
-      const target = Number(process.hrtime.bigint() - startTx) / 1e6;
-      const want   = Math.floor(target / FRAME_INTERVAL_MS);
-      while (txCount < want && txCount < totalFrames) {
-        const next = gen.next();
-        if (next.done) break;
-        sender.sendPcm16(next.value);
+      const elapsedMs = Number(process.hrtime.bigint() - startTx) / 1e6;
+      while (next < order.length && order[next].t <= elapsedMs) {
+        sender.sendPcm16(generatedFrames[order[next].i]);
+        sendActualMs[next] = elapsedMs;
+        next++;
         txCount++;
       }
-      if (txCount < totalFrames) setImmediate(tick);
-      else resolve();
+      if (next < order.length) {
+        const sleepMs = Math.max(0.1, order[next].t - elapsedMs);
+        // setImmediate when we're already past the schedule; setTimeout
+        // for sleeps ≥ 1 ms (Node's resolution).
+        if (sleepMs <= 0.1) setImmediate(tick);
+        else setTimeout(tick, sleepMs);
+      } else {
+        resolve();
+      }
     };
     tick();
   });
+
+  if (opts.summary !== 'csv' && (opts.jitterSd > 0 || opts.burstEvery > 0)) {
+    const actualIntervals = [];
+    for (let i = 1; i < order.length; i++) {
+      actualIntervals.push(sendActualMs[i] - sendActualMs[i - 1]);
+    }
+    let mn = Infinity, mx = -Infinity, mean = 0;
+    for (const v of actualIntervals) { if (v < mn) mn = v; if (v > mx) mx = v; mean += v; }
+    mean /= actualIntervals.length;
+    let varSum = 0;
+    for (const v of actualIntervals) varSum += (v - mean) * (v - mean);
+    const sd = Math.sqrt(varSum / actualIntervals.length);
+    console.log(`[test] actual send intervals (ms): mean=${mean.toFixed(3)} sd=${sd.toFixed(3)} min=${mn.toFixed(2)} max=${mx.toFixed(2)}`);
+  }
 
   // Allow a final 200 ms for in-flight packets to land.
   await new Promise((r) => setTimeout(r, 200));
@@ -333,13 +579,27 @@ async function main() {
     process.exit(2);
   }
   const useEnd = captured;
-  // Round down to a multiple of (sampleRate / freq) for cleanest Goertzel binning
-  const wholeCycles = Math.floor((useEnd - skipSamples) * opts.freq / SAMPLE_RATE);
-  const useLen = Math.floor(wholeCycles * SAMPLE_RATE / opts.freq);
+  // For tonal signals we round down to a whole number of fundamental cycles
+  // so Goertzel bins line up; for noise / voice (AM-modulated, not a pure
+  // tone) just use everything we captured after the prime-skip.
+  let useLen;
+  if (opts.signal === 'sine') {
+    const wholeCycles = Math.floor((useEnd - skipSamples) * opts.freq / SAMPLE_RATE);
+    useLen = Math.floor(wholeCycles * SAMPLE_RATE / opts.freq);
+  } else {
+    useLen = useEnd - skipSamples;
+  }
   const window = captureFloat.subarray(skipSamples, skipSamples + useLen);
 
-  const r = analyse(window, opts.freq);
-  console.log('');
+  // Goertzel-based SNR/THD analysis only makes sense for tonal signals.
+  // Noise has no fundamental and voice has an AM envelope that smears
+  // the bin, so for those modes we skip Goertzel — click metrics carry
+  // the useful information.
+  const r = (opts.signal === 'sine')
+    ? analyse(window, opts.freq)
+    : { snrDb: NaN, thd: NaN, peakAmp: NaN, harmonics: [], fundPower: 0 };
+  const clk = detectClicks(window);
+
   // Measure the server's actual broadcast rate from receive timestamps.
   // Should be ~200/s with the v1.0.28 absolute-deadline timer; significant
   // deviation indicates timer drift has crept back in.
@@ -349,25 +609,78 @@ async function main() {
   const ratePpmSign = ratePpm >= 0 ? '+' : '';
   const RATE_PPM_BUDGET = 5000;  // ≤ 0.5 % away from 200/s
 
+  const ratePass = Math.abs(ratePpm) <= RATE_PPM_BUDGET;
+  // SNR / THD pass criteria are skipped automatically when (a) jitter is
+  // injected — PLC fills inevitably broaden the noise floor; or (b) the
+  // signal is white noise — there's no fundamental to measure SNR
+  // against. The click-rate / normalized-energy metrics are the primary
+  // signal in those cases; SNR/THD remain useful for detecting pure-mixer
+  // regressions on the no-jitter sine baseline.
+  const jitterActive = opts.jitterSd > 0 || opts.burstEvery > 0;
+  const skipTonal = jitterActive || opts.signal !== 'sine';
+  const snrPass = skipTonal ? true : r.snrDb >= opts.snrPass;
+  const thdPass = skipTonal ? true : r.thd <= opts.thdPass;
+  const pass = snrPass && thdPass && ratePass;
+
+  if (opts.summary === 'csv') {
+    // One-line tab-separated record for sweep aggregation. Header (printed by
+    // jitter_scenarios.sh) describes the columns.
+    const plcRate = (clk.durationSec > 0) ? plcFiredCount / clk.durationSec : 0;
+    const cols = [
+      opts.signal,
+      opts.freq,
+      opts.amp.toFixed(3),
+      opts.seconds.toFixed(2),
+      opts.jitterSd.toFixed(1),
+      opts.burstEvery,
+      opts.burstHoldMs,
+      Number.isFinite(r.snrDb) ? r.snrDb.toFixed(2) : 'n/a',
+      Number.isFinite(r.thd)   ? (r.thd * 100).toFixed(3) : 'n/a',
+      ratePpm,
+      plcFiredCount,
+      plcRate.toFixed(2),
+      primingTicks,
+      clk.count,
+      clk.rate.toFixed(2),
+      clk.normEnergy.toExponential(3),
+      pass ? 'PASS' : 'FAIL',
+    ];
+    console.log(cols.join('\t'));
+    process.exit(pass ? 0 : 1);
+  }
+
+  console.log('');
   console.log(`[test] tx frames:  ${txCount}`);
   console.log(`[test] rx packets: ${rxLossWindow.size}`);
   console.log(`[test] broadcast rate: ${broadcastRate.toFixed(2)}/s ` +
               `(${ratePpmSign}${ratePpm} ppm vs 200/s, budget ±${RATE_PPM_BUDGET})`);
-  console.log(`[test] window:     ${window.length} samples (${(window.length / SAMPLE_RATE).toFixed(3)} s, ${wholeCycles} cycles of ${opts.freq} Hz)`);
-  console.log(`[test] peak amp:   ${r.peakAmp.toFixed(4)}  (sent amplitude=${opts.amp.toFixed(4)})`);
-  console.log(`[test] SNR:        ${r.snrDb.toFixed(2)} dB    (pass ≥ ${opts.snrPass})`);
-  console.log(`[test] THD:        ${(r.thd * 100).toFixed(3)} %    (pass ≤ ${(opts.thdPass * 100).toFixed(2)})`);
-  console.log(`[test] top 5 harmonics (relative to fundamental):`);
-  const ranked = r.harmonics
-    .map((h, i) => ({ ...h, n: i + 2, rel: 10 * Math.log10(h.power / Math.max(r.fundPower, 1e-30)) }))
-    .sort((a, b) => b.power - a.power)
-    .slice(0, 5);
-  for (const h of ranked) {
-    console.log(`         H${h.n} (${h.freq} Hz):  ${h.rel.toFixed(2)} dB`);
+  console.log(`[test] signal:     ${opts.signal}` + (opts.signal === 'sine' ? ` ${opts.freq} Hz` : ''));
+  console.log(`[test] window:     ${window.length} samples (${(window.length / SAMPLE_RATE).toFixed(3)} s)`);
+  if (opts.signal === 'sine') {
+    console.log(`[test] peak amp:   ${r.peakAmp.toFixed(4)}  (sent amplitude=${opts.amp.toFixed(4)})`);
+    console.log(`[test] SNR:        ${r.snrDb.toFixed(2)} dB    (pass ≥ ${opts.snrPass}${skipTonal ? ', SKIPPED' : ''})`);
+    console.log(`[test] THD:        ${(r.thd * 100).toFixed(3)} %    (pass ≤ ${(opts.thdPass * 100).toFixed(2)}${skipTonal ? ', SKIPPED' : ''})`);
+  }
+  if (jitterActive) {
+    console.log(`[test] jitter:     SD=${opts.jitterSd} ms, burstEvery=${opts.burstEvery}, burstHold=${opts.burstHoldMs} ms`);
+  }
+  const plcRate = (clk.durationSec > 0) ? plcFiredCount / clk.durationSec : 0;
+  console.log(`[test] PLC fires:  ${plcFiredCount} packets   (${plcRate.toFixed(2)}/s, after ${primingTicks} priming ticks)`);
+  console.log(`[test] click rate: ${clk.rate.toFixed(2)}/s   (${clk.count} events in ${clk.durationSec.toFixed(2)} s)`);
+  console.log(`[test] click jump: median=${clk.median.toFixed(5)}  p90=${clk.p90.toFixed(5)}  max=${clk.max.toFixed(5)}`);
+  console.log(`[test] click jump / signal RMS: median=${(clk.signalRms ? clk.median / clk.signalRms : 0).toFixed(2)}×  p90=${(clk.signalRms ? clk.p90 / clk.signalRms : 0).toFixed(2)}×`);
+  console.log(`[test] norm click energy / signal energy / s: ${clk.normEnergy.toExponential(3)}`);
+  if (opts.signal === 'sine' && r.harmonics.length) {
+    console.log(`[test] top 5 harmonics (relative to fundamental):`);
+    const ranked = r.harmonics
+      .map((h, i) => ({ ...h, n: i + 2, rel: 10 * Math.log10(h.power / Math.max(r.fundPower, 1e-30)) }))
+      .sort((a, b) => b.power - a.power)
+      .slice(0, 5);
+    for (const h of ranked) {
+      console.log(`         H${h.n} (${h.freq} Hz):  ${h.rel.toFixed(2)} dB`);
+    }
   }
 
-  const ratePass = Math.abs(ratePpm) <= RATE_PPM_BUDGET;
-  const pass = r.snrDb >= opts.snrPass && r.thd <= opts.thdPass && ratePass;
   if (!ratePass) {
     console.log(`[test] rate FAIL: drift exceeds ±${RATE_PPM_BUDGET} ppm — server timer regression?`);
   }

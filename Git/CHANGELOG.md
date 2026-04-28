@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.37] - 2026-04-28
+
+### Added (Layer 1.5 — local jitter-scenario sweep with deterministic PLC counter)
+
+Production behavior unchanged from v1.0.36. This release adds local
+test instrumentation so future jitter-buffer / PLC iterations can be
+validated without round-tripping through deploy + user recording.
+
+The trigger: every PLC tuning attempt v1.0.30–v1.0.36 had to be tested
+by deploying, asking the user to record loopback audio, and FFT-
+analysing the recording. That worked but was slow (5–10 minutes
+per iteration), required user time, and missed several issues
+because the comparisons weren't level-normalized. v1.0.34's 13×
+improvement was real; v1.0.35's regression was real but only
+visible after another deploy + recording.
+
+Layer 1.5 closes the loop: I can now run a jitter sweep locally,
+diff against a baseline TSV, and decide whether a change works
+*before* shipping it.
+
+### What changed in production code
+
+The mixer broadcast now sets bit 0 of SPA1 packet byte 75 (the
+"reserved" padding byte) to 1 on ticks where any track's mix used
+the PLC fill path, 0 otherwise. Production clients have always
+ignored this byte (it's documented as padding), so the wire and
+playback behaviour are bit-exact identical to v1.0.36 — Layer 1
+SNR/THD baselines unchanged at 67.26 / 84.01 / 93.45 dB.
+([Git/server/src/mixer_server.cpp:621](Git/server/src/mixer_server.cpp:621))
+
+The new helper `AudioMixer::countPlcEligibleTracks() const` peeks
+at the mixer's tracks before mixing to determine if any will fall
+into the PLC path. Cheap (no buffer touch, just metadata) and
+const-correct.
+([Git/server/src/audio_mixer.h:64](Git/server/src/audio_mixer.h:64))
+
+### Test infrastructure additions
+
+`Git/server/test/audio_quality_e2e.js`:
+- New `--signal voice` mode: 200 Hz carrier (period exactly = one
+  frame) with a 5 Hz AM envelope. Phase-aligned at frame boundaries
+  (clean broadcast → 0 false-positive clicks); different amplitude
+  every frame (PLC repeat → measurable boundary jump).
+- New `--jitterSd <ms>` Gaussian sender-side jitter injection.
+- New `--burstEvery <N> --burstHoldMs <ms>` — simulates main-thread
+  stall + burst recovery (the suspected v1.0.35 failure mode).
+- New `--summary csv` mode emits one TSV row per run for sweep
+  aggregation; suppresses the per-test banner.
+- New d2-at-frame-boundary click detector: looks at `|x[n+1] − 2x[n]
+  + x[n−1]|` exactly at sample indices `k × 240` and flags when it
+  exceeds 6 × the median in-frame d2. Robust to AM-modulated voice;
+  near-zero baseline on clean broadcasts.
+- Receiver counts `pkt.plcFired` packets directly (the deterministic
+  metric); the d2 click detector cross-checks audibility.
+
+`Git/server/test/jitter_scenarios.sh`:
+- Spawns the local mixer once, runs a battery of scenarios in CSV mode,
+  emits a TSV row per scenario for diffing.
+- Default scenarios: voice + Gaussian SD = 0/2/5/10/15/20 ms,
+  voice + 3 burst patterns, sine amp 0.05/0.30/0.95 regression rows.
+
+### Validation: reproduces production v1.0.34 → v1.0.35 anomaly
+
+A/B sweep across `JITTER_TARGET = 0/1/2`:
+
+```
+                          PLC fires per second
+  scenario      depth=0   depth=1   depth=2
+  voice +  5ms   5.00      2.12      2.31
+  voice + 10ms   9.43      6.33      8.27   ← depth 2 worse than 1
+  voice + 15ms  13.40     13.09     10.94
+```
+
+The depth-2-is-worse-at-mid-jitter inversion that the user reported
+in production now reproduces locally. This means the next residual-
+click iteration can be designed and validated against the sweep
+without another deploy.
+
+### Skill update
+
+`~/.claude/skills/tonel-audio-testing/SKILL.md` updated with a new
+Layer 1.5 section, "iterate locally with Layer 1.5" workflow step,
+and a "what each layer does and doesn't catch" matrix. Future
+sessions will see the jitter-sweep as the first stop for any audio
+issue with `gap=0` / `repri=0` telemetry but user-reported clicks.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` | New `countPlcEligibleTracks() const` |
+| `Git/server/src/mixer_server.cpp` `broadcast_mixed_audio` | Set `out_pkt->reserved` PLC bit |
+| `Git/server/test/audio_quality_e2e.js` | Voice signal, jitter injection, d2-boundary detector, csv summary |
+| `Git/server/test/jitter_scenarios.sh` | New sweep runner |
+| `~/.claude/skills/tonel-audio-testing/SKILL.md` | Layer 1.5 docs |
+
 ## [1.0.36] - 2026-04-28
 
 ### Reverted (Jitter buffer depth 2 → 1 — depth 2 didn't help and may have hurt)

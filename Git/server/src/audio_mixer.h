@@ -64,6 +64,13 @@ public:
     // Compute RMS level (0.0 - 1.0) for a specific track
     float getTrackLevel(const std::string& userId) const;
 
+    // Count tracks that will use the PLC path on the next mix call —
+    // i.e. those with no fresh frame this tick but a usable prevAudio
+    // snapshot. Lets the broadcast loop tag outgoing packets with a
+    // "PLC-fired this tick" flag for end-to-end test instrumentation,
+    // without an instrumented mix() variant or a stateful counter.
+    int countPlcEligibleTracks() const;
+
 private:
     static constexpr int MAX_FRAME_COUNT = 480;  // 10ms @ 48kHz (max for 5ms x2 safety)
 
@@ -147,6 +154,20 @@ inline float AudioMixer::getTrackLevel(const std::string& userId) const {
     auto it = tracks_.find(userId);
     if (it == tracks_.end()) return 0.0f;
     return it->second.lastRms;
+}
+
+inline int AudioMixer::countPlcEligibleTracks() const {
+    // A track will go through the PLC path on the next mix iff it has
+    // no fresh frame queued (frameCount == 0), has a previous frame
+    // snapshot (hasPrev), and hasn't fully decayed yet
+    // (decayCount < PLC_MAX_DECAY). Cheap to compute — no buffer touch,
+    // just metadata.
+    int count = 0;
+    for (const auto& kv : tracks_) {
+        const Track& t = kv.second;
+        if (t.frameCount == 0 && t.hasPrev && t.decayCount < PLC_MAX_DECAY) ++count;
+    }
+    return count;
 }
 
 inline void AudioMixer::setWeight(const std::string& userId, float weight) {
