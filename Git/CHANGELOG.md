@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.12] - 2026-04-28
+
+### Fixed (Web Playback — "音量小也失真" residual distortion)
+
+- **`playPcm16` now feeds the existing AudioWorklet ring instead of
+  scheduling a fresh `AudioBufferSourceNode` per 5 ms frame.** The
+  worklet had been wired up since v1.0.x but `playPcm16` never used it
+  — it took the `createBuffer` fallback path. With a per-frame source,
+  Web Audio resamples each 5 ms buffer independently when the
+  `AudioContext` ends up at 44.1 kHz instead of the 48 kHz we request
+  (Bluetooth output, system mixer overrides). Each resampling kernel
+  tail saw zero-padding instead of the next buffer's first samples, so
+  every 5 ms boundary leaked a small click. Stacked at 200 Hz the
+  clicks turned into a continuous gritty floor noise that listeners
+  reported as "amplitude-independent distortion" — v1.0.11's soft clip
+  couldn't help because the audio wasn't clipping at all, it was
+  resampling-boundary noise. The worklet path emits a continuous sample
+  stream (one resampling pass per packet at the producer side, then no
+  per-buffer kernels in the audio thread) so frame boundaries are
+  sample-exact.
+  ([Git/web/src/services/audioService.ts:635](Git/web/src/services/audioService.ts:635))
+
+- **Producer-side linear resampler.** When the AudioContext rate
+  differs from 48 kHz, each incoming PCM frame is resampled once to
+  the context rate before being posted to the worklet. This keeps the
+  worklet's ring at the consumer rate so it never overruns — the bug
+  that caused the previous worklet path to be abandoned. Linear
+  interpolation is chosen for simplicity and CPU; for VoIP-grade
+  speech the audible difference vs. polyphase is below the noise
+  floor introduced elsewhere in the chain.
+  ([Git/web/src/services/audioService.ts:135](Git/web/src/services/audioService.ts:135))
+
+### Added (Audio QA Infrastructure)
+
+- **End-to-end audio quality automated test.** Spins up a local mixer,
+  runs two SPA1 clients (sender + receiver) through it, sends a known
+  1 kHz sine wave, computes SNR and THD on the received signal via
+  Goertzel. Replaces the manual "ask the user to listen" loop for
+  server-side regressions; lets us bisect new distortion against a
+  baseline in seconds. Current baseline at amp=0.3:
+  SNR 84 dB, THD 0.006 %.
+  ([Git/server/test/audio_quality_e2e.js](Git/server/test/audio_quality_e2e.js),
+  [Git/server/test/run.sh](Git/server/test/run.sh))
+
+  Scope note: this test covers the network path and server mix only —
+  it does **not** cover the Web Audio playback path or the AppKit
+  miniaudio playback path. v1.0.12's web fix was diagnosed by reading
+  the playback code, not by this test. A browser-level test (Playwright
+  or similar) is the next layer of QA infrastructure to build.
+
+### Latency impact
+Zero added latency. Linear resample is O(N) per packet, runs once on
+the producer thread; the worklet's `process()` is the same cost as
+before. Worklet eliminates the 40 ms playback-lookahead cushion that
+the createBuffer path needed for jitter absorption — the worklet's
+ring is the cushion now and runs ~10 ms by default, so end-to-end
+playback latency drops by ~30 ms in the common case.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `playPcm16` | Route packets to existing `playbackWorklet` ring; keep `createBuffer` only as a fallback for worklet-init failure |
+| `Git/web/src/services/audioService.ts` `linearResample` | New helper: linear interpolation from 48 kHz to AudioContext rate, called once per packet |
+| `Git/server/test/audio_quality_e2e.js` | New: Node SPA1 client pair + Goertzel SNR/THD analysis |
+| `Git/server/test/run.sh` | New: starts local mixer, runs the test, tears down |
+
 ## [1.0.11] - 2026-04-28
 
 ### Fixed (Server Mixer — "音量稍大失真噪音")

@@ -141,6 +141,29 @@ function pcm16ToFloat32(pcm: Uint8Array): Float32Array {
   return out
 }
 
+// Linear-interpolation resampler — used to match incoming 48 kHz PCM to the
+// AudioContext's actual sample rate when the browser overrides our 48 kHz
+// hint (Bluetooth output, system mixer at 44.1 kHz). Linear is good enough
+// for VoIP-grade content; the alternative — letting Web Audio resample each
+// 5 ms buffer independently — produces a discontinuity at every buffer
+// boundary that listeners hear as a continuous 200 Hz floor noise.
+function linearResample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
+  if (fromRate === toRate) return input
+  const ratio = fromRate / toRate
+  const outLen = Math.floor(input.length / ratio)
+  const out = new Float32Array(outLen)
+  const lastSrc = input.length - 1
+  for (let i = 0; i < outLen; i++) {
+    const srcPos = i * ratio
+    const idx = srcPos | 0
+    const frac = srcPos - idx
+    const a = input[idx]
+    const b = idx < lastSrc ? input[idx + 1] : a
+    out[i] = a + (b - a) * frac
+  }
+  return out
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AudioService
 // ─────────────────────────────────────────────────────────────────────────────
@@ -649,25 +672,41 @@ class AudioService {
     this.rxLevel = Math.sqrt(rxSum / f32.length)
     this.playCount++
 
-    // Build a 5ms buffer at the wire rate (48 kHz). createBuffer takes a
-    // sample-rate argument independent of the AudioContext rate — Web Audio
-    // resamples on connect, so this still plays correctly when the context
-    // ends up at 44.1 kHz (Bluetooth, system override). The previous worklet
-    // ring path skipped this resample and overran the ring whenever the
-    // context wasn't 48 kHz, which surfaced as constant static.
+    // Preferred path: feed the AudioWorklet's ring buffer.
+    //
+    // The worklet runs at the AudioContext's actual sample rate and emits
+    // a continuous sample stream — consecutive 5 ms frames join with no
+    // boundary, so there's no per-buffer resampling kernel and no
+    // periodic discontinuity. We resample once at the producer side
+    // when the context isn't 48 kHz so the ring doesn't accumulate.
+    //
+    // The previous fallback (createBuffer + AudioBufferSourceNode per
+    // 5 ms frame) made Web Audio resample every buffer independently:
+    // each kernel tail saw zero-padding instead of the next buffer's
+    // first samples, so every 5 ms boundary leaked a small click.
+    // Stacked at 200 Hz the clicks were continuous gritty distortion
+    // independent of voice amplitude — the symptom v1.0.11's soft clip
+    // didn't cure because the source isn't clipping at all, it's
+    // resampling boundary noise.
+    if (this.playbackWorklet) {
+      const ctxRate = this.audioContext.sampleRate
+      const out = linearResample(f32, SAMPLE_RATE, ctxRate)
+      // Transferable to avoid copying a 480-byte buffer 200 times/s.
+      this.playbackWorklet.port.postMessage(out, [out.buffer])
+      return
+    }
+
+    // Fallback: createBuffer scheduling. Used only when the worklet
+    // failed to initialize (very old browsers). Has the resampling-
+    // boundary problem described above — keep as a graceful degradation
+    // so we don't go fully silent if the worklet path breaks.
     const buffer = this.audioContext.createBuffer(CHANNELS, f32.length, SAMPLE_RATE)
     buffer.getChannelData(0).set(f32)
     const src = this.audioContext.createBufferSource()
     src.buffer = buffer
     src.connect(this.masterGain)
-
-    // Schedule on a continuous timeline so consecutive 5ms frames are
-    // sample-exact. start(0) (the first attempt) overlapped on bursts and
-    // left gaps on late packets; this preserves frame boundaries.
     const now = this.audioContext.currentTime
     if (this.playTime < now + 0.005) {
-      // Fallen behind real time — re-anchor with a lookahead cushion so the
-      // next few frames have room to absorb jitter.
       this.playTime = now + this.PLAYBACK_LOOKAHEAD_SEC
     }
     src.start(this.playTime)
