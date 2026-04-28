@@ -667,7 +667,19 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         }
     }
 
-    // Per-recipient N-1 PCM16 mix and broadcast — caller must hold rooms_mutex_.
+    // Per-recipient PCM16 mix and broadcast — caller must hold rooms_mutex_.
+    //
+    // Solo loopback fallback: when the room has only one user, "everyone
+    // except me" is empty and N-1 mix produces pure silence. That's the
+    // correct conferencing-app behavior (Zoom/Meet/Teams all do this) but
+    // not a useful default for Tonel's setup/rehearsal flow — users
+    // verifying their mic + headphones before bandmates join should hear
+    // themselves loop back, otherwise they can't tell if the chain works
+    // end-to-end. So we send the full mix to a solo user, and switch to
+    // N-1 the moment a second user joins. This is exactly the threshold
+    // where self-echo starts mattering: with one user there's no mix
+    // partner to comb against, so the loopback is just a clean copy.
+    const bool soloMode = (room->users.size() <= 1);
     std::vector<float>   recipientMix(frame_count);
     std::vector<uint8_t> pcm_encoded(frame_count * sizeof(int16_t));
     for (const auto& kv : room->users) {
@@ -675,8 +687,11 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         const UserEndpoint& ue = kv.second;
         const struct sockaddr_in& addr = ue.addr;
 
-        // N-1 mix (everyone *but* this recipient) — fresh per recipient.
-        room->mixer.mixExcluding(kv.first, recipientMix.data(), frame_count);
+        if (soloMode) {
+            std::copy(fullMix.begin(), fullMix.end(), recipientMix.begin());
+        } else {
+            room->mixer.mixExcluding(kv.first, recipientMix.data(), frame_count);
+        }
         float_to_pcm16(recipientMix.data(),
                        reinterpret_cast<int16_t*>(pcm_encoded.data()),
                        frame_count);

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.16] - 2026-04-28
+
+### Fixed (Mixer — solo user heard silence)
+
+v1.0.15's N-1 mix made every recipient hear the sum of *other* users
+instead of themselves looped back. Industry-standard for conferencing,
+but for Tonel's setup/rehearsal flow it broke the most common
+sanity-check: open the page alone, speak into the mic, verify the
+chain works end to end. With one user in the room, "everyone except
+me" is empty and the recipient got 200 packets/s of silence
+(`tx=N rx=N play=N rxLvl=0.0000` — exactly what listeners reported).
+
+### Fix
+
+- **Solo loopback fallback in `broadcast_mixed_audio`.** When a room
+  has ≤ 1 user, send the full mix (which is just the lone user's own
+  audio) so they hear themselves. The moment a second user joins,
+  switch to N-1 mix automatically — the threshold where self-echo
+  starts mattering. One conditional, no per-user toggle, no UI.
+  ([Git/server/src/mixer_server.cpp:678](Git/server/src/mixer_server.cpp:678))
+
+### Latency impact
+None. Same mix passes per tick, just different selection of which
+tracks get included.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/mixer_server.cpp` `broadcast_mixed_audio` | Branch on `room->users.size() <= 1`: solo → full mix copy; multi → existing N-1 mix |
+
 ## [1.0.15] - 2026-04-28
 
 ### Fixed (Server Mixer — "失真与原音频音量正相关")
