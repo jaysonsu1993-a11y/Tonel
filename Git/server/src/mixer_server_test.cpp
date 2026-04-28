@@ -261,12 +261,12 @@ static int test_soft_clip_above_knee() {
 // packet past its tick, because the mixer broadcast a 5 ms zero gap
 // in place of the missing frame; users heard that as continuous "破音".
 //
-// PLC behaviour, per addTrack():
+// PLC behaviour, per addTrack() (PLC_MAX_DECAY = 5 since v3.1.0):
 //   mix #1 (fresh)        : full amplitude
-//   mix #2 .. #11 (misses): cosine-tapered replay of the previous frame,
+//   mix #2 .. #6 (misses) : cosine-tapered replay of the previous frame,
 //                           starting at fade(0)=1.0 and dropping monotonically
-//                           to fade(9)≈0.024 over PLC_MAX_DECAY=10 ticks
-//   mix #12+ (still missing): silent — the bounded decay protects against
+//                           to fade(4)≈0.095 over PLC_MAX_DECAY=5 ticks
+//   mix #7+ (still missing): silent — the bounded decay protects against
 //                              the 200 Hz buzz hazard the original consume
 //                              invariant was guarding against.
 static int test_plc_fade_after_consume() {
@@ -283,10 +283,10 @@ static int test_plc_fade_after_consume() {
     }
 
     // Subsequent mixes without addTrack: PLC replay, monotonically decreasing,
-    // reaching silence by mix #12 (after PLC_MAX_DECAY=10 consecutive misses).
+    // reaching silence by mix #7 (after PLC_MAX_DECAY=5 consecutive misses).
     float prev = 0.5f;
     int silent_at = -1;
-    for (int k = 1; k <= 13; ++k) {
+    for (int k = 1; k <= 8; ++k) {
         m.mix(out, 480);
         const float v = out[0];
         if (v > prev + 1e-5f) {
@@ -296,8 +296,8 @@ static int test_plc_fade_after_consume() {
         if (v <= 1e-6f && silent_at < 0) silent_at = k + 1;
         prev = v;
     }
-    if (silent_at < 0 || silent_at > 12) {
-        std::fprintf(stderr, "FAIL: test_plc_fade_after_consume — track did not reach silence by mix #12 (silent_at=%d)\n", silent_at);
+    if (silent_at < 0 || silent_at > 7) {
+        std::fprintf(stderr, "FAIL: test_plc_fade_after_consume — track did not reach silence by mix #7 (silent_at=%d)\n", silent_at);
         return 1;
     }
     std::printf("PASS: test_plc_fade_after_consume (silent at mix #%d)\n", silent_at);

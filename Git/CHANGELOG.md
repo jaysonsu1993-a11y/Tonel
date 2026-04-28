@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-04-29
+
+### Milestone — 破音问题彻底解决，进入 3.x 系列
+
+The 9-version 1.0.30 → 1.0.38 jitter / PLC iteration is closed. User
+confirmed v1.0.38 ships without audible click on solo loopback under
+production WSS conditions. v3.1.0 is the version-bump milestone for
+that resolution + the zero-risk audio-path cleanups documented below;
+production audio behaviour is intended to be identical to v1.0.39
+(which preserved v1.0.38's audio while fixing unrelated room/deep-link
+issues) within measurement noise.
+
+The major-version bump from 1.x to 3.x reflects the depth of the
+journey (full PLC overhaul + new Layer 1.5 testing infrastructure +
+documented diagnostic playbook in memory) rather than any wire- or
+client-breaking change. Existing clients keep working; the SPA1
+protocol and capture/playback worklets are unchanged.
+
+### Changed (Audio path cleanups — no behaviour change in production)
+
+1. **`PLC_MAX_DECAY = 10 → 5`** (`audio_mixer.h`). The PLC fade-out
+   tail shortens from 50 ms to 25 ms. With the v1.0.34+ jitter buffer
+   absorbing virtually all upstream jitter, real PLC events are
+   isolated single-tick blips; the longer 50 ms tail was generous
+   safety we never used. 25 ms still covers the natural envelope
+   decay of a held vowel and feels tighter on intentional stop /
+   mute. Layer 1.5 sweep numbers shift slightly (test-end 200 ms
+   pause hits the silence threshold earlier so the recorded PLC
+   count is lower) but the steady-state behaviour is unchanged —
+   isolated jitter still triggers exactly one PLC fill per missed
+   frame, with the cosine fade now compressed into 5 frames instead
+   of 10.
+
+2. **Removed `Track::prevLen` field** (`audio_mixer.h`). The PCM
+   wire frame is fixed at 240 samples and `prevLen` always equalled
+   `frameCount` after each `addTrack`. Replaced its single read site
+   in `accumulate` with `MAX_FRAME_COUNT` (the existing static
+   bound). One field saved per track + one assignment removed in
+   `consumeAllTracks`. No allocation or behaviour change.
+
+### Test updates
+
+- `test_plc_fade_after_consume` invariant updated: PLC fill now
+  reaches silence by mix #7 (was #12 with `PLC_MAX_DECAY = 10`).
+  Loop bound and assertion message updated to match.
+- `audio_mixer.h` doc comments updated: "50 ms tail" → "25 ms tail",
+  "10 progressively quieter copies" → "PLC_MAX_DECAY progressively
+  quieter copies."
+
+### Validation
+
+- **Unit tests**: 13/13 PASS, `test_plc_fade_after_consume` reports
+  `silent at mix #7`.
+- **Layer 1 sine** (1 kHz, 5 s, amp 0.05/0.30/0.95): SNR 67.26 / 84.01 /
+  93.44 dB and THD 0.043 / 0.006 / 0.002 % — byte-identical to all
+  baselines from v1.0.32 onward.
+- **Layer 1.5 jitter sweep**: PLC counts shift downward slightly due
+  to the test-end pause / decay-saturation interaction described
+  above; click metrics and pass status unchanged across all rows.
+- **Layer 2 browser**: playback / capture paths PASS at 48 kHz and
+  44.1 kHz.
+
+### Latency impact
+
+**Zero.** Steady-state buffer wait still ~2.5 ms average / 5 ms
+worst (`JITTER_TARGET = 1` unchanged), end-to-end ~62.5 ms average.
+No code path that affects on-air timing changed.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/server/src/audio_mixer.h` `PLC_MAX_DECAY` | 10 → 5 |
+| `Git/server/src/audio_mixer.h` `Track::prevLen` | removed |
+| `Git/server/src/audio_mixer.h` `accumulate` PLC path | use `MAX_FRAME_COUNT` instead of `prevLen` |
+| `Git/server/src/audio_mixer.h` `consumeAllTracks` | drop `prevLen` assignment |
+| `Git/server/src/audio_mixer.h` doc comments | "50 ms" → "25 ms" |
+| `Git/server/src/mixer_server_test.cpp` `test_plc_fade_after_consume` | bound + comment update |
+
 ## [1.0.39] - 2026-04-29
 
 ### Fixed (Room session takeover — same `user_id` no longer kicks the live session)

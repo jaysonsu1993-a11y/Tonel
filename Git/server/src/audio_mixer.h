@@ -78,11 +78,14 @@ private:
     // When a tick fires with no fresh frame for a track, mix the previous
     // frame at a cosine-tapered gain instead of contributing silence. After
     // PLC_MAX_DECAY consecutive misses the track contributes nothing and
-    // stays silent until a fresh addTrack() arrives. 10 frames @ 5 ms =
-    // 50 ms — long enough for the natural envelope decay of held vowels
-    // and short enough that a real silence (user muted) doesn't leak more
-    // than 50 ms past the actual stop.
-    static constexpr int PLC_MAX_DECAY = 10;
+    // stays silent until a fresh addTrack() arrives.
+    // v3.1.0: trimmed from 10 to 5 (50 ms tail → 25 ms tail). With the
+    // server-side jitter buffer (target=1, cap=8) absorbing virtually all
+    // upstream jitter, PLC events are isolated 1-tick blips with very
+    // rare 2+ consecutive misses; the longer fade tail was generous safety
+    // we never used. 25 ms still covers the natural envelope decay of a
+    // held vowel while feeling tighter on intentional stop / mute.
+    static constexpr int PLC_MAX_DECAY = 5;
 
     // PLC playback is plain forward repeat of the previous frame.
     //
@@ -110,7 +113,6 @@ private:
         float audio[MAX_FRAME_COUNT];     // preallocated fixed-size buffer
         float prevAudio[MAX_FRAME_COUNT]; // last frame mixed at full amplitude — source for PLC fill
         int frameCount = 0;               // > 0 when fresh data is awaiting mix; reset to 0 by consumeAllTracks()
-        int prevLen    = 0;               // length of prevAudio when last snapshotted (for boundary lookup)
         int decayCount = 0;               // # consecutive ticks since last fresh frame, [0 .. PLC_MAX_DECAY]
         bool hasPrev   = false;           // prevAudio holds a valid frame ready for PLC fill
         float weight   = 1.0f;
@@ -192,7 +194,7 @@ inline void AudioMixer::accumulate(const std::string* excludeUserId, float* outp
             } else {
                 for (int i = 0; i < count; ++i) output[i] += src[i] * w;
             }
-        } else if (t.hasPrev && t.decayCount < PLC_MAX_DECAY && t.prevLen > 0) {
+        } else if (t.hasPrev && t.decayCount < PLC_MAX_DECAY) {
             // No fresh frame — PLC fill: replay the previous frame at a
             // cosine-tapered gain. fade(0)=1.0 (first miss = full replay),
             // fade(PLC_MAX_DECAY-1)≈0 (last miss before silence). This
@@ -203,7 +205,7 @@ inline void AudioMixer::accumulate(const std::string* excludeUserId, float* outp
             const float fade = 0.5f * (1.0f + std::cos(static_cast<float>(M_PI) * t.decayCount / static_cast<float>(PLC_MAX_DECAY)));
             const float gw   = w * fade;
             const float* src = t.prevAudio;
-            const int  count = std::min(frameCount, t.prevLen);
+            const int  count = std::min(frameCount, MAX_FRAME_COUNT);
             for (int i = 0; i < count; ++i) output[i] += src[i] * gw;
         }
         // else: decay exhausted or never had a frame — contribute silence.
@@ -263,19 +265,19 @@ inline void AudioMixer::consumeAllTracks() {
     //    the 200 Hz click pattern listeners reported through v1.0.29).
     //    Instead, after the one full-amplitude tick, the track keeps
     //    contributing the *previous* frame at a cosine-tapered gain for
-    //    PLC_MAX_DECAY ticks (50 ms), then goes silent. The fade is
+    //    PLC_MAX_DECAY ticks (25 ms), then goes silent. The fade is
     //    computed in accumulate() from `decayCount`; here we just
     //    advance `decayCount` and snapshot fresh frames into `prevAudio`.
     //
     // The 200 Hz buzz hazard from (1) is bounded: PLC fades to zero in
-    // 50 ms, so a stalled track contributes at most 10 progressively
-    // quieter copies of the same frame, never an infinite loop.
+    // 25 ms, so a stalled track contributes at most PLC_MAX_DECAY
+    // progressively quieter copies of the same frame, never an infinite
+    // loop.
     for (auto& kv : tracks_) {
         Track& t = kv.second;
         if (t.frameCount > 0) {
             // Fresh frame just mixed: snapshot it for future PLC and reset decay.
             std::memcpy(t.prevAudio, t.audio, t.frameCount * sizeof(float));
-            t.prevLen    = t.frameCount;
             t.hasPrev    = true;
             t.decayCount = 0;
             t.frameCount = 0;

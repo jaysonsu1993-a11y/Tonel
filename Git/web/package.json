@@ -1,7 +1,7 @@
 {
   "name": "tonel-web",
   "private": true,
-  "version": "1.0.39",
+  "version": "3.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
