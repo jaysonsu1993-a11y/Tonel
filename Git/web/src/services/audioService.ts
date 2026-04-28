@@ -186,6 +186,9 @@ export class AudioService {
   public rxLevelPeak = 0  // peak-hold of rxLevel — useful when packets alternate
                           // between speech and gaps; raw rxLevel can be 0 between
                           // syllables and mislead debugging.
+  public playReprimeCount = 0   // playback worklet underrun events (every one is a click)
+  public rxSeqGapCount    = 0   // received SPA1 packets out-of-order or missing
+  private rxLastSeq = -1
   get audioWsState(): string {
     const ws = this.audioWs
     if (!ws) return 'null'
@@ -411,8 +414,30 @@ export class AudioService {
     //      empty under normal jitter.
     //   4. Mono input is fanned out to every destination channel so the
     //      right speaker isn't silent on stereo destinations.
+    // Jitter cushion sizing.
+    //
+    // PRIME_TARGET sets the steady-state ring depth — i.e., how many
+    // input-rate samples we keep buffered while playing. It's also the
+    // playback latency: ring takes ~PRIME_TARGET/48000 seconds to drain.
+    //
+    // PRIME_MIN is the floor: if the ring drops below this mid-callback
+    // we silence the rest of the callback and re-prime.
+    //
+    // v1.0.13 set these to 480 / 128 (10 ms / 2.7 ms). A 10 ms cushion
+    // is tight enough that any network jitter > ~7 ms drops the ring
+    // below the floor and fires a re-prime. Each re-prime is an
+    // instantaneous audio→silence transition — a discontinuity that
+    // the listener hears as a click. Stacked at voice peaks (where the
+    // discontinuity amplitude is largest), the click pattern is what
+    // the user reported as 破音.
+    //
+    // v1.0.23 doubles the cushion to 20 ms. WSS-over-public-internet
+    // jitter is regularly 15+ ms; 20 ms absorbs the common case while
+    // adding only 10 ms of playback latency (well under the perceptual
+    // threshold for "delayed" voice). The audio-thread cost of 480
+    // additional buffered samples is zero (Float32Array, pre-allocated).
     const RING_SIZE    = 48000   // 1 second @ wire rate (48 kHz)
-    const PRIME_TARGET = 480     // 10 ms cushion before draining starts
+    const PRIME_TARGET = 960     // 20 ms cushion before draining starts
     const PRIME_MIN    = 128     // re-prime if ring would drop below this
     const code = `
       class PlaybackProcessor extends AudioWorkletProcessor {
@@ -424,6 +449,7 @@ export class AudioService {
           this.count    = 0          // input-rate samples currently buffered
           this.primed   = false
           this.ratio    = 48000 / sampleRate   // input samples per output sample
+          this.reprimeCount = 0      // how many times we've re-primed (silence event)
           this.port.onmessage = (ev) => {
             let samples = ev.data
             if (samples instanceof ArrayBuffer) samples = new Float32Array(samples)
@@ -449,9 +475,17 @@ export class AudioService {
           if (!channels || !channels[0]) return true
           const out0 = channels[0]
           if (!this.primed || this.count < ${PRIME_MIN}) {
-            this.primed = false
+            // Cold start / fully drained — emit a clean full-callback silence.
             out0.fill(0)
             for (let c = 1; c < channels.length; c++) channels[c].fill(0)
+            // Only count this as a re-prime event the first time we land
+            // here after a primed state, so we don't keep ticking up while
+            // staying in re-prime across many quanta.
+            if (this.primed) {
+              this.reprimeCount++
+              this.port.postMessage({ type: 'reprime', count: this.reprimeCount })
+            }
+            this.primed = false
             return true
           }
           for (let i = 0; i < out0.length; i++) {
@@ -466,8 +500,18 @@ export class AudioService {
             this.count -= (newIdx - idx)
             this.readPos = newReadPos % ${RING_SIZE}
             if (this.count < ${PRIME_MIN}) {
+              // Mid-callback underrun. Fade the last 16 samples we already
+              // wrote (or fewer if i < 16) down to zero — turns a step
+              // discontinuity into a ~330 µs ramp, which the ear hears as
+              // a soft drop instead of a click. Then silence the rest.
+              const fadeLen = i + 1 < 16 ? i + 1 : 16
+              for (let f = 0; f < fadeLen; f++) {
+                out0[i - f] *= f / fadeLen
+              }
               for (let j = i + 1; j < out0.length; j++) out0[j] = 0
               this.primed = false
+              this.reprimeCount++
+              this.port.postMessage({ type: 'reprime', count: this.reprimeCount })
               break
             }
           }
@@ -483,6 +527,9 @@ export class AudioService {
       await this.audioContext.audioWorklet.addModule(url)
       if (!this.audioContext || !this.masterGain) return
       this.playbackWorklet = new AudioWorkletNode(this.audioContext, 'playback-processor')
+      this.playbackWorklet.port.onmessage = (ev) => {
+        if (ev.data?.type === 'reprime') this.playReprimeCount = ev.data.count
+      }
       this.playbackWorklet.connect(this.masterGain)
     } catch (err) {
       console.warn('[Audio] Playback worklet failed, using legacy mode:', err)
@@ -1039,6 +1086,17 @@ export class AudioService {
 
     const pcm = parseSpa1Body(data, header.dataSize)
     const f32 = pcm16ToFloat32(pcm)
+
+    // Sequence-gap detection. SPA1 packets carry a 16-bit sequence number;
+    // a gap (mod 65536) means a UDP packet got dropped or reordered between
+    // server and us. Frequent gaps correlate with the click pattern listeners
+    // hear — the worklet's ring drains during the gap, fires a re-prime, and
+    // the audio→silence→audio transitions are the click.
+    if (this.rxLastSeq >= 0) {
+      const expected = (this.rxLastSeq + 1) & 0xFFFF
+      if (header.sequence !== expected) this.rxSeqGapCount++
+    }
+    this.rxLastSeq = header.sequence
 
     // Compute RMS of received audio for diagnostics
     let rxSum = 0

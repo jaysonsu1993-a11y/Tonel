@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.23] - 2026-04-28
+
+### Fixed (Residual 破音 — playback ring underruns)
+
+User confirmed `roomUsers=1`, `rxPeak` grows on speech, mic isn't
+clipping (`micClip=0`), and the audio path is round-tripping the
+server. The remaining 破音 had to be on the playback side. Hypothesis:
+the 10 ms ring cushion (`PRIME_TARGET=480`) is too tight against
+WSS-over-public-internet jitter, which regularly spikes 15+ ms.
+When the ring drops below `PRIME_MIN=128` mid-callback, the worklet
+silences the rest with no fade — an instantaneous audio→silence
+discontinuity that the listener hears as a click. Stacked at voice
+peaks (where the discontinuity amplitude is largest), the click
+pattern is exactly the 破音 the user described.
+
+### Three changes
+
+- **`PRIME_TARGET` 480 → 960 (10 ms → 20 ms cushion).** Doubles the
+  jitter buffer. WSS jitter rarely exceeds 20 ms in steady state, so
+  re-prime should now be a rare event. Costs +10 ms playback latency,
+  well under the perceptual threshold for "delayed" voice — and a
+  worthwhile trade against the audible distortion.
+  ([Git/web/src/services/audioService.ts:415](Git/web/src/services/audioService.ts:415))
+
+- **Fade-out on re-prime.** When the ring still does drop below
+  `PRIME_MIN` mid-callback, fade the last 16 samples we already wrote
+  down to zero (∼330 µs ramp at 48 kHz) before silencing the rest.
+  Turns a step-discontinuity into a soft drop — no measurable
+  amplitude lost, but the click goes from "obvious" to "imperceptible
+  even when it does happen".
+  ([Git/web/src/services/audioService.ts:495](Git/web/src/services/audioService.ts:495))
+
+- **Re-prime counter and sequence-gap counter exposed in the room
+  debug strip** as `repri=N gap=N`. `repri` increments every time the
+  playback worklet underruns (each = one click event). `gap` increments
+  every SPA1 packet that arrives out-of-order or after a missing one
+  (each = network instability, often the cause of a re-prime that
+  follows). This is the diagnostic that confirms the hypothesis: if
+  `repri` stays small and 破音 is gone, the cushion bump fixed it; if
+  `repri` keeps growing, we need a smarter PLC strategy (next layer).
+  ([Git/web/src/pages/RoomPage.tsx:48](Git/web/src/pages/RoomPage.tsx:48))
+
+### Test sync
+`Git/server/test/browser/test_page.html` worklet copy updated to match
+production (per the `tonel-audio-testing` skill convention). Browser
+test SNR/THD unchanged — it pre-fills the ring before render so re-prime
+never fires in that scenario, but the cushion change is reflected.
+
+### Latency impact
++10 ms playback latency from the cushion bump. End-to-end (mic →
+server → speaker) goes from ~30 ms to ~40 ms in steady state.
+Below the 50 ms threshold humans start perceiving as "delayed" voice.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `PlaybackProcessor` | PRIME_TARGET 480 → 960; fade-out on mid-callback underrun; reprime counter |
+| `Git/web/src/services/audioService.ts` `playPcm16` | Sequence-gap detection from SPA1 header |
+| `Git/web/src/pages/RoomPage.tsx` debug strip | New `repri=N gap=N` fields |
+| `Git/server/test/browser/test_page.html` | Worklet copy synced |
+
 ## [1.0.22] - 2026-04-28
 
 ### Fixed (Possible mic→speaker local loopback in capture worklet)

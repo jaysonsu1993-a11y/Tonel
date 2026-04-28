@@ -38,7 +38,8 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         `tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
         `rxPeak=${audioService.rxLevelPeak.toFixed(3)} ws=${audioService.audioWsState} ` +
         `cap=${cap} micClip=${audioService.captureClipCountValue} ` +
-        `roomUsers=${audioService.serverPeerCount}${muteFlag}`
+        `roomUsers=${audioService.serverPeerCount} ` +
+        `repri=${audioService.playReprimeCount} gap=${audioService.rxSeqGapCount}${muteFlag}`
       )
     }, 2000)
     return () => { clearInterval(fast); clearInterval(slow) }
