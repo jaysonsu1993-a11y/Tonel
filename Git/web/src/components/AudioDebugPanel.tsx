@@ -102,13 +102,13 @@ export function AudioDebugPanel() {
     audioService.setServerTuning({ [field]: value } as Partial<typeof s>)
   }, [])
 
+  // RESET wipes the saved per-room slot AND restores defaults across
+  // worklet / server / UI. Different from "just drag sliders back to
+  // defaults" — that would re-save the defaults; this clears the slot
+  // entirely so leaving and rejoining the room sees server defaults
+  // again with no override.
   const reset = useCallback(() => {
-    audioService.setPlaybackTuning({
-      primeTarget: 1440, primeMin: 128,
-      maxScale: 1.012, minScale: 0.988,
-      rateStep: 0.00002,
-    })
-    audioService.setServerTuning({ jitterTarget: 1, jitterMaxDepth: 8 })
+    audioService.resetRoomTuning()
   }, [])
 
   if (!enabled) return null
@@ -146,6 +146,13 @@ export function AudioDebugPanel() {
           </button>
         </span>
       </div>
+      {!collapsed && audioService.currentRoomId && (
+        <div style={{ fontSize: 10, marginTop: 4, color: audioService.hasSavedTuning() ? '#ff0' : '#7a7' }}>
+          {audioService.hasSavedTuning()
+            ? `📍 saved for ${audioService.currentRoomId}:${audioService.currentUserId.slice(0, 8)}`
+            : `📭 no override · room ${audioService.currentRoomId}`}
+        </div>
+      )}
       {!collapsed && (
         <>
           <div style={{ margin: '8px 0', padding: 6, background: '#001a00', borderRadius: 3 }}>

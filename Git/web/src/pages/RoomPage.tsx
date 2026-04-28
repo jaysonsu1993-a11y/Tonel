@@ -31,6 +31,70 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   // no clue why). The banner at least gives them — and the dev — a
   // human-readable line to debug from.
   const [initError, setInitError] = useState<string>('')
+  const [retrying,  setRetrying]  = useState<boolean>(false)
+
+  // Initialise audio + mixer in three explicitly-decoupled stages:
+  //   1. callbacks (pure JS state setup, always succeeds)
+  //   2. mic + AudioContext (can fail on mobile: iOS Safari's gesture-chain
+  //      requirement for AudioContext.resume(), getUserMedia permission,
+  //      sample-rate restrictions, etc.)
+  //   3. mixer WebSockets + capture (can fail independently: WSS handshake,
+  //      network, server reachability)
+  //
+  // Stage 3 runs even if stage 2 fails, so listening still works while
+  // the mic error is surfaced to the banner. Capture is gated on stage 2
+  // success — we don't try to send packets we can't produce.
+  //
+  // Wrapped in a useCallback so the "retry" button on the error banner
+  // can re-run it inside a fresh user-gesture click handler. That's the
+  // standard iOS Safari workaround for AudioContext / getUserMedia: the
+  // first attempt (post-navigate from the password modal) may not count
+  // as a user gesture, but a button tap unambiguously does.
+  const runInit = useCallback(async () => {
+    setRetrying(true)
+    setInitError('')
+    audioService.onPeerLevel((uid, level) => {
+      setPeerLevels(prev => ({ ...prev, [uid]: level }))
+    })
+    audioService.onLatency((ms) => setLatency(ms))
+
+    let micOk = false
+    try {
+      await audioService.init()
+      micOk = true
+    } catch (err) {
+      console.error('[RoomPage] Audio init (mic + AudioContext) failed:', err)
+      // Distinguish common error names so the user gets actionable hints.
+      const errName = err instanceof Error ? err.name : ''
+      const errMsg  = err instanceof Error ? err.message : String(err)
+      let hint = ''
+      if (errName === 'NotAllowedError' || errMsg.includes('Permission')) {
+        hint = '（请检查浏览器麦克风权限）'
+      } else if (errName === 'NotFoundError') {
+        hint = '（找不到可用的麦克风设备）'
+      } else if (errName === 'NotReadableError') {
+        hint = '（麦克风被其他应用占用）'
+      } else if (errName === 'OverconstrainedError') {
+        hint = '（麦克风不支持请求的采样率）'
+      } else if (errName === 'NotSupportedError' ||
+                 errMsg.toLowerCase().includes('audiocontext')) {
+        hint = '（AudioContext 创建失败 — 可能是浏览器自动播放限制，请点击下方"重试"按钮）'
+      }
+      setInitError(`麦克风/音频初始化失败：${errName || 'Error'}: ${errMsg}${hint}`)
+    }
+
+    try {
+      await audioService.connectMixer(userId, roomId)
+      if (micOk) audioService.startCapture()
+    } catch (err) {
+      console.error('[RoomPage] Mixer connect failed:', err)
+      const msg = (err instanceof Error ? err.message : String(err)) || 'unknown error'
+      setInitError(prev =>
+        (prev ? prev + ' / ' : '') + `混音服务器连接失败：${msg}`
+      )
+    }
+    setRetrying(false)
+  }, [userId, roomId])
   // Poll level+latency at 10fps (fast timer), debug info at 1fps (slow timer)
   useEffect(() => {
     const fast = setInterval(() => {
@@ -60,47 +124,8 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     if (joinedRef.current) return
     joinedRef.current = true
 
-    // 初始化音频并连接混音服务器
-    //
-    // Three-stage flow with the failure modes explicitly decoupled:
-    //   1. callbacks (always succeeds — pure JS state setup)
-    //   2. mic + AudioContext init (can fail on mobile: iOS sample-rate
-    //      restrictions, getUserMedia permission denial, etc.)
-    //   3. mixer WebSockets + capture start (can fail independently:
-    //      WSS handshake, network, etc.)
-    //
-    // Pre-v3.2.2 these were chained inside a single try/catch, so a stage 2
-    // failure on mobile silently aborted stage 3 — the mobile user saw the
-    // peer list (signaling WS, separate path) but no levels/latency/playback
-    // because the mixer WS was never opened. Now stage 3 runs even if stage
-    // 2 throws, so listening still works while we surface the mic error.
-    ;(async () => {
-      audioService.onPeerLevel((uid, level) => {
-        setPeerLevels(prev => ({ ...prev, [uid]: level }))
-      })
-      audioService.onLatency((ms) => setLatency(ms))
-
-      let micOk = false
-      try {
-        await audioService.init()
-        micOk = true
-      } catch (err) {
-        console.error('[RoomPage] Audio init (mic + AudioContext) failed:', err)
-        const msg = (err instanceof Error ? err.message : String(err)) || 'unknown error'
-        setInitError(`麦克风/音频初始化失败：${msg}`)
-      }
-
-      try {
-        await audioService.connectMixer(userId, roomId)
-        if (micOk) audioService.startCapture()
-      } catch (err) {
-        console.error('[RoomPage] Mixer connect failed:', err)
-        const msg = (err instanceof Error ? err.message : String(err)) || 'unknown error'
-        setInitError(prev =>
-          (prev ? prev + ' / ' : '') + `混音服务器连接失败：${msg}`
-        )
-      }
-    })()
+    // Three-stage init — see retryMicInit for the per-stage rationale.
+    void runInit()
 
     return () => {
       audioService.stopCapture()
@@ -194,12 +219,26 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
             background: '#3b0d0d', color: '#fdd', padding: '8px 24px',
             fontSize: 13, borderTop: '1px solid #7a1a1a',
             borderBottom: '1px solid #7a1a1a',
+            display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
           }}
         >
-          ⚠ {initError}
+          <span style={{ flex: '1 1 auto' }}>⚠ {initError}</span>
+          <button
+            disabled={retrying}
+            style={{
+              fontSize: 12, padding: '4px 12px',
+              background: '#5a1a1a', color: '#fff',
+              border: '1px solid #fdd', borderRadius: 3,
+              cursor: retrying ? 'wait' : 'pointer',
+              opacity: retrying ? 0.5 : 1,
+            }}
+            onClick={() => { void runInit() }}
+          >
+            {retrying ? '重试中…' : '🔄 启用麦克风'}
+          </button>
           <button
             style={{
-              marginLeft: 12, fontSize: 12, padding: '2px 10px',
+              fontSize: 12, padding: '4px 10px',
               background: 'transparent', color: '#fdd',
               border: '1px solid #fdd', borderRadius: 3, cursor: 'pointer',
             }}

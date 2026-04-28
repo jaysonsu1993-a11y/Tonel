@@ -196,6 +196,35 @@ export class AudioService {
   public playRingFill     = 0   // current ring fill in samples (target ~1440)
   private rxLastSeq = -1
 
+  // ── Per-room tuning persistence ──────────────────────────────────────────
+  //
+  // Each (roomId, userId) pair gets its own slot in localStorage. A slider
+  // tweaked in room A doesn't follow the user into room B; two devices
+  // signed in as the same user keep independent tuning because each
+  // device has its own localStorage. Multiple rooms simply coexist —
+  // their slots are independent JSON blobs and never interact.
+  //
+  // Defaults aren't written. A missing slot means "no override" → the
+  // server reports its own defaults via MIXER_JOIN_ACK and the worklet
+  // uses the values baked into `this.tuning`. When the user changes a
+  // slider, save fires (debounced); when RESET fires, we wipe the slot
+  // and re-apply defaults.
+  private static readonly TUNING_KEY_PREFIX = 'tonel.tuning.'
+  private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
+  private static tuningStorageKey(roomId: string, userId: string): string {
+    return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
+  }
+  /** Default tuning values. Single source of truth — used by both the
+   *  initial `this.tuning` field below and `resetRoomTuning()` below. */
+  private static readonly DEFAULT_PB = Object.freeze({
+    primeTarget: 1440, primeMin: 128,
+    maxScale: 1.012,   minScale: 0.988,
+    rateStep: 0.00002,
+  })
+  private static readonly DEFAULT_SRV = Object.freeze({
+    jitterTarget: 1, jitterMaxDepth: 8,
+  })
+
   // ── Live tuning knobs ────────────────────────────────────────────────────
   // The numeric defaults match the historical hardcoded constants — see the
   // PRIME_TARGET / MAX_SCALE comments around initPlaybackWorklet for the
@@ -734,7 +763,7 @@ export class AudioService {
    *   maxScale    ∈ (1.0, 1.05]
    *   rateStep    ∈ [0, 0.001]
    */
-  setPlaybackTuning(t: Partial<AudioService['tuning']>): void {
+  setPlaybackTuning(t: Partial<AudioService['tuning']>, opts?: { persist?: boolean }): void {
     const next = { ...this.tuning, ...t }
     // Clamp into safe ranges — sliders may land just outside.
     next.primeMin    = Math.max(0,    Math.min(next.primeTarget, next.primeMin))
@@ -754,6 +783,7 @@ export class AudioService {
       })
     }
     this.fireTuningChanged()
+    if (opts?.persist !== false) this.scheduleTuningSave()
   }
 
   /**
@@ -764,28 +794,103 @@ export class AudioService {
    * `this.serverTuning` to whatever the server actually applied — single
    * source of truth — and fire the change callback so the UI re-renders.
    */
-  setServerTuning(t: Partial<AudioService['serverTuning']>): void {
+  setServerTuning(t: Partial<AudioService['serverTuning']>, opts?: { persist?: boolean }): void {
     const next = { ...this.serverTuning, ...t }
-    if (this.controlWs?.readyState !== WebSocket.OPEN) {
-      // Save the desire even when offline so it gets applied on reconnect.
-      // (Reconnect path doesn't yet replay this; the user can move the slider
-      // again once the WS is up. Acceptable for a debug feature.)
-      this.serverTuning = next
-      this.fireTuningChanged()
-      return
+    if (this.controlWs?.readyState === WebSocket.OPEN) {
+      const payload = JSON.stringify({
+        type:             'MIXER_TUNE',
+        room_id:          this.roomId,
+        user_id:          this.userId,
+        jitter_target:    next.jitterTarget,
+        jitter_max_depth: next.jitterMaxDepth,
+      }) + '\n'
+      this.controlWs.send(payload)
     }
-    const payload = JSON.stringify({
-      type:             'MIXER_TUNE',
-      room_id:          this.roomId,
-      user_id:          this.userId,
-      jitter_target:    next.jitterTarget,
-      jitter_max_depth: next.jitterMaxDepth,
-    }) + '\n'
-    this.controlWs.send(payload)
     // Optimistic update — overwritten on MIXER_TUNE_ACK if server clamped.
     this.serverTuning = next
     this.fireTuningChanged()
+    if (opts?.persist !== false) this.scheduleTuningSave()
   }
+
+  /** Debounced write of (this.tuning, this.serverTuning) to localStorage,
+   *  keyed by the current (roomId, userId). Calls coalesce inside a
+   *  500 ms window so a slider drag (~10 events/sec) yields one write per
+   *  second-ish, not 10. */
+  private scheduleTuningSave(): void {
+    if (!this.roomId || !this.userId) return     // pre-join — nothing to key on
+    if (this.tuningSaveTimer) clearTimeout(this.tuningSaveTimer)
+    this.tuningSaveTimer = setTimeout(() => {
+      this.tuningSaveTimer = null
+      try {
+        const key = AudioService.tuningStorageKey(this.roomId, this.userId)
+        const blob = JSON.stringify({ client: this.tuning, server: this.serverTuning })
+        localStorage.setItem(key, blob)
+      } catch (err) {
+        console.warn('[Audio] tuning save failed:', err)
+      }
+    }, 500)
+  }
+
+  /**
+   * Read any saved tuning for the *current* room/user and apply it. Called
+   * from the MIXER_JOIN_ACK handler (after the server's defaults flow into
+   * `this.serverTuning`) so the user's saved values cleanly overlay the
+   * server's defaults. If nothing is saved, this is a no-op — `this.tuning`
+   * keeps the values from the worklet construction or from a previous room.
+   *
+   * On a corrupt blob (parse error / shape mismatch), we fall through to
+   * resetRoomTuning() which wipes the slot AND restores defaults — better
+   * than carrying half-applied junk into the audio path.
+   */
+  private loadRoomTuningIntoState(): void {
+    if (!this.roomId || !this.userId) return
+    const key = AudioService.tuningStorageKey(this.roomId, this.userId)
+    let raw: string | null = null
+    try { raw = localStorage.getItem(key) } catch { return }
+    if (!raw) {
+      // No saved tuning for this room/user — explicitly reset in-memory
+      // values to defaults so a previous room's tuning doesn't leak into
+      // this one (the user may have just left a tuned room and entered
+      // a fresh one).
+      this.setPlaybackTuning(AudioService.DEFAULT_PB,  { persist: false })
+      this.setServerTuning(AudioService.DEFAULT_SRV,   { persist: false })
+      return
+    }
+    try {
+      const parsed = JSON.parse(raw) as { client?: Partial<AudioService['tuning']>;
+                                          server?: Partial<AudioService['serverTuning']> }
+      if (parsed.client) this.setPlaybackTuning(parsed.client, { persist: false })
+      if (parsed.server) this.setServerTuning (parsed.server, { persist: false })
+    } catch (err) {
+      console.warn('[Audio] tuning parse failed; clearing slot:', err)
+      try { localStorage.removeItem(key) } catch {}
+      this.setPlaybackTuning(AudioService.DEFAULT_PB,  { persist: false })
+      this.setServerTuning(AudioService.DEFAULT_SRV,   { persist: false })
+    }
+  }
+
+  /** Wipe the persisted slot for the current room AND restore defaults
+   *  in-memory + on the worklet + on the server. Bound to the panel's
+   *  RESET button. After this, leaving and rejoining the room shows
+   *  server defaults (no override saved). */
+  resetRoomTuning(): void {
+    if (this.roomId && this.userId) {
+      try { localStorage.removeItem(AudioService.tuningStorageKey(this.roomId, this.userId)) } catch {}
+    }
+    this.setPlaybackTuning(AudioService.DEFAULT_PB,  { persist: false })
+    this.setServerTuning(AudioService.DEFAULT_SRV,   { persist: false })
+  }
+
+  /** True when there's a saved override for the current room/user. The
+   *  panel uses this to render the "📍 saved for this room" indicator. */
+  hasSavedTuning(): boolean {
+    if (!this.roomId || !this.userId) return false
+    try {
+      return localStorage.getItem(AudioService.tuningStorageKey(this.roomId, this.userId)) !== null
+    } catch { return false }
+  }
+  get currentRoomId(): string { return this.roomId }
+  get currentUserId(): string { return this.userId }
 
   /** Subscribe to remote peer level updates. Callback receives (userId, level 0-1). */
   onPeerLevel(cb: PeerLevelCallback): void {
@@ -1288,6 +1393,12 @@ export class AudioService {
           if (typeof msg.jitter_max_depth === 'number') {
             this.serverTuning.jitterMaxDepth = msg.jitter_max_depth
           }
+          // Overlay the user's saved per-room tuning (if any) on top of
+          // the server's defaults. setServerTuning will fire MIXER_TUNE
+          // back to the server, so the room jitter buffer goes from
+          // server-default → user-saved within one round trip. Stored
+          // with `persist: false` so this rehydration doesn't loop.
+          this.loadRoomTuningIntoState()
           this.fireTuningChanged()
           this.startCapture()
           this.startPing()

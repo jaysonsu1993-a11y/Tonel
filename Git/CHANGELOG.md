@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-04-29
+
+### Added — per-room debug-panel tuning persistence + mic-init retry button
+
+**Persistence.** Slider values in the audio debug panel now persist
+per-(roomId, userId) in `localStorage`. Tune room A, leave, tune room B,
+come back to A — A's values are restored. Two devices signed in as the
+same user keep independent tuning because each device has its own
+`localStorage`. Multiple rooms simply coexist as independent JSON blobs.
+
+- Storage key shape: `tonel.tuning.<roomId>:<userId>` → `{ client, server }`.
+- Load: hooked into `MIXER_JOIN_ACK` after the server's defaults flow in,
+  so saved values cleanly overlay defaults — and `setServerTuning` re-sends
+  the saved jitter values via `MIXER_TUNE`, which round-trips in <50 ms.
+- Save: every `setPlaybackTuning` / `setServerTuning` schedules a save,
+  debounced 500 ms so a 10 Hz slider drag yields one write per second.
+- Defaults aren't written. A missing slot means "no override"; the panel
+  shows "📭 no override". Once anything is saved, it shows
+  "📍 saved for &lt;roomId&gt;:&lt;uid8&gt;" in yellow.
+- RESET wipes the slot AND restores defaults across worklet/server/UI —
+  not the same as "drag back to defaults" which would re-save them.
+- Corrupt blob → clear slot + fall back to defaults (better than carrying
+  half-applied junk into the audio path).
+
+**Mic-init retry button.** v3.2.2 surfaced init errors to a banner but
+the underlying iOS Safari issue (AudioContext gesture-chain expiry on
+post-navigate `useEffect`) means the first attempt sometimes fails even
+with the relaxed-constraints fallback. The banner now has a "🔄 启用麦克风"
+button that re-runs the init flow inside a *fresh* user-gesture click
+handler — the standard iOS workaround for this class of bug. The error
+message also now distinguishes common error names with Chinese hints:
+`NotAllowedError` (permission), `NotFoundError` (no device),
+`NotReadableError` (device busy), `OverconstrainedError` (sample rate),
+`NotSupportedError` (AudioContext / autoplay).
+
+**Refactor.** RoomPage's init flow extracted into a `useCallback`-wrapped
+`runInit()` so the retry button can re-invoke it cleanly. No behaviour
+change for the success path (Layer 1 / Layer 1.5 pass identically).
+
 ## [3.2.3] - 2026-04-29
 
 ### Fixed — room creator was missing from peer list (signaling)
