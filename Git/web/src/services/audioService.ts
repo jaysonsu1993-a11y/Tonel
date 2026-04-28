@@ -515,15 +515,162 @@ export class AudioService {
     return this.peerLevels.get(userId) ?? 0
   }
 
-  // ── Capture: AudioWorklet → 10ms frames → SPA1 encode → send ─────────────
+  // ── Capture: AudioWorklet → 5 ms frames → SPA1 encode → send ─────────────
+  //
+  // The chain runs an AudioWorklet on the audio thread (NOT the deprecated
+  // `ScriptProcessorNode` which sits on the main thread and drops callbacks
+  // under load). The worklet does three jobs in process():
+  //   1. Resample the mic input from `sampleRate` (AudioContext rate) to
+  //      48 kHz, with a fractional readPos that carries across blocks so
+  //      adjacent quanta join cleanly.
+  //   2. Slice the resampled stream into 240-sample (5 ms @ 48 kHz) frames.
+  //   3. Track the per-block peak to surface mic clipping (sample ≥ 1.0).
+  // It posts one message per frame to the main thread, where we just
+  // PCM16-encode and ship.
+  //
+  // The previous ScriptProcessorNode capture path was the suspected source
+  // of the v1.0.19 residual "破音" — at 48 kHz context the rest of the chain
+  // is provably clean (Node + browser tests both at < 0.05 % THD), so the
+  // remaining nonlinearity had to come from the capture stage. ScriptProcessor
+  // at buffer 256 is at the lower edge of where Chromium reliably calls it,
+  // and any callback-drop or main-thread-jank-induced underrun would land on
+  // signal peaks where listeners hear it as breaking sound.
+
+  private captureClipCount = 0  // mic samples observed at |s| >= 1.0
+  /** Total mic samples observed at |s| ≥ 1.0 (hardware clipping at the source). */
+  get captureClipCountValue(): number { return this.captureClipCount }
 
   public startCapture(): void {
     if (this.isCapturing || !this.audioContext) return
     this.isCapturing = true
     this.sequence     = 0
-    // Use ScriptProcessorNode for capture — AudioWorklet has known issues
-    // with MediaStreamAudioSourceNode producing zeros in some browsers.
-    this.startCaptureWithScriptProcessor()
+    this.captureClipCount = 0
+    // Try AudioWorklet first; fall back to ScriptProcessor if module
+    // registration fails (very old browsers / Worklet-blocking policies).
+    void this.initCaptureWorklet().then((ok) => {
+      if (!ok) {
+        console.warn('[Audio] Capture worklet failed, falling back to ScriptProcessor')
+        this.startCaptureWithScriptProcessor()
+      }
+    })
+  }
+
+  private async initCaptureWorklet(): Promise<boolean> {
+    if (!this.audioContext || !this.source) return false
+
+    const FRAME_SIZE_LOCAL = FRAME_SAMPLES   // 240 = 5 ms @ 48 kHz
+    const code = `
+      class CaptureProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super()
+          this.frameSize  = ${FRAME_SIZE_LOCAL}
+          this.outBuf     = new Float32Array(this.frameSize)
+          this.outPos     = 0
+          // Resampler: input samples per output sample. ratio === 1 short-circuits
+          // when the AudioContext is at 48 kHz, sparing the interp on the hot path.
+          this.ratio      = sampleRate / 48000
+          this.phase      = 0
+          this.lastSample = 0
+          this.peakBlock  = 0      // running peak |sample| inside the current frame
+          this.clips      = 0      // samples observed at |s| >= 1.0 (hardware clip)
+        }
+        process(inputs) {
+          const input = inputs[0]
+          if (!input || !input[0] || input[0].length === 0) return true
+          const block = input[0]
+
+          // Track hardware clipping at the input — surfaces as a stat
+          // back to the main thread so the user can tell when their mic
+          // gain is the actual problem (vs. our code).
+          for (let i = 0; i < block.length; i++) {
+            const a = block[i] >= 0 ? block[i] : -block[i]
+            if (a >= 1.0) this.clips++
+            if (a > this.peakBlock) this.peakBlock = a
+          }
+
+          // Resample to 48 kHz with sample-accurate phase across block boundaries.
+          let outSamples
+          if (this.ratio === 1) {
+            outSamples = block
+          } else {
+            const ext = new Float32Array(block.length + 1)
+            ext[0] = this.lastSample
+            ext.set(block, 1)
+            const tmp = []
+            let p = this.phase
+            while (Math.floor(p) + 1 < ext.length) {
+              const idx  = Math.floor(p)
+              const frac = p - idx
+              tmp.push(ext[idx] + (ext[idx + 1] - ext[idx]) * frac)
+              p += this.ratio
+            }
+            this.phase      = p - block.length
+            this.lastSample = block[block.length - 1]
+            outSamples = tmp
+          }
+
+          // Accumulate into 240-sample frames; post each completed frame.
+          for (let i = 0; i < outSamples.length; i++) {
+            this.outBuf[this.outPos++] = outSamples[i]
+            if (this.outPos >= this.frameSize) {
+              const frame = this.outBuf.slice(0, this.frameSize)
+              const stats = { clips: this.clips, peak: this.peakBlock }
+              this.peakBlock = 0
+              this.clips     = 0
+              this.port.postMessage({ frame, stats }, [frame.buffer])
+              this.outPos = 0
+            }
+          }
+          return true
+        }
+      }
+      registerProcessor('capture-processor', CaptureProcessor)
+    `
+    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))
+    try {
+      await this.audioContext.audioWorklet.addModule(url)
+      if (!this.audioContext || !this.source) return false
+      const node = new AudioWorkletNode(this.audioContext, 'capture-processor')
+      node.port.onmessage = (ev) => {
+        const { frame, stats } = ev.data
+        if (!frame) return
+        if (stats?.clips) this.captureClipCount += stats.clips
+        this.sendCapturedFrame(frame as Float32Array)
+      }
+      this.source.connect(node)
+      // AudioWorkletNode must be connected somewhere downstream for process()
+      // to be called by the audio thread. Connect to destination — the worklet
+      // doesn't write to its outputs so destination receives zero, no audio leak.
+      node.connect(this.audioContext.destination)
+      this.processor = node
+      return true
+    } catch (err) {
+      console.warn('[Audio] addModule(capture-processor) failed:', err)
+      return false
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  }
+
+  private sendCapturedFrame(frame: Float32Array): void {
+    // Level meter for UI (RMS + EMA smoothing, matches AppKit AudioBridge).
+    let sum = 0
+    for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i]
+    const rms = Math.sqrt(sum / frame.length)
+    this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
+    this.currentLevel = Math.min(1.0, this.smoothedLevel * 5)
+
+    if (this.audioWs?.readyState !== WebSocket.OPEN) return
+    if (this.muted) {
+      // Worklet doesn't know about mute; zero the frame here so server
+      // sees silence rather than mic content while muted.
+      frame.fill(0)
+    }
+    const uid = `${this.roomId}:${this.userId}`
+    const pcm16 = float32ToPcm16(frame)
+    const spa1 = buildSpa1Packet(pcm16, SPA1_CODEC_PCM16, this.sequence++, 0, uid)
+    this.audioWs.send(spa1)
+    this.txCount++
   }
 
   private startCaptureWithScriptProcessor(): void {

@@ -30,7 +30,10 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       setSelfLevel(audioService.currentLevel)
     }, 150)
     const slow = setInterval(() => {
-      setDbg(`tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} rxLvl=${audioService.rxLevel.toFixed(4)} ws=${audioService.audioWsState}`)
+      const clipNote = audioService.captureClipCountValue > 0
+        ? ` micClip=${audioService.captureClipCountValue}`
+        : ''
+      setDbg(`tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} rxLvl=${audioService.rxLevel.toFixed(4)} ws=${audioService.audioWsState}${clipNote}`)
     }, 2000)
     return () => { clearInterval(fast); clearInterval(slow) }
   }, [])

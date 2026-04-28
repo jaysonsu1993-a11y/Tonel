@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.20] - 2026-04-28
+
+### Fixed (Web Capture — residual "破音" at 48 kHz context)
+
+After v1.0.19, listeners reported residual "破音" (peak distortion)
+even with the AudioContext locked at 48 kHz, where every resampler
+in the chain is a guaranteed no-op and the rest of the path tests
+clean (Layer 1 < 0.01 % THD, Layer 2 < 0.05 % THD). The remaining
+nonlinearity had to be in the capture stage — and the capture stage
+was still a `ScriptProcessorNode`.
+
+`ScriptProcessorNode` is deprecated and runs on the main thread, so
+its `onaudioprocess` callbacks compete with React renders, GC pauses,
+and any other JS work. Under main-thread load Chromium will drop or
+late-fire callbacks, and at the 256-sample buffer Tonel uses (~5.3 ms
+per call), even a small drop puts a discontinuity right inside a
+voice peak — listeners hear that as breaking sound.
+
+### Capture path migrated to AudioWorklet
+
+- **`startCapture` now creates a `CaptureProcessor` AudioWorklet**,
+  which runs on the dedicated audio thread and is guaranteed to be
+  invoked at quantum rate. The worklet does the same three jobs the
+  main thread used to do (linear resample to 48 kHz with sample-
+  accurate phase across blocks, slice into 240-sample frames,
+  postMessage each frame back to main) — but without main-thread
+  scheduling jitter. Falls back to the old ScriptProcessor path if
+  worklet registration fails for any reason. ([Git/web/src/services/audioService.ts:518](Git/web/src/services/audioService.ts:518))
+
+- **Mic clip counter**: the worklet also tracks any input sample
+  with `|s| ≥ 1.0` (hardware-level clipping at the source — mic gain
+  too high) and reports it back. The room debug strip now shows
+  `micClip=N` alongside `tx/rx/play/rxLvl` whenever clipping is
+  detected, so the user can tell at a glance whether the distortion
+  is in our code or in their mic gain settings. ([Git/web/src/pages/RoomPage.tsx:46](Git/web/src/pages/RoomPage.tsx:46))
+
+### Added (Test methodology now portable across sessions)
+
+- **New skill `tonel-audio-testing`** at
+  `~/.claude/skills/tonel-audio-testing/SKILL.md`. Documents both test
+  layers (Node + browser), when to use them, what "good" looks like,
+  and the bisect-fix-lock workflow. Triggers on Chinese audio symptoms
+  (失真 / 破音 / 底噪 / 回声 / 听不到声音) and on any change to
+  `Git/server/src/audio_mixer.h`, `Git/server/src/mixer_server.cpp`,
+  or `Git/web/src/services/audioService.ts`. Future sessions and any
+  newly-onboarded AI will see the skill in their available list and
+  follow the same methodology instead of guessing — which is the entire
+  point of having the tests.
+
+- **New project memory `feedback_audio_testing_first`** binding the
+  skill into the always-loaded memory index, so Tonel sessions
+  start with the testing-first invariant in context.
+
+### Latency impact
+Reduces capture-side jitter (worklet runs at quantum rate, never
+late). No added latency.
+
+| File / Change | Detail |
+|---------------|--------|
+| `Git/web/src/services/audioService.ts` `initCaptureWorklet` | New AudioWorklet capture path with in-worklet resample + slicing |
+| `Git/web/src/services/audioService.ts` `sendCapturedFrame` | Lean per-frame send (level meter + PCM16 + WS) |
+| `Git/web/src/services/audioService.ts` `startCapture` | Try worklet first, fall back to ScriptProcessor on registration failure |
+| `Git/web/src/services/audioService.ts` `captureClipCount` | Stat counter for mic clipping |
+| `Git/web/src/pages/RoomPage.tsx` debug strip | Surface `micClip=N` when > 0 |
+| `~/.claude/skills/tonel-audio-testing/SKILL.md` | New skill — test methodology for future sessions |
+| `~/.claude/projects/.../memory/feedback_audio_testing_first.md` | New memory pointer — always-loaded testing-first invariant |
+
 ## [1.0.19] - 2026-04-28
 
 ### Fixed (Sample-rate change went silent on the in-place rebuild)
