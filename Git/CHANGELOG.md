@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-04-29
+
+### Added — local mic monitoring (low-latency self-hear when room has peers)
+
+User requirement: when the room has ≥2 users, hear self via a local
+mic→speaker monitor path (~0 ms latency) instead of relying on the
+server, which excludes self via N-1. When alone in the room, the
+existing solo-loopback (server fullMix) already provides self-test
+audio, so the local monitor would create a double-trip echo —
+disabled in that case.
+
+**Implementation** — `audioService.ts`:
+
+- New `monitorGain: GainNode`, wired `source → monitorGain →
+  destination` independent of the peer playback path. Gain target
+  derived from `peerLevels.size`:
+  - ≤1 user → 0 (server's solo loopback is the self-hear path)
+  - ≥2 users → `monitorBaseGain` (default 1.0)
+- Transitions use `setTargetAtTime(target, now, 0.05)` — 50 ms ramp
+  to avoid a click at the population boundary.
+- `setMonitorBaseGain(g)` setter (range [0, 2]) for a future panel
+  knob; `monitorActive` getter for UI hints.
+- Wired in both the initial `init()` path and the `changeSampleRate()`
+  rebuild path; cleaned up in `disconnect()` and stale-state reset.
+
+**Bug fix** — `peerLevels` ghost accumulation:
+
+The LEVELS handler `set()`-d new entries but never `delete()`-d
+absent ones. The mixer broadcasts the FULL current user list every
+~50 ms, so anyone missing has left — but pre-v3.4.0 code treated
+absence as "no update" rather than "departed". `peerLevels.size`
+(and therefore the debug strip's `roomUsers=`) only ever grew over
+the lifetime of a session.
+
+This bug compounded the v3.3.3 issue the user reported: even after
+the same-userId collision was fixed by the device suffix, a stale
+`peerLevels` from a previous join could keep the count visually at
+≥2 after a peer left.
+
+Fix: handler now diffs against the snapshot — anyone in the local
+map but not in the broadcast is removed, then present users are
+upserted. `peerLevels.clear()` also called on `disconnect()` so a
+fresh `init()` doesn't see stale ghosts.
+
+**Caveats** — feedback risk:
+
+Local monitor → speaker → mic → server → peers re-hear the user's
+voice as a delayed second copy. Headphones sidestep this; speakers
+will produce the usual band-rehearsal feedback. Same constraint
+that applied to the solo-loopback path; we accept it here.
+
+Verified via Layer 1 (1 kHz sine SNR 84 dB / THD 0.006 %), Layer 2
+(48 kHz / 44.1 kHz playback PASS, capture path PASS) — no audio-path
+regression. The monitor gain stays at 0 in test conditions (single
+test user → `peerLevels.size = 0`), so default behaviour is
+byte-identical to v3.3.3.
+
 ## [3.3.3] - 2026-04-29
 
 ### Fixed — same-WeChat-account session collisions (self-echo via solo loopback)

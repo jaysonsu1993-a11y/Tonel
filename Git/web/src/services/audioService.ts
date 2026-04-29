@@ -182,6 +182,25 @@ export class AudioService {
   // Playback (shares audioContext with capture to avoid autoplay policy issues)
   private masterGain:       GainNode | null = null
 
+  // Local monitor — `source → monitorGain → destination`. Lets the user
+  // hear their own mic with ~0 ms latency (one audio quantum) instead of
+  // the ~30–100 ms server round trip.
+  //
+  // Engagement rule: monitor is OFF when the room has ≤1 user (server's
+  // solo loopback already plays the user's voice back, so adding the
+  // local monitor would create a doubled echo) and ON when there are
+  // ≥2 users (server runs N-1 mix → user has no server-side self-loop
+  // → only the local monitor lets them hear themselves). The transition
+  // tracks `peerLevels.size`, which the LEVELS broadcast updates ~20 Hz.
+  //
+  // Caveat — feedback: if the user is on speakers (not headphones), the
+  // monitor signal plays out the speaker, mic picks it up, and goes back
+  // to peers as a delayed second copy of the user's voice. Headphones
+  // sidestep this. Same constraint already applied to the solo-loopback
+  // path; we accept it here too.
+  private monitorGain:      GainNode | null = null
+  private monitorBaseGain   = 1.0   // user-adjustable (future slider)
+
   // Debug counters
   public rxCount = 0   // received SPA1 audio packets from server
   public txCount = 0   // sent SPA1 audio packets to server
@@ -343,6 +362,7 @@ export class AudioService {
     if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
     if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
     if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
+    if (this.monitorGain) { try { this.monitorGain.disconnect() } catch (_) {} this.monitorGain = null }
     this.analyser = null
     this.captureLeftover = new Float32Array(0)
     this.capCarry = new Float32Array(0)
@@ -371,6 +391,16 @@ export class AudioService {
     this.masterGain = this.audioContext.createGain()
     this.masterGain.gain.value = 1.0
     this.masterGain.connect(this.audioContext.destination)
+
+    // Local monitor path. Starts at gain 0 — engaged once peerLevels
+    // first reports ≥2 users in the room. updateMonitorGain() does the
+    // ramping with setTargetAtTime to avoid clicks at the transition.
+    this.monitorGain = this.audioContext.createGain()
+    this.monitorGain.gain.value = 0
+    this.source.connect(this.monitorGain)
+    this.monitorGain.connect(this.audioContext.destination)
+    this.updateMonitorGain()
+
     await this.initPlaybackWorklet()
 
     // Close the old AudioContext after the new one is fully wired.
@@ -389,6 +419,7 @@ export class AudioService {
     if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
     if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
     if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
+    if (this.monitorGain) { try { this.monitorGain.disconnect() } catch (_) {} this.monitorGain = null }
     if (this.animationFrameId) { cancelAnimationFrame(this.animationFrameId); this.animationFrameId = null }
     if (this.audioContext) { try { this.audioContext.close() } catch (_) {} this.audioContext = null }
     this.analyser = null
@@ -482,7 +513,48 @@ export class AudioService {
     this.masterGain = this.audioContext.createGain()
     this.masterGain.gain.value = 1.0
     this.masterGain.connect(this.audioContext.destination)
+    // Local monitor — see field-level comment for rationale. Starts at 0
+    // and engages once the room population reaches ≥2 (LEVELS broadcast).
+    if (this.source && !this.monitorGain) {
+      this.monitorGain = this.audioContext.createGain()
+      this.monitorGain.gain.value = 0
+      this.source.connect(this.monitorGain)
+      this.monitorGain.connect(this.audioContext.destination)
+      this.updateMonitorGain()
+    }
     await this.initPlaybackWorklet()
+  }
+
+  /**
+   * Recompute the monitor gain target from the current `peerLevels.size`.
+   * 0 when the user is alone (server runs solo loopback → adding monitor
+   * would double the user's voice in their own ears), `monitorBaseGain`
+   * when there are peers (server runs N-1 → monitor is the only path
+   * to hear self).
+   *
+   * Uses `setTargetAtTime` with a 50 ms time constant — instantaneous
+   * `gain.value =` would click on the audio thread when the population
+   * crosses the boundary at the same time as audio is playing.
+   */
+  private updateMonitorGain(): void {
+    if (!this.monitorGain || !this.audioContext) return
+    const target = (this.peerLevels.size >= 2) ? this.monitorBaseGain : 0
+    this.monitorGain.gain.setTargetAtTime(target, this.audioContext.currentTime, 0.05)
+  }
+
+  /**
+   * Future-proof user-facing knob — not yet wired to the debug panel,
+   * but a single setter so we don't need to reach into private state
+   * later. Range [0, 2] — 1.0 nominal, 2.0 = +6 dB headroom for
+   * underdriven mics.
+   */
+  setMonitorBaseGain(g: number): void {
+    this.monitorBaseGain = Math.max(0, Math.min(2, g))
+    this.updateMonitorGain()
+  }
+  /** Whether the local monitor is currently audible (≥2 peers). */
+  get monitorActive(): boolean {
+    return !!this.monitorGain && this.peerLevels.size >= 2
   }
 
   private async initPlaybackWorklet(): Promise<void> {
@@ -1448,12 +1520,22 @@ export class AudioService {
           this.startPing()
         } else if (msg.type === 'LEVELS' && msg.levels) {
           // Per-user input levels from mixer server: { "user1": 0.42, "user2": 0.15, ... }
-          if (this.peerLevelCallback) {
-            for (const [uid, level] of Object.entries(msg.levels)) {
-              this.peerLevels.set(uid, level as number)
-              this.peerLevelCallback(uid, level as number)
-            }
+          // The server sends ALL current room users every ~50 ms, so anyone
+          // missing from this snapshot has left. Pre-v3.4.0 this handler
+          // only `set()`-ed the present users and never `delete()`-d the
+          // absent ones — `peerLevels.size` accumulated ghost entries, so
+          // `serverPeerCount` was wrong any time someone left and
+          // `updateMonitorGain` would treat a single-user room as multi.
+          const present = new Set(Object.keys(msg.levels))
+          for (const uid of [...this.peerLevels.keys()]) {
+            if (!present.has(uid)) this.peerLevels.delete(uid)
           }
+          for (const [uid, level] of Object.entries(msg.levels)) {
+            this.peerLevels.set(uid, level as number)
+            if (this.peerLevelCallback) this.peerLevelCallback(uid, level as number)
+          }
+          // Engage / disengage local monitor at the population boundary.
+          this.updateMonitorGain()
         } else if (msg.type === 'PONG') {
           // PONG received — RTT = now − pingSentAt. The control WS goes
           // through the same TCP path as MIXER_JOIN, so this is the
@@ -1743,19 +1825,24 @@ export class AudioService {
       try { this.playbackWorklet.disconnect() } catch (_) {}
       this.playbackWorklet = null
     }
+    if (this.monitorGain) {
+      try { this.monitorGain.disconnect() } catch (_) {}
+      this.monitorGain = null
+    }
     this.mediaStream?.getAudioTracks().forEach(t => t.stop())
-    this.audioContext?.close()
     this.audioContext?.close()
     this.controlWs?.close()
     this.audioWs?.close()
     this.mediaStream       = null
     this.audioContext      = null
-    this.audioContext  = null
     this.analyser          = null
     this.source            = null
     this.controlWs         = null
     this.audioWs           = null
     this.masterGain        = null
+    // Reset peerLevels so a fresh `init()` doesn't see stale ghosts
+    // from the previous room.
+    this.peerLevels.clear()
   }
 }
 
