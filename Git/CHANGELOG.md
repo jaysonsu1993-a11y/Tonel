@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.2] - 2026-04-29
+
+### Added — speaker / earpiece toggle for iPhone Safari
+
+User report: on iPhone web, audio always plays through the earpiece
+(听筒), not the loudspeaker. Root cause: iOS Safari sets the audio
+session category to PlayAndRecord whenever a getUserMedia mic is
+active; that category routes by default to the earpiece. The Web
+Audio API doesn't expose an "override output port" knob, so the
+standard workaround is to route playback through a
+`MediaStreamDestination → <audio>` element — `<audio>` uses the
+"media playback" category which routes to the loudspeaker.
+
+Implementation:
+
+- `audioService.ts`: introduced `outputBus: GainNode` as the master
+  audible egress. `masterGain` (peer playback) and `monitorWorklet`
+  (local self-hear) both feed `outputBus`. Default routing:
+  `outputBus → audioContext.destination`.
+- `setSpeakerMode(true)`: disconnects outputBus from destination and
+  routes it through `audioContext.createMediaStreamDestination()` →
+  a freshly-created `<audio>` element with `playsinline`,
+  `webkit-playsinline`, `autoplay`, and `srcObject = stream`.
+  iOS treats this as media playback → loudspeaker.
+- `setSpeakerMode(false)`: tears down the audio element and
+  reconnects outputBus directly to destination.
+- Preference persists in `localStorage` (`tonel.speakerMode`).
+  `init()` and `changeSampleRate()` both re-apply the stored
+  preference after the audio graph is rebuilt — survives sample
+  rate changes and reloads.
+
+`SettingsModal.tsx`: new "扬声器" toggle in the 音频设备 section.
+Off / On with explanatory hint. Toggling inside a user-gesture
+click satisfies iOS's `audio.play()` autoplay-policy requirement.
+
+Default off — desktop users (and iOS users who actually want
+earpiece) get no behaviour change. iPhone users who want speaker
+flip it once; the choice persists across reloads and room
+sessions.
+
+Verified: pretest 5/5 passed (no audio-path regression — outputBus
+at unity gain is byte-equivalent to the prior direct-to-destination
+chain).
+
 ## [3.7.1] - 2026-04-29
 
 ### Reverted — `免费创建房间` opens panel for room id + optional password

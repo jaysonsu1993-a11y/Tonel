@@ -27,6 +27,11 @@ export function SettingsModal({ open, onClose }: Props) {
   const [selectedOutput, setSelectedOutput] = useState<string>('')
   const [requestedRate,  setRequestedRate]  = useState<number | null>(AudioService.readUserRate())
   const [actualRate,     setActualRate]     = useState<number>(audioService.actualSampleRate)
+  // v3.7.2: speaker mode (iOS earpiece → speaker workaround). On
+  // desktop / non-iOS the toggle is still useful as a generic
+  // "route through audio element instead of AudioContext.destination"
+  // option, but it mainly matters on iPhone.
+  const [speakerMode, setSpeakerMode] = useState<boolean>(AudioService.readSpeakerMode())
 
   useEffect(() => {
     if (!open) return
@@ -94,6 +99,34 @@ export function SettingsModal({ open, onClose }: Props) {
                 </option>
               ))}
             </select>
+          </div>
+          {/* v3.7.2: speaker-mode toggle. Critical on iPhone — by
+              default iOS routes through the earpiece whenever mic is
+              live; this flips the route through an <audio> element so
+              iOS plays it on the loudspeaker. Harmless on desktop. */}
+          <div className="settings-row">
+            <label>扬声器</label>
+            <button
+              onClick={async () => {
+                const next = !speakerMode
+                setSpeakerMode(next)
+                try { await audioService.setSpeakerMode(next) }
+                catch (err) { console.error('[Settings] setSpeakerMode failed:', err) }
+              }}
+              style={{
+                padding: '6px 12px', borderRadius: 6,
+                background: speakerMode ? '#fff' : 'transparent',
+                color:      speakerMode ? '#000' : '#888',
+                border: '1px solid #333',
+                cursor: 'pointer', fontFamily: 'inherit', fontSize: 13,
+              }}
+            >
+              {speakerMode ? '扬声器（已启用）' : '扬声器（关闭，iPhone 走听筒）'}
+            </button>
+          </div>
+          <div className="settings-hint subtle">
+            iPhone 默认通过听筒输出（mic 一开就走 PlayAndRecord 通道）。
+            打开此项可强制走扬声器；桌面端无影响。
           </div>
         </section>
 
