@@ -502,8 +502,21 @@ void MixerServer::handle_control_message(uv_stream_t* client,
                     UserEndpoint& uep = uit->second;
                     if (have_target) {
                         uep.jitter_target = std::max(1, std::min(JITTER_TARGET_MAX, new_target));
-                        // Force re-prime on shrink so the queue can settle to
-                        // the new (lower) target instead of running fat.
+                        // Trim queue from front so its size matches the new
+                        // target. Without this, latency only ever GROWS as
+                        // the user adjusts target up and down: enqueue and
+                        // dequeue rates are equal (both ~200 frames/sec), so
+                        // steady-state queue size depends on history, not on
+                        // current target. A target=1 → 5 grow leaves the
+                        // queue at ~4 frames; the subsequent target=5 → 1
+                        // shrink primes immediately at size=4 and leaves
+                        // those 4 frames as permanent +20 ms latency. With
+                        // this trim, target shrink drops oldest frames
+                        // (one audible click — the standard tradeoff) and
+                        // restores the queue to its target-implied depth.
+                        while (uep.jitter_queue.size() > static_cast<size_t>(uep.jitter_target)) {
+                            uep.jitter_queue.pop_front();
+                        }
                         uep.jitter_primed = false;
                     }
                     if (have_cap) {

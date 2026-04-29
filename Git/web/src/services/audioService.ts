@@ -602,6 +602,22 @@ export class AudioService {
               // next tick to drift back inside.
               if (this.rateScale > this.MAX_SCALE) this.rateScale = this.MAX_SCALE
               if (this.rateScale < this.MIN_SCALE) this.rateScale = this.MIN_SCALE
+              // Hard-trim ring on target shrink. Without this, the rate
+              // loop drains the ring to the new target only over ~10 s
+              // (max +1.2 % rateScale × hysteresis band). For a debug
+              // panel where the user expects "lower the slider, hear
+              // less latency," that delay reads as "knob has no effect"
+              // — and worse, a sequence of grow-then-shrink moves can
+              // leave the ring above target with each iteration, so
+              // *perceived* latency only ever creeps up. We accept one
+              // audible discontinuity (drop ~target_delta samples) for
+              // an instantaneous, observable latency change. Same trade
+              // as the server-side jitter_queue trim on target shrink.
+              if (this.count > this.targetCount) {
+                const drop = this.count - this.targetCount
+                this.readPos = (Math.floor(this.readPos) + drop) % ${RING_SIZE}
+                this.count   = this.targetCount
+              }
               return
             }
             let samples = m

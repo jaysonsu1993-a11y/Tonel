@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.2] - 2026-04-29
+
+### Fixed — debug-panel target adjustments now actually shrink latency
+
+User report: "听感上的端到端音频延迟并没有因为 primeTarget 的增减而增减,
+反而,感觉总延迟在不断的数值调整中逐步累积叠加."
+
+**Root cause** — same shape on both sides of the wire:
+
+The server's `jitter_queue` and the client's playback ring are both
+balanced systems where enqueue and dequeue rates are equal in steady
+state (~200 frames/sec). Steady-state queue size therefore depends on
+*history*, not on current target. Symmetry of the bug:
+
+- jitter_target 1 → 5: prime-hold makes queue grow to ~5. Latency
+  +20 ms. Expected.
+- jitter_target 5 → 1: code only reset `jitter_primed=false`. Queue
+  was already ≥ 1 → re-primes immediately at size ~5 → queue stays
+  at ~5. **Latency permanently +20 ms.**
+- Iterate up/down → latency monotonically grows.
+
+Same pattern on the client: ring is bounded by RING_SIZE (1 s) but
+rate-loop drain takes ~10 s to converge to a smaller `primeTarget`,
+and the hysteresis band [0.7×target, 1.3×target] is wide enough
+that quick down-then-up moves leave residual fill.
+
+**Fix** — trim from front on shrink, both sides:
+
+- `mixer_server.cpp` `MIXER_TUNE` handler: when `jitter_target`
+  shrinks, drop oldest frames from `uep.jitter_queue` until size
+  equals new target. Same shape as the existing `jitter_max_depth`
+  shrink trim.
+- `audioService.ts` playback worklet `'tune'` handler: when
+  `primeTarget` shrinks, advance `readPos` by `(count - target)`
+  and drop `count` to `target`. Standard cushion/click tradeoff —
+  a one-time discontinuity for instantaneous, observable latency
+  reduction.
+
+Both fixes accept one audible click per shrink as the cost of an
+instantaneous latency change. That's the right trade for a debug
+panel where the user expects "lower the slider, hear less latency"
+to mean what it says.
+
+Verified via Layer 1 (SNR 84.0 dB / THD 0.006 % unchanged), Layer 1.5
+(12 jitter scenarios all PASS, plc/s and norm_energy within natural
+variance), and a new MIXER_TUNE smoke test confirming both targets
+ack correctly across grow → shrink sequences.
+
 ## [3.3.1] - 2026-04-29
 
 ### Added — triple-tap room ID to toggle debug panel (mobile)
