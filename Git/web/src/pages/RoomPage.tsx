@@ -78,6 +78,12 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   }, [])
   const [copied, setCopied] = useState(false)
   const [latency, setLatency] = useState<number>(-1)
+  // e2e = mouth-to-ear estimate (capture + RTT + server jitter + mix tick +
+  // client ring + output device). Polled at 10 fps from audioService —
+  // RTT alone updates only every 3 s on PONG, but ring-fill / jitter-target
+  // changes faster, so reading it from the same fast timer that already
+  // drives selfLevel keeps the displayed e2e responsive.
+  const [e2e, setE2e] = useState<number>(-1)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const joinedRef = useRef(false)
 
@@ -182,6 +188,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   useEffect(() => {
     const fast = setInterval(() => {
       setSelfLevel(audioService.currentLevel)
+      setE2e(audioService.audioE2eLatency)
     }, 150)
     const slow = setInterval(() => {
       const cap = audioService.captureModeValue === 'worklet' ? 'wkt'
@@ -339,9 +346,14 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           {isMuted ? 'MIC OFF' : 'MIC ON'}
         </button>
 
-        <div className="latency-display">
+        <div className="latency-display" title="端到端 = capture + RTT + server jitter + mix + client ring + output device">
           <span className="latency-label">延迟</span>
-          <span className={`latency-value ${latency < 0 ? 'offline' : latency < 50 ? 'good' : latency < 100 ? 'ok' : 'bad'}`}>
+          <span className={`latency-value ${e2e < 0 ? 'offline' : e2e < 100 ? 'good' : e2e < 200 ? 'ok' : 'bad'}`}>
+            {e2e < 0 ? '--' : `${e2e}ms`}
+          </span>
+          <span className="latency-sep">·</span>
+          <span className="latency-sublabel">RTT</span>
+          <span className={`latency-value latency-rtt ${latency < 0 ? 'offline' : latency < 50 ? 'good' : latency < 100 ? 'ok' : 'bad'}`}>
             {latency < 0 ? '--' : `${latency}ms`}
           </span>
         </div>

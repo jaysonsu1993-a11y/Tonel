@@ -2513,6 +2513,33 @@ export class AudioService {
     return this._audioLatency
   }
 
+  /**
+   * Estimated mouth-to-ear end-to-end audio latency (ms). Sums every
+   * known buffer in the round trip from a talker's mic to a listener's
+   * speaker:
+   *   capture frame (5 ms, one Opus frame) +
+   *   network RTT (control WS ≈ audio WS) +
+   *   server jitter wait, avg = (jitterTarget − 0.5) × 5 ms +
+   *   server mix tick (5 ms) +
+   *   client playback ring depth (live, samples / sampleRate) +
+   *   browser output device latency (audioContext.outputLatency).
+   *
+   * Returns −1 until the first PONG arrives, since RTT is the only
+   * component we don't already know. Recomputed on read — no timer.
+   */
+  get audioE2eLatency(): number {
+    if (this._audioLatency < 0) return -1
+    const captureMs = 5
+    const rttMs     = this._audioLatency
+    const jitterMs  = Math.max(0, (this.serverTuning.jitterTarget - 0.5) * 5)
+    const mixTickMs = 5
+    const sr        = this.audioContext?.sampleRate || 48000
+    const ringMs    = (this.playRingFill / sr) * 1000
+    // outputLatency is in seconds (Chrome/FF); Safari often omits it.
+    const outMs     = ((this.audioContext as any)?.outputLatency ?? 0) * 1000
+    return Math.round(captureMs + rttMs + jitterMs + mixTickMs + ringMs + outMs)
+  }
+
   destroy(): void {
     this.stopPing()
     if (this.animationFrameId !== null) {

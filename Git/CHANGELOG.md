@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.8] - 2026-04-30
+
+### Added — split end-to-end vs RTT in the room latency display
+
+The header `延迟` field used to show only WebSocket PING/PONG RTT —
+i.e. the network round-trip to the mixer server, with none of the
+audio-pipeline buffering accounted for. Users would see "20 ms" and
+expect mouth-to-ear latency at that level, when in reality the
+perceived audio delay was 80–150 ms after capture frame, server
+jitter buffer, mix tick, client playback ring, and the browser's
+output device latency stacked up.
+
+Now the main number is an **estimated end-to-end latency**, with RTT
+shown as a small secondary readout next to it.
+
+**`audioService.ts`** — new `audioE2eLatency` getter. Sums every
+known buffer in the round trip on read (no extra timer):
+
+```
+e2e ≈ 5 ms (capture frame)
+    + RTT (control WS PING/PONG, ≈ audio WS path)
+    + (jitterTarget − 0.5) × 5 ms (server jitter buffer, average wait)
+    + 5 ms (server mix tick)
+    + playRingFill / sampleRate × 1000 (client playback ring depth)
+    + audioContext.outputLatency × 1000 (browser output device)
+```
+
+Returns −1 until the first PONG. `outputLatency` is `?? 0` for
+Safari (which often omits it) — Safari estimates will run 10–50 ms
+low because the OS output stack is opaque to the browser.
+
+**`RoomPage.tsx`** — added `e2e` state, polled at the existing
+150 ms fast timer (RTT alone updates only every 3 s on PONG, but
+ring-fill / jitter-target change faster, so reading from the same
+fast timer keeps the displayed value responsive). Header renders
+`延迟 NNNms · RTT MMms` with two color-coded thresholds:
+
+- e2e: <100 good, <200 ok, ≥200 bad (real-time audio perception scale)
+- RTT: <50 good, <100 ok, ≥100 bad (unchanged from v3.7.7)
+
+Tooltip on the latency display lists the six summands so an engineer
+can mentally back out which stage is the bottleneck.
+
+**`globals.css`** — three new rules (`.latency-sep`,
+`.latency-sublabel`, `.latency-value.latency-rtt`) so the RTT readout
+is visually subordinate to e2e (smaller, lower-opacity).
+
+**Net effect**: the number on screen now matches the user's
+perceptual expectation — seeing "120 ms" actually reflects what they
+hear, not just the network hop. Useful for both end-user
+self-diagnosis ("my latency is bad → why?") and engineer tuning
+("which buffer is the dominant cost?").
+
 ## [3.7.7] - 2026-04-29
 
 ### Reverted — iPhone speaker-mode workaround (it was poisoning getUserMedia)

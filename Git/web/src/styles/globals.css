@@ -514,6 +514,23 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
 .latency-value.bad { color: #f87171; }
 .latency-value.offline { color: var(--text-faint); }
 
+.latency-sep {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin: 0 2px;
+}
+.latency-sublabel {
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.latency-value.latency-rtt {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
 /* Latency tester row */
 .room-latency-row {
   margin-bottom: 24px;
