@@ -5,30 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.4.2] - 2026-04-29
+## [3.4.3] - 2026-04-29
 
-### Diagnostic — debug strip shows uid + signaling peers + faster refresh
+### Fixed — local monitor now routes through masterGain (was inaudible at gain 1.0)
 
-User report from v3.4.1: in 2-person room, debug strip shows
-`roomUsers=1 mon=0.00` — meaning the mixer-side user count is stuck
-at 1, monitor never engages. The signaling side (peer list / channel
-strips) does show two users, so the two paths disagree. Classic
-same-userId-collision pattern, but we need to see *which* userIds
-each device is using to confirm.
+User report: in 2-person room, debug strip shows `roomUsers=2 mon=1.00`
+(N-1 mix correct, monitor gain target reached) but the monitor is
+still inaudible.
 
-Changes:
-- Debug strip now shows `uid=<first 14 chars>` and `peers=<signaling
-  count>` next to `roomUsers=<mixer count>`. A `peers=2 roomUsers=1`
-  mismatch is the unambiguous signature of mixer-side collision; if
-  uids on the two devices match (same `uid=...` prefix and suffix),
-  the v3.3.3 device-suffix fix didn't take effect on this device
-  (likely localStorage was somehow shared or pre-suffix uid was
-  cached).
-- Strip refresh rate up from 0.5 Hz to 2 Hz so transitions when a
-  peer joins/leaves are visible without waiting up to 2 seconds.
+The monitor was wired `source → monitorGain → destination`.
+Empirically, the user's hardware silently dropped this path while a
+parallel `playbackWorklet → masterGain → destination` path worked
+fine. Likely cause: some browsers (notably iOS/Safari) gate
+mic-source paths that connect directly to `destination` without an
+intermediate gain stage — system-level echo handling or anti-feedback
+heuristics.
 
-No behavioural change — just visibility. Once the user reports both
-devices' `uid=` values, the fix path is unambiguous.
+Fix: route monitor through `masterGain` instead, the same node that
+successfully plays peer audio:
+```
+source → monitorGain → masterGain → destination
+```
+
+Both wiring sites updated (init() / initPlayback() and the
+changeSampleRate() rebuild path).
+
+Side-effect: `setMasterGain(0)` (used by the solo-self toggle)
+now also mutes the monitor. Acceptable until we wire an
+independent monitor mute control on the debug panel.
+
+Plus: `roomUsers`, `uid` and `peers` (signaling count) added to the
+debug strip alongside `mon=`, and refresh rate up from 0.5 Hz to 2 Hz
+so transitions when a peer joins/leaves are immediately visible.
 
 ## [3.4.1] - 2026-04-29
 

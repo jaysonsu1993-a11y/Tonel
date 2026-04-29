@@ -398,7 +398,17 @@ export class AudioService {
     this.monitorGain = this.audioContext.createGain()
     this.monitorGain.gain.value = 0
     this.source.connect(this.monitorGain)
-    this.monitorGain.connect(this.audioContext.destination)
+    // v3.4.3: route through masterGain instead of directly to destination.
+    // Direct-to-destination produced no audible output on the user's
+    // hardware despite gain.value reaching 1.0 (verified via debug strip
+    // `mon=1.00` while `roomUsers=2`). Likely cause: some browsers gate
+    // mic→speaker paths that don't pass through a downstream gain stage
+    // (system-level echo handling, channel-route quirks). Going through
+    // masterGain — the same node that successfully plays peer audio —
+    // guarantees the proven path. Side-effect: solo-self (masterGain=0)
+    // also mutes the monitor; that's an acceptable trade until we wire
+    // an independent monitor mute in the panel.
+    this.monitorGain.connect(this.masterGain)
     this.updateMonitorGain()
 
     await this.initPlaybackWorklet()
@@ -519,7 +529,10 @@ export class AudioService {
       this.monitorGain = this.audioContext.createGain()
       this.monitorGain.gain.value = 0
       this.source.connect(this.monitorGain)
-      this.monitorGain.connect(this.audioContext.destination)
+      // v3.4.3: route through masterGain — see init() / changeSampleRate
+      // path for the rationale. Direct-to-destination silently failed to
+      // produce audible output despite gain.value=1.0.
+      this.monitorGain.connect(this.masterGain)
       this.updateMonitorGain()
     }
     await this.initPlaybackWorklet()
