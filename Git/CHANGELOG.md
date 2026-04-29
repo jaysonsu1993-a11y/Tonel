@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.2] - 2026-04-29
+
+### Diagnostic — debug strip shows uid + signaling peers + faster refresh
+
+User report from v3.4.1: in 2-person room, debug strip shows
+`roomUsers=1 mon=0.00` — meaning the mixer-side user count is stuck
+at 1, monitor never engages. The signaling side (peer list / channel
+strips) does show two users, so the two paths disagree. Classic
+same-userId-collision pattern, but we need to see *which* userIds
+each device is using to confirm.
+
+Changes:
+- Debug strip now shows `uid=<first 14 chars>` and `peers=<signaling
+  count>` next to `roomUsers=<mixer count>`. A `peers=2 roomUsers=1`
+  mismatch is the unambiguous signature of mixer-side collision; if
+  uids on the two devices match (same `uid=...` prefix and suffix),
+  the v3.3.3 device-suffix fix didn't take effect on this device
+  (likely localStorage was somehow shared or pre-suffix uid was
+  cached).
+- Strip refresh rate up from 0.5 Hz to 2 Hz so transitions when a
+  peer joins/leaves are visible without waiting up to 2 seconds.
+
+No behavioural change — just visibility. Once the user reports both
+devices' `uid=` values, the fix path is unambiguous.
+
 ## [3.4.1] - 2026-04-29
 
 ### Changed — monitor uses linear ramp + visible in debug strip

@@ -108,16 +108,19 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       // rateScale shown as ppm offset from 1.0 — easier to read than 1.00237
       const ratePpm = ((audioService.playRateScale - 1.0) * 1e6) | 0
       const rateStr = ratePpm >= 0 ? `+${ratePpm}` : `${ratePpm}`
+      // uid (first 14 chars) + peer counts from BOTH paths so a mismatch
+      // between signaling (`peers=`) and mixer (`roomUsers=`) is visible
+      // at a glance — that's the v3.4.x same-userId-collision pattern.
+      const uidShort = (userId || '').slice(0, 14)
       setDbg(
-        `tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
-        `rxPeak=${audioService.rxLevelPeak.toFixed(3)} ws=${audioService.audioWsState} ` +
-        `cap=${cap} micClip=${audioService.captureClipCountValue} ` +
-        `roomUsers=${audioService.serverPeerCount} ` +
-        `mon=${audioService.monitorGainTarget.toFixed(2)} ` +
+        `uid=${uidShort} peers=${peers.length} roomUsers=${audioService.serverPeerCount} ` +
+        `mon=${audioService.monitorGainTarget.toFixed(2)} ws=${audioService.audioWsState} ` +
+        `cap=${cap} tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
+        `rxPeak=${audioService.rxLevelPeak.toFixed(3)} micClip=${audioService.captureClipCountValue} ` +
         `repri=${audioService.playReprimeCount} gap=${audioService.rxSeqGapCount} ` +
         `ring=${audioService.playRingFill} rate=${rateStr}ppm${muteFlag}`
       )
-    }, 2000)
+    }, 500)   // 2 Hz → enough to see roomUsers transitions when peer joins/leaves
     return () => { clearInterval(fast); clearInterval(slow) }
   }, [])
 
