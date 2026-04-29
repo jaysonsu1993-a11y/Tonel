@@ -68,5 +68,8 @@ export interface UserProfile {
   membershipExpiresAt?: number
 }
 
-// 页面状态
-export type PageState = 'login' | 'home' | 'room'
+// 页面状态.
+// `pricing` / `booking` / `download` are placeholder routes added by
+// the v3.7.0 V1 homepage redesign — see App.tsx for the implementation
+// stubs (each currently renders a "Coming soon" panel).
+export type PageState = 'login' | 'home' | 'room' | 'pricing' | 'booking' | 'download'

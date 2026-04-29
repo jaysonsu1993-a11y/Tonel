@@ -85,6 +85,9 @@ export default function App() {
   // Surfaced when the server sends SESSION_REPLACED — another device joined
   // with this user's id and our session was kicked. Toast + redirect home.
   const [sessionReplacedNotice, setSessionReplacedNotice] = useState(false)
+  // v3.7.0: mobile drawer (hamburger menu) state. Only used by the
+  // .tn-mnav block which is the < 768px nav.
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const { peers, connect, createRoom, joinRoom, leaveRoom,
           sessionReplaced, acknowledgeSessionReplaced } = useSignal()
 
@@ -127,7 +130,27 @@ export default function App() {
       }
     }
     window.addEventListener('popstate', onPop)
-    return () => window.removeEventListener('popstate', onPop)
+
+    // v3.7.0: hash-based routing for the placeholder pages
+    // (#pricing / #booking / #download). HomePage's CTAs set
+    // location.hash; we watch it here and flip the page state.
+    // Refused while in a room — don't pull the user out of audio
+    // for a placeholder page.
+    const onHash = () => {
+      const h = (window.location.hash || '').toLowerCase()
+      if (roomIdRef.current) return
+      if (h === '#pricing')        setPage('pricing')
+      else if (h === '#booking')   setPage('booking')
+      else if (h === '#download')  setPage('download')
+      else                         setPage('home')
+    }
+    window.addEventListener('hashchange', onHash)
+    onHash()  // honour hash on initial load (e.g. shared link to #pricing)
+
+    return () => {
+      window.removeEventListener('popstate', onPop)
+      window.removeEventListener('hashchange', onHash)
+    }
   }, [])
 
   // Mirror roomId into a ref so popstate (which only captures the initial
@@ -283,47 +306,68 @@ export default function App() {
   return (
     <div className="app-root">
       <MusicBackground />
-      {/* 导航栏 */}
-      <nav className="nav">
-        <div className="nav-left">
-          <a href="/" className="nav-brand">
-            <span className="nav-name">Tonel</span>
+      {/* v3.7.0 V1 nav — desktop bar (≥768px). The mobile equivalent
+          (.tn-mnav) is rendered just below; CSS shows whichever
+          matches the viewport. */}
+      <nav className="tn-nav">
+        <div className="tn-nav-left">
+          <a href="/" className="tn-brand"
+             onClick={(e) => { e.preventDefault(); window.location.hash = ''; setPage('home') }}>
+            Tonel
           </a>
-          <ul className="nav-links">
-            <li><a href="#features">功能</a></li>
-            <li><a href="https://github.com/jaysonsu1993-a11y/Tonel" target="_blank" rel="noopener">GitHub</a></li>
+          <ul className="tn-nav-links">
+            <li><a onClick={() => { window.location.hash = ''; setPage('home') }}>功能</a></li>
+            <li><a onClick={() => { window.location.hash = '#pricing' }}>定价</a></li>
+            <li><a onClick={() => { window.location.hash = '' /* TODO #docs route */ }}>文档</a></li>
+            <li><a href="https://github.com/jaysonsu1993-a11y/Tonel" target="_blank" rel="noopener">
+              GitHub <span className="tn-ext-arrow">↗</span>
+            </a></li>
           </ul>
         </div>
-
-        <div className="nav-right">
-          <div className="user-badge">
-            <span className="dot" />
-            <span>{isLoggedIn ? (userProfile?.membershipType === 'pro' ? 'PRO' : 'BASIC') : 'FREE'}</span>
-          </div>
+        <div className="tn-nav-right">
+          <button className="tn-btn tn-btn-ghost-sm"
+                  onClick={() => { window.location.hash = '#download' }}>下载</button>
           {isLoggedIn ? (
-            <div className="user-info">
-              {userProfile?.avatarUrl && (
-                <img 
-                  src={userProfile.avatarUrl} 
-                  alt="avatar" 
-                  className="user-avatar"
-                  style={{ width: 28, height: 28, borderRadius: '50%', marginRight: 8 }}
-                />
-              )}
-              <span className="user-nickname" style={{ marginRight: 12, fontSize: 14 }}>
-                {userProfile?.nickname || userId}
-              </span>
-              <button className="btn btn-ghost btn-sm" onClick={handleLogout}>
+            <div className="tn-user">
+              {userProfile?.avatarUrl && <img src={userProfile.avatarUrl} alt="" />}
+              <span>{userProfile?.nickname || userId}</span>
+              <button className="tn-btn tn-btn-ghost-sm" onClick={handleLogout} style={{ marginLeft: 4 }}>
                 退出
               </button>
             </div>
           ) : (
-            <button className="btn btn-primary btn-sm" onClick={() => setShowLoginModal(true)}>
+            <button className="tn-btn tn-btn-primary-sm" onClick={() => setShowLoginModal(true)}>
               登录
             </button>
           )}
         </div>
       </nav>
+
+      {/* Mobile nav (<768px) — same actions, hamburger + drawer. */}
+      <nav className="tn-mnav">
+        <span className="tn-mnav-brand">Tonel</span>
+        <button className="tn-mnav-burger" aria-label="menu"
+                onClick={() => setMobileMenuOpen(m => !m)}>
+          <span /><span /><span />
+        </button>
+      </nav>
+      <div className={`tn-drawer${mobileMenuOpen ? ' open' : ''}`}>
+        <button onClick={() => { setMobileMenuOpen(false); window.location.hash = ''; setPage('home') }}>功能</button>
+        <button onClick={() => { setMobileMenuOpen(false); window.location.hash = '#pricing' }}>定价</button>
+        <button onClick={() => { setMobileMenuOpen(false) /* TODO #docs */ }}>文档</button>
+        <button onClick={() => { setMobileMenuOpen(false); window.location.hash = '#download' }}>下载桌面版 ↓</button>
+        <a href="https://github.com/jaysonsu1993-a11y/Tonel" target="_blank" rel="noopener">GitHub ↗</a>
+        {isLoggedIn ? (
+          <button className="tn-drawer-login" onClick={handleLogout}>
+            退出 ({userProfile?.nickname || userId})
+          </button>
+        ) : (
+          <button className="tn-drawer-login"
+                  onClick={() => { setMobileMenuOpen(false); setShowLoginModal(true) }}>
+            登录
+          </button>
+        )}
+      </div>
 
       {/* 微信登录弹窗 */}
       {showLoginModal && (
@@ -410,7 +454,34 @@ export default function App() {
             onLeave={handleLeaveRoom}
           />
         )}
+        {(page === 'pricing' || page === 'booking' || page === 'download') && (
+          <Placeholder kind={page} onHome={() => { window.location.hash = ''; setPage('home') }} />
+        )}
       </main>
+    </div>
+  )
+}
+
+/**
+ * Placeholder for the v3.7.0 routes that exist in the design but
+ * don't have a backing feature yet. Renders a minimal "Coming
+ * soon" panel with a back-to-home button. Intentionally kept inline
+ * (not a separate file) until any of these grow real content —
+ * spinning up a `pages/` file for a 30-line stub is overhead.
+ */
+function Placeholder({ kind, onHome }: { kind: 'pricing' | 'booking' | 'download'; onHome: () => void }) {
+  const titles = {
+    pricing:  { tag: 'PRICING',  title: '定价方案',     blurb: '免费 / Pro / 团队三档计划。详细价格表正在整理。' },
+    booking:  { tag: 'PRO TRIAL', title: 'Pro 预约试用', blurb: '想抢先体验 Pro 完整功能？预约接入流程开发中。' },
+    download: { tag: 'DOWNLOAD', title: '下载桌面客户端', blurb: 'macOS / Windows 原生客户端正在打包。Web 版可直接使用。' },
+  }
+  const t = titles[kind]
+  return (
+    <div className="tn-placeholder">
+      <div className="tag">● {t.tag}</div>
+      <h1>{t.title}</h1>
+      <p>{t.blurb}</p>
+      <button className="tn-btn tn-btn-primary-sm" onClick={onHome}>← 返回主页</button>
     </div>
   )
 }

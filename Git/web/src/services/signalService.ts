@@ -45,6 +45,30 @@ class SignalService {
       this.ws.onopen = () => {
         console.log('[Signal] Connected')
         this.startHeartbeat()
+        // v3.6.2: replay JOIN_ROOM after reconnect.
+        //
+        // Without this, the post-reconnect ctx is unknown to the
+        // server's room map: on_close has already removed our prior
+        // membership and broadcast PEER_LEFT. Subsequent peers' joins
+        // never reach us — `peers=0` even while the mixer-side audio
+        // path keeps working (mixer has its own auto-rehandshake in
+        // audioService). That's the long-standing
+        // `peers=0 roomUsers=2` discrepancy the user kept hitting.
+        //
+        // Server's join_room is idempotent on the room.users set
+        // (`add_user` returns false on duplicate inserts but doesn't
+        // error), so a stray replay when we're still actually in the
+        // room is harmless.
+        if (this.roomId && this.userId) {
+          console.log('[Signal] Reconnect: replaying JOIN_ROOM for', this.roomId, this.userId)
+          this.send({
+            type:    'JOIN_ROOM',
+            room_id: this.roomId,
+            user_id: this.userId,
+            ip:      '0.0.0.0',
+            port:    9003,
+          })
+        }
         resolve()
       }
       this.ws.onmessage = (evt) => {

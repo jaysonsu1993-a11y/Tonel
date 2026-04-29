@@ -5,6 +5,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0] - 2026-04-29
+
+### Three things — signaling root-cause fix, pre-release gate, V1 homepage
+
+**1. Fixed: `peers=0 roomUsers=2` discrepancy at the root.**
+
+v3.6.1 patched the SYMPTOM (UI fell back to mixer LEVELS for missing
+strips). The real bug was in `signalService.connect()`'s
+`onopen` — after a WebSocket reconnect, the new ctx never replayed
+`JOIN_ROOM`. Server's `on_close` had already run `leave_room` +
+broadcast `PEER_LEFT` on the prior ctx, so the room map no longer
+knew this user. Subsequent peers' joins → no `PEER_JOINED` to us
+→ `peers=0` even though audio kept working (the mixer side has its
+own auto-rehandshake in audioService that we never fed back to
+signaling).
+
+Fix: `onopen` now sends `JOIN_ROOM` whenever `roomId` and `userId`
+are set (i.e. we'd previously joined). Server's `room->add_user`
+is idempotent on a duplicate insert, so a stray replay while still
+in the room is harmless. Reproduced before fix and verified after
+fix via `Git/server/test/signaling_integration.js`'s
+`reconnect-replay` scenario.
+
+**2. Added: `Git/scripts/pretest.sh` — pre-release safety gate.**
+
+Wired into `Git/scripts/release.sh` as step `[0/6]`. Any failure
+aborts the release before bump / commit / push / deploy. Set
+`SKIP_PRETEST=1` for emergencies (NOT recommended).
+
+Layers, ascending cost:
+
+| # | Test | Time |
+|---|---|---|
+| 1 | server cmake build + `mixer_server --test` | ~2–4 s |
+| 2 | Layer 1 — Node SPA1 audio (1 kHz sine SNR/THD) | ~3–5 s |
+| 3 | Layer 1.5 — jitter / PLC sweep, 12 scenarios | ~70 s |
+| 4 | NEW: signaling integration (3 scenarios) | ~2–4 s |
+| 5 | Layer 2 — browser audio via Playwright | ~25 s + auto-retry |
+
+Layer 4 is new and covers the v3.6.x regression class
+(create-then-join, reconnect-replay, peer-left). All scenarios run
+against a real `signaling_server` binary, not against mocks — fixes
+in the C++ code AND the JS service are both covered.
+
+**3. Added: V1 homepage redesign (desktop + mobile).**
+
+Per `design_handoff_homepage_v1/README.md`. Replaces the prior
+hero / action-grid / features / online-list layout with a hacker /
+engineering-feel page anchored on the live RTT digit:
+
+- 56-px sticky nav, glass blur. Links: 功能 / 定价 / 文档 / GitHub.
+  Right side: 下载 (ghost) + 登录 (primary). All routes wired.
+- Status bar (mono, 10 px): SIGNALING ONLINE · SAMPLE 48000 HZ ·
+  BUFFER 128 · CODEC OPUS 96K · BUILD 2026.04.29.
+- 1:1 hero grid. Left: eyebrow + 64 px headline ("合奏的距离 / 不再有
+  距离。") + sub + 免费创建房间 / 加入房间 / 预约 Pro 试用. Right:
+  360 px live latency digit (`<LiveLatency>`) + ms unit + axis
+  comparing video-conf / Bluetooth / perceptible / Tonel / room air.
+- Bottom 4-cell stats row: Latency (lit) / Active rooms / Online /
+  Uptime (lit).
+- Mobile (<768 px): hamburger drawer, status strip, 156 px digit,
+  bar-chart axis, 38 px headline, vertically-stacked CTA, 2×2 stats,
+  mono footer. <480 px additionally drops digit→132 px and headline→32 px.
+
+Live latency wiring: `<LiveLatency>` subscribes to
+`signalService.onLatency`, throttled to ≥200 ms UI updates, with
+a 220 ms mock-pulse placeholder for the pre-connect gap so the
+page never looks frozen on first paint. Tone follows spec:
+green `<50 ms` / yellow `50–99 ms` / red `≥100 ms`.
+
+CTA wiring:
+- `免费创建房间` → `onCreateRoom(generatedId)` (auto random 6-char
+  upper-case id, no panel).
+- `加入房间` → modal panel for room id + optional password.
+- `预约 Pro 试用` / `预约时段` → `#booking` route → placeholder.
+- `下载` → `#download` route → placeholder.
+- 定价 → `#pricing` route → placeholder.
+
+Placeholders: `Placeholder` component renders a minimal "coming
+soon" panel + back-to-home button. Inline in `App.tsx` until any
+of these grow real content.
+
+Hash routing for `#pricing` / `#booking` / `#download` so links
+are shareable + back button works. Refused while in a room — won't
+pull the user out of audio for a placeholder.
+
+Existing props/protocol/route/UX paths preserved: `HomePage` props
+unchanged, `/room/<id>` deep-link still works, `WechatLogin` flow
+unchanged, mixer + audio paths untouched.
+
+Verified: pretest passed all 5 layers including the new signaling
+integration scenarios. Web bundle 236 KB / 75 KB gzipped.
+
 ## [3.6.1] - 2026-04-29
 
 ### Fixed — peer strips now show even when signaling reports `peers=0`

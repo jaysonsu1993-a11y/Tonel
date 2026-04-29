@@ -80,6 +80,21 @@ if [ "$MODE" != "deploy-only" ]; then
     [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "must be on main branch"
 fi
 
+# ─── Step 0: pre-release safety gate ────────────────────────────────────────
+#
+# Server unit tests + Layer 1/1.5 audio + signaling integration + Layer 2
+# browser audio. Catches the regression class that the user kept hitting in
+# production (e.g. the v3.6.x peers=0 reconnect bug). Fails fast — if any
+# layer breaks, we don't bump, commit, push, or deploy. Set SKIP_PRETEST=1
+# to bypass for an emergency hotfix (NOT recommended).
+if [ "${SKIP_PRETEST:-0}" = "1" ]; then
+    warn "[0/6] SKIP_PRETEST=1 — skipping pre-release smoke (NOT RECOMMENDED)"
+else
+    log "[0/6] pre-release smoke (Git/scripts/pretest.sh)"
+    "$SCRIPT_DIR/pretest.sh" || die "pretest failed — refusing to release. Fix and re-run."
+    ok "[0/6] pretest passed"
+fi
+
 # ─── Step 1+2+3: bump + CHANGELOG + commit + tag + push ─────────────────────
 
 if [ "$MODE" != "deploy-only" ]; then
