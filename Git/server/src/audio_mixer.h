@@ -49,6 +49,19 @@ public:
     // "voice + distortion overlay." Applies soft clip. Does NOT consume.
     void mixExcluding(const std::string& excludeUserId, float* output, int frameCount);
 
+    // Per-recipient gain variant: same N-1 exclusion, but each contributing
+    // track is also scaled by `peerGains[track_uid]` (default 1.0 if the
+    // map has no entry). Lets each listener pick their own per-source
+    // volume without affecting what other listeners hear of that source —
+    // i.e. the channel-strip fader semantic.
+    //
+    // The track-level `weight` (set via setWeight) is multiplied on top:
+    // final per-track gain = weight × peerGains.lookup. Soft clip after
+    // the sum, same as mixExcluding.
+    void mixExcludingWithGains(const std::string& excludeUserId,
+                                const std::unordered_map<std::string, float>& peerGains,
+                                float* output, int frameCount);
+
     // Mark all tracks consumed: clears frameCount on tracks that had
     // fresh data this tick, decays lastRms on silent ones. Call exactly
     // once per broadcast tick, after every per-recipient mixExcluding
@@ -123,6 +136,12 @@ private:
 
     // Internal helpers shared by mix(), mixAll(), mixExcluding().
     void accumulate(const std::string* excludeUserId, float* output, int frameCount) const;
+    // Same as accumulate but consults `peerGains` for an extra per-source
+    // multiplier (default 1.0). Kept separate from `accumulate` to keep
+    // the hot path of the existing N-1 mix branchless on the gain lookup.
+    void accumulateWithGains(const std::string* excludeUserId,
+                              const std::unordered_map<std::string, float>& peerGains,
+                              float* output, int frameCount) const;
     static void softClipBuffer(float* output, int frameCount);
 };
 
@@ -250,6 +269,45 @@ inline void AudioMixer::mixAll(float* output, int frameCount) {
 inline void AudioMixer::mixExcluding(const std::string& excludeUserId, float* output, int frameCount) {
     accumulate(&excludeUserId, output, frameCount);
     softClipBuffer(output, frameCount);
+}
+
+inline void AudioMixer::mixExcludingWithGains(const std::string& excludeUserId,
+                                               const std::unordered_map<std::string, float>& peerGains,
+                                               float* output, int frameCount) {
+    accumulateWithGains(&excludeUserId, peerGains, output, frameCount);
+    softClipBuffer(output, frameCount);
+}
+
+inline void AudioMixer::accumulateWithGains(const std::string* excludeUserId,
+                                             const std::unordered_map<std::string, float>& peerGains,
+                                             float* output, int frameCount) const {
+    std::memset(output, 0, frameCount * sizeof(float));
+    for (const auto& kv : tracks_) {
+        if (excludeUserId && kv.first == *excludeUserId) continue;
+        const Track& t = kv.second;
+        // Per-recipient multiplier: stacks on top of the per-track weight
+        // so the channel-strip fader operates independently from any
+        // global track-weight policy. Default 1.0 when the recipient
+        // hasn't overridden this peer's volume.
+        auto gIt = peerGains.find(kv.first);
+        const float peerG = (gIt == peerGains.end()) ? 1.0f : gIt->second;
+        const float w = t.weight * peerG;
+        if (t.frameCount > 0) {
+            const float* src = t.audio;
+            int count = std::min(frameCount, t.frameCount);
+            if (w == 1.0f) {
+                for (int i = 0; i < count; ++i) output[i] += src[i];
+            } else {
+                for (int i = 0; i < count; ++i) output[i] += src[i] * w;
+            }
+        } else if (t.hasPrev && t.decayCount < PLC_MAX_DECAY) {
+            const float fade = 0.5f * (1.0f + std::cos(static_cast<float>(M_PI) * t.decayCount / static_cast<float>(PLC_MAX_DECAY)));
+            const float gw   = w * fade;
+            const float* src = t.prevAudio;
+            const int  count = std::min(frameCount, MAX_FRAME_COUNT);
+            for (int i = 0; i < count; ++i) output[i] += src[i] * gw;
+        }
+    }
 }
 
 inline void AudioMixer::consumeAllTracks() {

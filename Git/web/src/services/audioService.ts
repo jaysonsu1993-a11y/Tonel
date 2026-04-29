@@ -791,6 +791,49 @@ export class AudioService {
     this.monitorMuted = muted
     this.updateMonitorGain()
   }
+
+  // ── Per-peer playback gain (channel-strip faders) ───────────────────────
+  // Server stores the table in this user's UserEndpoint and applies it
+  // at mix time via `mixExcludingWithGains`. Client just sends the
+  // command and tracks the local mirror for UI initialisation.
+  private peerGains = new Map<string, number>()
+  /** Cached per-peer gain — last value sent (or acked). Range [0, 2]. */
+  getPeerGain(peerUserId: string): number {
+    return this.peerGains.get(peerUserId) ?? 1.0
+  }
+  /**
+   * Set this user's playback gain for one specific peer (channel-strip
+   * fader → here). The change is server-side: the next mix tick's N-1
+   * mix sent to *this* user scales that peer's track by `gain`. Other
+   * users' mixes are unaffected.
+   *
+   * Range [0, 2]; 1.0 is unity. The server clamps to the same range and
+   * deletes the key on exact 1.0 so the map stays small.
+   */
+  setPeerGain(peerUserId: string, gain: number): void {
+    const clamped = Math.max(0, Math.min(2, gain))
+    this.peerGains.set(peerUserId, clamped)
+    if (this.controlWs?.readyState === WebSocket.OPEN) {
+      this.controlWs.send(JSON.stringify({
+        type:           'PEER_GAIN',
+        room_id:        this.roomId,
+        user_id:        this.userId,
+        target_user_id: peerUserId,
+        gain:           clamped,
+      }) + '\n')
+    }
+  }
+
+  // ── Input gain (mic send level) ─────────────────────────────────────────
+  // Multiplied into mic samples before SPA1 encode. Local-only; this is
+  // how loud peers (and the recording sink) hear *your* voice. Default
+  // 1.0 = unity, range [0, 2] for a +6 dB ceiling. Wired to the INPUT
+  // TRACKS self-strip's fader.
+  private inputGain = 1.0
+  setInputGain(g: number): void {
+    this.inputGain = Math.max(0, Math.min(2, g))
+  }
+  get inputGainValue(): number { return this.inputGain }
   /** Current monitor base gain (0-2). For UI initialisation. */
   get monitorBaseGainValue(): number { return this.monitorBaseGain }
   get monitorMutedValue(): boolean { return this.monitorMuted }
@@ -1456,6 +1499,14 @@ export class AudioService {
       // Worklet doesn't know about mute; zero the frame here so server
       // sees silence rather than mic content while muted.
       frame.fill(0)
+    } else if (this.inputGain !== 1.0) {
+      // Input gain — scale samples in place before encode. PCM16 will
+      // hard-clamp to [-1, 1] so a gain > ~3 starts visibly clipping;
+      // we cap at 2 in the setter, so worst case is +6 dB headroom and
+      // peaks above 0.5 nominal start saturating audibly. Acceptable
+      // tradeoff vs adding a soft-clip stage on the input.
+      const g = this.inputGain
+      for (let i = 0; i < frame.length; i++) frame[i] *= g
     }
     const uid = `${this.roomId}:${this.userId}`
     const pcm16 = float32ToPcm16(frame)

@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-04-29
+
+### Added — channel-strip faders now actually do per-channel work
+
+Previously every fader was wired to `setMasterGain`, so every strip
+had the same effect (global playback). Now each fader does what its
+section says it does:
+
+| Fader | Effect | Mechanism |
+|---|---|---|
+| MIXER → peer strip | Adjust **just that peer's** loudness in your mix | Server-side per-recipient gain via new `PEER_GAIN` msg |
+| MIXER → `YOU·Mon` | Adjust **your own** monitor (self-hear) loudness | Local `monitorBaseGain` in monitor worklet (v3.5.0) |
+| INPUT TRACKS → `YOU` | Adjust **your mic input gain** before sending | Local multiplier in `sendCapturedFrame` |
+
+**Server changes** — `audio_mixer.h`, `mixer_server.{h,cpp}`:
+
+- New `mixExcludingWithGains(excludeUid, peerGains, output, n)` —
+  same N-1 mix, but each contributing track is multiplied by
+  `peerGains[track_uid]` (default 1.0). Stacks with the existing
+  per-track `weight` so global-vs-per-listener can coexist.
+- `UserEndpoint` gains a `peer_gains: unordered_map<string, float>`.
+  Empty by default → unity for all peers (byte-identical to prior
+  N-1 mix output, verified by Layer 1 + 1.5 sweep).
+- New control message:
+  ```
+  {"type":"PEER_GAIN","room_id":"<r>","user_id":"<self>",
+   "target_user_id":"<source>","gain":<float>}
+  ```
+  Server clamps gain to [0, 2]. Exact `1.0` deletes the key (keeps
+  the map small under "drag back to unity" usage). Replies with
+  `PEER_GAIN_ACK { target_user_id, gain }`.
+- Broadcast loop now passes the recipient's `peer_gains` to
+  `mixExcludingWithGains` instead of plain `mixExcluding`. Falls
+  back identically when the map is empty.
+
+**Client changes** — `audioService.ts`:
+
+- `setPeerGain(peerUid, g)` — sends `PEER_GAIN` over the control WS.
+  Mirrors locally in a `peerGains: Map<string, number>` for UI
+  initialisation.
+- `setInputGain(g)` — local field in `[0, 2]`. `sendCapturedFrame`
+  multiplies samples by it before PCM16 encode. Skipped on the
+  unity fast-path so 99% of users pay zero per-sample cost.
+- Existing `setMasterGain` is no longer touched by any fader; stays
+  at unity. Could be exposed elsewhere later (e.g., a global
+  output trim in the header) but no current UI driver.
+
+**UI** — `RoomPage.tsx`:
+
+- Peer strips: `onVolume` → `setPeerGain(p.user_id, v)`.
+- INPUT TRACKS self strip: `onVolume` → `setInputGain(v)`.
+- MIXER `YOU·Mon` strip: `onVolume` → `setMonitorBaseGain(v)` (already
+  wired in v3.5.0).
+- Removed the prior `handleVolume` → `setMasterGain` shortcut.
+
+**Smoke verified** end-to-end via local mixer + TCP client:
+- `gain=0.5` → ack `0.5`.
+- `gain=5.0` → clamped to `2.0` (server ceiling).
+- `gain=1.0` → ack `1.0`, key erased internally.
+
+Audio test layers unchanged: Layer 1 (SNR 84 dB / THD 0.006 %),
+Layer 1.5 (12 jitter scenarios PASS, plc/s and norm_energy
+within natural variance). The empty-map fast path means the
+server's mix output is byte-identical to v3.5.0 when no fader
+has been moved.
+
 ## [3.5.0] - 2026-04-29
 
 ### Added — self-monitor strip in MIXER (volume + mute for your own hear)

@@ -544,6 +544,66 @@ void MixerServer::handle_control_message(uv_stream_t* client,
                   << " jitter_target=" << applied_target
                   << " jitter_max_depth=" << applied_cap << std::endl;
 
+    } else if (j.type == "PEER_GAIN") {
+        // Per-recipient per-source playback gain — channel-strip fader.
+        //
+        // Wire format:
+        //   {"type":"PEER_GAIN","room_id":"<r>","user_id":"<self>",
+        //    "target_user_id":"<source>","gain":<float>}
+        //
+        // Sets `room.users[self].peer_gains[source] = gain`. From the
+        // next mix tick, the recipient's mix scales source's track by
+        // `gain` (clamped to [0, 2]). gain=1.0 erases any prior override
+        // (we delete the key to keep the map small). Other recipients'
+        // mixes are unaffected — this is purely the calling user's
+        // listening preference, not a global setting.
+        if (j.room_id.empty() || j.user_id.empty()) {
+            send_tcp_response(client, SimpleJson::make_error("room_id and user_id required"));
+            return;
+        }
+        std::string target_uid;
+        float new_gain = 1.0f;
+        bool have_gain = false;
+        {
+            std::smatch mm;
+            std::regex tgt_re("\"target_user_id\"\\s*:\\s*\"([^\"]*)\"");
+            if (std::regex_search(msg, mm, tgt_re)) target_uid = mm[1].str();
+            std::regex gain_re("\"gain\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
+            if (std::regex_search(msg, mm, gain_re)) {
+                new_gain  = std::stof(mm[1].str());
+                have_gain = true;
+            }
+        }
+        if (target_uid.empty() || !have_gain) {
+            send_tcp_response(client, SimpleJson::make_error("target_user_id and gain required"));
+            return;
+        }
+        const float clamped = std::max(0.0f, std::min(2.0f, new_gain));
+        bool applied = false;
+        {
+            std::lock_guard<std::mutex> lock(rooms_mutex_);
+            auto room_it = rooms_.find(j.room_id);
+            if (room_it != rooms_.end()) {
+                auto uit = room_it->second->users.find(j.user_id);
+                if (uit != room_it->second->users.end()) {
+                    UserEndpoint& uep = uit->second;
+                    if (clamped == 1.0f) {
+                        uep.peer_gains.erase(target_uid);
+                    } else {
+                        uep.peer_gains[target_uid] = clamped;
+                    }
+                    applied = true;
+                }
+            }
+        }
+        if (!applied) {
+            send_tcp_response(client, SimpleJson::make_error("user not in room"));
+            return;
+        }
+        std::string ack = std::string("{\"type\":\"PEER_GAIN_ACK\",\"target_user_id\":\"")
+            + target_uid + "\",\"gain\":" + std::to_string(clamped) + "}\n";
+        send_tcp_response(client, ack);
+
     } else {
         send_tcp_response(client, SimpleJson::make_error("Unknown type: " + j.type));
     }
@@ -840,7 +900,12 @@ void MixerServer::broadcast_mixed_audio(Room* room,
         if (soloMode) {
             std::copy(fullMix.begin(), fullMix.end(), recipientMix.begin());
         } else {
-            room->mixer.mixExcluding(kv.first, recipientMix.data(), frame_count);
+            // v3.5.1: per-recipient gain table — channel-strip faders.
+            // Each recipient's own peer_gains map decides how loud they
+            // hear each source. Empty map → unity for all (= prior
+            // behaviour, byte-identical to the old mixExcluding output).
+            room->mixer.mixExcludingWithGains(kv.first, ue.peer_gains,
+                                              recipientMix.data(), frame_count);
         }
         float_to_pcm16(recipientMix.data(),
                        reinterpret_cast<int16_t*>(pcm_encoded.data()),

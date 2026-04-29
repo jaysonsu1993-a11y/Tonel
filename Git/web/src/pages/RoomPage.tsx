@@ -192,8 +192,18 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     }
   }, [soloId, userId])
 
-  const handleVolume = useCallback((gain: number) => {
-    audioService.setMasterGain(gain)
+  // v3.5.1: faders now route per-channel.
+  // - Peer strip (in MIXER): per-recipient gain server-side via PEER_GAIN.
+  // - Self strip (in INPUT TRACKS): mic input gain (pre-send multiplier).
+  // - Self strip (in MIXER, "YOU·Mon"): local monitor gain.
+  // - Master gain (audioService.setMasterGain) is no longer driven by any
+  //   fader; it stays at 1.0. Per-peer gain in MIXER replaces the prior
+  //   "all faders → master gain" shortcut.
+  const handlePeerVolume = useCallback((peerUid: string, gain: number) => {
+    audioService.setPeerGain(peerUid, gain)
+  }, [])
+  const handleInputVolume = useCallback((gain: number) => {
+    audioService.setInputGain(gain)
   }, [])
 
   const selfPeak = selfLevel > 0 ? selfLevel * 1.1 : 0
@@ -356,7 +366,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
                   peak={pl > 0 ? pl * 1.1 : 0}
                   isSolo={soloId === p.user_id}
                   onSolo={(solo) => handleSolo(p.user_id, solo)}
-                  onVolume={handleVolume}
+                  onVolume={(v) => handlePeerVolume(p.user_id, v)}
                 />
               )
             })}
@@ -390,7 +400,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
                 setIsMuted(muted)
               }}
               onSolo={(solo) => handleSolo(userId, solo)}
-              onVolume={handleVolume}
+              onVolume={handleInputVolume}
             />
           </div>
         </div>

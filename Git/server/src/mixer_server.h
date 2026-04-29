@@ -114,6 +114,14 @@ private:
         // affecting others sharing the room.
         int jitter_target    = JITTER_TARGET_DEFAULT;
         int jitter_max_depth = JITTER_MAX_DEPTH_DEFAULT;
+
+        // Per-recipient peer-gain table: source_uid → gain. Set via the
+        // PEER_GAIN control message; consulted by mixExcludingWithGains
+        // when this user is the recipient of a per-recipient mix. Default
+        // 1.0 for any source not in the map. Empty map = unity for all
+        // peers (current behaviour pre-v3.5.x). Bounded [0, 2] at the
+        // setter to prevent runaway amplification.
+        std::unordered_map<std::string, float> peer_gains;
     };
 
     // Jitter buffer parameters. Two independent knobs:
