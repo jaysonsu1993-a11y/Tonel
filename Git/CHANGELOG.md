@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.6] - 2026-04-29
+
+### Added — MIXER / INPUT TRACKS UI split + monitor diagnostics
+
+**UI:** RoomPage's single MIXER section is now two sections stacked
+vertically:
+- **MIXER** — peers' channel strips only. Header count drops from
+  `N+1 CH` to `N CH` since self isn't here anymore.
+- **INPUT TRACKS** — the user's own mic strip, separated out so
+  future per-input controls (gain, monitor toggle, processing) can
+  land here without competing with the peer-mix UI.
+
+Mental model matches a DAW: input bus on one row, output bus on
+another. Same `ChannelStrip` component, different parent frames.
+
+**Audio diagnostics:** v3.4.5's monitor (worklet → destination
+direct) still inaudible on desktop Chrome despite `mon=1.00`.
+Adding three counters inside the `MonitorProcessor` worklet,
+posted back every ~128 quanta, so we can pinpoint the failure
+stage:
+
+- `monProc=N` — total `process()` invocations.
+- `monIn=N`  — invocations where `inputs[0][0]` had length > 0.
+- `monOut=N` — invocations that wrote any non-zero sample.
+
+Surfaced in the debug strip alongside `mon=`. Reading the four
+fields together gives a deterministic diagnosis:
+
+| State | Reading | Meaning |
+|---|---|---|
+| Healthy | monProc grows, monIn≈monProc, monOut grows | Worklet running, mic flowing, output writing |
+| Worklet not started | monProc stays 0 | `addModule` failed silently or node disconnected |
+| Source not connected | monProc grows, monIn=0 | `source.connect(monitorWorklet)` didn't take |
+| Gated downstream | monProc, monIn, monOut all grow but inaudible | Browser still drops worklet→destination — even stricter gate |
+
+Once the user reports those four numbers, the next fix is targeted
+rather than another speculative wiring change.
+
 ## [3.4.5] - 2026-04-29
 
 ### Fixed — monitor connects directly to destination (desktop Chrome silent in v3.4.4)

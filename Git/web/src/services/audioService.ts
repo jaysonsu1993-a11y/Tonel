@@ -565,6 +565,13 @@ export class AudioService {
         constructor() {
           super()
           this.gain = 0   // updated via postMessage from updateMonitorGain
+          // Diagnostics — surfaced to debug strip so we can localize a
+          // silent monitor (process not running? input empty? output
+          // bypassed?) without guessing.
+          this.procCalls = 0    // total process() invocations
+          this.inSeen    = 0    // process() calls where inputs[0][0] had length > 0
+          this.outWrote  = 0    // process() calls that wrote non-zero samples
+          this.statsTick = 0
           this.port.onmessage = (ev) => {
             if (ev.data && typeof ev.data.gain === 'number') {
               this.gain = ev.data.gain
@@ -572,23 +579,38 @@ export class AudioService {
           }
         }
         process(inputs, outputs) {
+          this.procCalls++
           const inp = inputs[0]
           const out = outputs[0]
+          if (inp && inp[0] && inp[0].length > 0) this.inSeen++
+          if (++this.statsTick >= 120) {
+            this.statsTick = 0
+            this.port.postMessage({
+              type: 'monStats',
+              procCalls: this.procCalls,
+              inSeen:    this.inSeen,
+              outWrote:  this.outWrote,
+              gain:      this.gain,
+            })
+          }
           if (!inp || !inp[0] || !out || !out[0]) return true
           if (this.gain <= 0) {
-            // Silence — but still write zeros so the worklet's output
-            // channel count doesn't go ambiguous and trigger an upstream
-            // node disconnect on some browsers.
             for (let c = 0; c < out.length; c++) out[c].fill(0)
             return true
           }
           const src = inp[0]
           const g   = this.gain
+          let wrote = false
           for (let c = 0; c < out.length; c++) {
             const dst = out[c]
             const n   = Math.min(dst.length, src.length)
-            for (let i = 0; i < n; i++) dst[i] = src[i] * g
+            for (let i = 0; i < n; i++) {
+              const v = src[i] * g
+              dst[i] = v
+              if (v !== 0) wrote = true
+            }
           }
+          if (wrote) this.outWrote++
           return true
         }
       }
@@ -604,6 +626,16 @@ export class AudioService {
         numberOfOutputs:   1,
         outputChannelCount: [2],
       })
+      // Capture monitor stats for the debug strip — see field comments
+      // on `monitor*` getters below for what each counter tells us.
+      this.monitorWorklet.port.onmessage = (ev) => {
+        const d = ev.data
+        if (d && d.type === 'monStats') {
+          this._monProcCalls = d.procCalls
+          this._monInSeen    = d.inSeen
+          this._monOutWrote  = d.outWrote
+        }
+      }
       this.source.connect(this.monitorWorklet)
       this.monitorWorklet.connect(this.audioContext.destination)
       this.updateMonitorGain()   // posts initial gain (0)
@@ -644,6 +676,25 @@ export class AudioService {
   private _monitorTarget = 0
   /** Current monitor gain target (post-ramp). Surfaced in the debug strip. */
   get monitorGainTarget(): number { return this._monitorTarget }
+
+  // Monitor worklet diagnostics — populated from periodic monStats posts
+  // every ~128 quanta. Pinned in the debug strip so a silent monitor on
+  // a particular browser tells us *which stage* is failing:
+  //   monProc not growing  → worklet's process() not being invoked
+  //                          (worklet creation / connection failed silently).
+  //   monProc grows, monIn=0 → process() runs but inputs[0][0] is empty
+  //                          (source.connect(monitorWorklet) didn't take).
+  //   monIn>0, monOut=0    → input flowing, gain=0 (peerLevels.size<2)
+  //                          OR samples are all-zero (mic muted at OS level).
+  //   monOut>0 but inaudible → output reaching the worklet's output channel
+  //                          but destination is dropping it (rare — would
+  //                          mean an even stricter browser gate).
+  private _monProcCalls = 0
+  private _monInSeen    = 0
+  private _monOutWrote  = 0
+  get monitorProcCalls(): number { return this._monProcCalls }
+  get monitorInSeen():    number { return this._monInSeen }
+  get monitorOutWrote():  number { return this._monOutWrote }
 
   /**
    * Future-proof user-facing knob — not yet wired to the debug panel,

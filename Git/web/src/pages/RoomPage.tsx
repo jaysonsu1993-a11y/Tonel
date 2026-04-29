@@ -114,8 +114,10 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       const uidShort = (userId || '').slice(0, 14)
       setDbg(
         `uid=${uidShort} peers=${peers.length} roomUsers=${audioService.serverPeerCount} ` +
-        `mon=${audioService.monitorGainTarget.toFixed(2)} ws=${audioService.audioWsState} ` +
-        `cap=${cap} tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
+        `mon=${audioService.monitorGainTarget.toFixed(2)} ` +
+        `monProc=${audioService.monitorProcCalls} monIn=${audioService.monitorInSeen} monOut=${audioService.monitorOutWrote} ` +
+        `ws=${audioService.audioWsState} cap=${cap} ` +
+        `tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
         `rxPeak=${audioService.rxLevelPeak.toFixed(3)} micClip=${audioService.captureClipCountValue} ` +
         `repri=${audioService.playReprimeCount} gap=${audioService.rxSeqGapCount} ` +
         `ring=${audioService.playRingFill} rate=${rateStr}ppm${muteFlag}`
@@ -306,30 +308,15 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       </div>
 
       <div className="room-content">
-        {/* 调音台区域 */}
+        {/* MIXER — peers' channel strips. Self is separated out into its
+            own INPUT TRACKS section below so the input vs. output buses
+            stay visually distinct (closer to a DAW mental model). */}
         <div className="mixer-section">
           <div className="mixer-header">
             <span className="mixer-label">MIXER</span>
-            <span className="mixer-count">{peers.length + 1} CH</span>
+            <span className="mixer-count">{peers.length} CH</span>
           </div>
           <div className="mixer-channels">
-            <ChannelStrip
-              peerId={userId}
-              name={userProfile?.nickname || 'YOU'}
-              avatarUrl={userProfile?.avatarUrl}
-              level={selfLevel}
-              peak={selfPeak}
-              isSelf
-              isMuted={isMuted}
-              isSolo={soloId === userId}
-              onMute={(muted) => {
-                if (muted) audioService.mute()
-                else audioService.unmute()
-                setIsMuted(muted)
-              }}
-              onSolo={(solo) => handleSolo(userId, solo)}
-              onVolume={handleVolume}
-            />
             {peers.map(p => {
               const pl = peerLevels[p.user_id] ?? 0
               return (
@@ -349,6 +336,35 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
             {peers.length === 0 && (
               <p className="empty-hint">等待其他乐手加入…</p>
             )}
+          </div>
+        </div>
+
+        {/* INPUT TRACKS — the user's own mic input. Separate from MIXER
+            so future per-input controls (gain, monitor, processing) can
+            land here without competing with the peer-mix UI. */}
+        <div className="mixer-section">
+          <div className="mixer-header">
+            <span className="mixer-label">INPUT TRACKS</span>
+            <span className="mixer-count">1 CH</span>
+          </div>
+          <div className="mixer-channels">
+            <ChannelStrip
+              peerId={userId}
+              name={userProfile?.nickname || 'YOU'}
+              avatarUrl={userProfile?.avatarUrl}
+              level={selfLevel}
+              peak={selfPeak}
+              isSelf
+              isMuted={isMuted}
+              isSolo={soloId === userId}
+              onMute={(muted) => {
+                if (muted) audioService.mute()
+                else audioService.unmute()
+                setIsMuted(muted)
+              }}
+              onSolo={(solo) => handleSolo(userId, solo)}
+              onVolume={handleVolume}
+            />
           </div>
         </div>
       </div>
