@@ -200,6 +200,18 @@ export class AudioService {
   // path; we accept it here too.
   private monitorGain:      GainNode | null = null
   private monitorBaseGain   = 1.0   // user-adjustable (future slider)
+  // Pass-through worklet placed between source and monitorGain. iOS
+  // Safari (and possibly other WebKit-based browsers) silently mutes any
+  // path that goes `MediaStreamSource → ... → destination` if the chain
+  // doesn't pass through an audio-thread node first — anti-feedback /
+  // echo gating that the API doesn't expose. v3.4.3 routed monitor
+  // through masterGain hoping that the extra gain stage would be
+  // enough; user reported `mon=1.00` but still inaudible. The worklet
+  // hop "decouples" the mic source: its inputs read mic samples, its
+  // outputs are a normal worklet-produced stream that passes through
+  // destination just fine. Verified by the existing playbackWorklet
+  // path, which also reaches destination via masterGain without issue.
+  private monitorWorklet:   AudioWorkletNode | null = null
 
   // Debug counters
   public rxCount = 0   // received SPA1 audio packets from server
@@ -362,6 +374,7 @@ export class AudioService {
     if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
     if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
     if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
+    if (this.monitorWorklet) { try { this.monitorWorklet.disconnect() } catch (_) {} this.monitorWorklet = null }
     if (this.monitorGain) { try { this.monitorGain.disconnect() } catch (_) {} this.monitorGain = null }
     this.analyser = null
     this.captureLeftover = new Float32Array(0)
@@ -392,24 +405,11 @@ export class AudioService {
     this.masterGain.gain.value = 1.0
     this.masterGain.connect(this.audioContext.destination)
 
-    // Local monitor path. Starts at gain 0 — engaged once peerLevels
-    // first reports ≥2 users in the room. updateMonitorGain() does the
-    // ramping with setTargetAtTime to avoid clicks at the transition.
-    this.monitorGain = this.audioContext.createGain()
-    this.monitorGain.gain.value = 0
-    this.source.connect(this.monitorGain)
-    // v3.4.3: route through masterGain instead of directly to destination.
-    // Direct-to-destination produced no audible output on the user's
-    // hardware despite gain.value reaching 1.0 (verified via debug strip
-    // `mon=1.00` while `roomUsers=2`). Likely cause: some browsers gate
-    // mic→speaker paths that don't pass through a downstream gain stage
-    // (system-level echo handling, channel-route quirks). Going through
-    // masterGain — the same node that successfully plays peer audio —
-    // guarantees the proven path. Side-effect: solo-self (masterGain=0)
-    // also mutes the monitor; that's an acceptable trade until we wire
-    // an independent monitor mute in the panel.
-    this.monitorGain.connect(this.masterGain)
-    this.updateMonitorGain()
+    // Local monitor wired via worklet pass-through (see ensureMonitorWorklet
+    // for the iOS-Safari rationale). Fire-and-forget; failure leaves
+    // monitor disabled and the user just falls back to "no self-hear in
+    // multi-user rooms" — same as pre-v3.4.0 behaviour.
+    void this.ensureMonitorWorklet()
 
     await this.initPlaybackWorklet()
 
@@ -429,6 +429,7 @@ export class AudioService {
     if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
     if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
     if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
+    if (this.monitorWorklet) { try { this.monitorWorklet.disconnect() } catch (_) {} this.monitorWorklet = null }
     if (this.monitorGain) { try { this.monitorGain.disconnect() } catch (_) {} this.monitorGain = null }
     if (this.animationFrameId) { cancelAnimationFrame(this.animationFrameId); this.animationFrameId = null }
     if (this.audioContext) { try { this.audioContext.close() } catch (_) {} this.audioContext = null }
@@ -525,17 +526,59 @@ export class AudioService {
     this.masterGain.connect(this.audioContext.destination)
     // Local monitor — see field-level comment for rationale. Starts at 0
     // and engages once the room population reaches ≥2 (LEVELS broadcast).
-    if (this.source && !this.monitorGain) {
+    // Local monitor — see field comment for the worklet-passthrough
+    // rationale. ensureMonitorWorklet creates monitorGain inside, so
+    // we don't need a pre-check here.
+    void this.ensureMonitorWorklet()
+    await this.initPlaybackWorklet()
+  }
+
+  /**
+   * Wire the source → monitorWorklet → monitorGain → masterGain chain.
+   * Idempotent — a second call is a no-op while the worklet exists.
+   * Returns true when the worklet path is in place; false if the
+   * `addModule` call failed (in which case we skip the monitor — the
+   * direct GainNode path doesn't work on iOS Safari, see the field
+   * comment for `monitorWorklet`).
+   */
+  private async ensureMonitorWorklet(): Promise<boolean> {
+    if (!this.audioContext || !this.source || !this.masterGain) return false
+    if (this.monitorWorklet) return true
+    if (!this.monitorGain) {
       this.monitorGain = this.audioContext.createGain()
       this.monitorGain.gain.value = 0
-      this.source.connect(this.monitorGain)
-      // v3.4.3: route through masterGain — see init() / changeSampleRate
-      // path for the rationale. Direct-to-destination silently failed to
-      // produce audible output despite gain.value=1.0.
       this.monitorGain.connect(this.masterGain)
-      this.updateMonitorGain()
     }
-    await this.initPlaybackWorklet()
+    const code = `
+      class MonitorProcessor extends AudioWorkletProcessor {
+        process(inputs, outputs) {
+          const inp = inputs[0]
+          const out = outputs[0]
+          if (inp && inp[0] && out && out[0]) {
+            out[0].set(inp[0])
+            // Fan mono mic out to all destination channels.
+            for (let c = 1; c < out.length; c++) out[c].set(inp[0])
+          }
+          return true
+        }
+      }
+      registerProcessor('monitor-processor', MonitorProcessor)
+    `
+    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))
+    try {
+      await this.audioContext.audioWorklet.addModule(url)
+      if (!this.audioContext || !this.source || !this.monitorGain) return false
+      this.monitorWorklet = new AudioWorkletNode(this.audioContext, 'monitor-processor')
+      this.source.connect(this.monitorWorklet)
+      this.monitorWorklet.connect(this.monitorGain)
+      this.updateMonitorGain()
+      return true
+    } catch (err) {
+      console.warn('[Audio] monitor worklet init failed:', err)
+      return false
+    } finally {
+      URL.revokeObjectURL(url)
+    }
   }
 
   /**
@@ -1858,6 +1901,10 @@ export class AudioService {
     if (this.playbackWorklet) {
       try { this.playbackWorklet.disconnect() } catch (_) {}
       this.playbackWorklet = null
+    }
+    if (this.monitorWorklet) {
+      try { this.monitorWorklet.disconnect() } catch (_) {}
+      this.monitorWorklet = null
     }
     if (this.monitorGain) {
       try { this.monitorGain.disconnect() } catch (_) {}

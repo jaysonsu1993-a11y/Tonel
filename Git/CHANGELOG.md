@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.4] - 2026-04-29
+
+### Fixed — monitor uses worklet pass-through to bypass iOS mic-routing gate
+
+User confirmed v3.4.3's masterGain re-routing didn't fix it: in a
+2-user room, debug strip shows `roomUsers=2 mon=1.00`, the TEST TONE
+button (oscillator → destination) plays fine, peer audio plays fine
+through `playbackWorklet → masterGain → destination`, but the
+monitor path `source → monitorGain → masterGain → destination`
+remains silent.
+
+Diagnosis: iOS Safari (and likely other WebKit-based browsers)
+applies an undocumented mic-to-speaker gate. Any path that goes from
+a `MediaStreamAudioSourceNode` through plain GainNodes to
+`destination` gets silently muted — system-level anti-feedback /
+echo handling that the Web Audio API doesn't expose. The
+`playbackWorklet` path works because its source is the *worklet
+itself* (not a MediaStreamSource), and the TEST TONE works because
+its source is an oscillator.
+
+The community workaround — implemented here — is to put an
+**AudioWorkletNode pass-through** between the source and the rest of
+the chain:
+
+```
+source → monitorWorklet → monitorGain → masterGain → destination
+              ^
+       reads inputs[0], writes outputs[0]
+       (decouples MediaStreamSource from destination)
+```
+
+`MonitorProcessor` is the smallest possible worklet:
+`outputs[0][c].set(inputs[0][0])` for each channel, with a fan-out
+mono → stereo. Worklet is registered lazily (`ensureMonitorWorklet`)
+and re-instantiated across `init()` / `changeSampleRate()` rebuilds.
+
+If `addModule` for the monitor worklet fails (very old browsers,
+worklet-blocking policies), the monitor is silently disabled —
+behaviour falls back to v3.3.x ("no self-hear in multi-user rooms")
+rather than introducing a half-broken state.
+
+Verified Layer 1 (SNR 84.0 dB / THD 0.006 %), Layer 2 (PASS after
+the standard one-flake retry). Default behaviour unchanged in
+single-user rooms — monitor target is 0 there, no audible
+difference vs v3.3.x.
+
 ## [3.4.3] - 2026-04-29
 
 ### Fixed — local monitor now routes through masterGain (was inaudible at gain 1.0)
