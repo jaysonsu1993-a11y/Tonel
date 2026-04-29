@@ -518,9 +518,8 @@ export class AudioService {
     this.outputBus.connect(this.audioContext.destination)
 
     void this.ensureMonitorWorklet()
-    // Re-apply the persisted speaker-mode preference. If the user had
-    // toggled speaker on, restore that on every changeSampleRate too.
-    void this.setSpeakerMode(AudioService.readSpeakerMode())
+    // v3.7.6: don't auto-apply speakerMode here either. User retoggles
+    // after sample-rate change.
 
     await this.initPlaybackWorklet()
 
@@ -531,12 +530,51 @@ export class AudioService {
   }
 
   async init(): Promise<MediaStream> {
-    // Clean up previous state to avoid stale AudioContext/MediaStream pileup
+    // v3.7.6: simplified init.
+    //
+    // The user reported mobile Chrome / iOS Safari couldn't acquire mic
+    // permission even after pressing the retry button — i.e. the gesture
+    // chain through `runInit → audioService.init → getUserMedia` was
+    // breaking somewhere. v3.5.1 had a near-identical init that worked
+    // on mobile; v3.6.0+ added complexity (multi-input, outputBus,
+    // speaker mode auto-apply, 30 s timeout race) that piled extra
+    // awaits between the gesture and gUM. iOS' user-activation tracking
+    // is fussy about gesture chains across awaits, so we strip back to
+    // the v3.5.1 shape and only do what's needed before gUM.
+    //
+    // Specifically dropped:
+    //   - 30 s timeout race (suspected to interfere with iOS gUM grant).
+    //   - `channelCount: 1` constraint (some mobile devices reject it).
+    //   - `adoptStreamAsChannel` indirection (an extra await + call).
+    //   - speaker-mode auto-apply (spawned an audio.play() outside any
+    //     gesture, throwing NotAllowedError that contaminated the path).
+    //
+    // What stays:
+    //   - inputSumGain (multi-input bus). Built around channel 0 inline.
+    //   - outputBus (speaker-mode swap point). Default route to
+    //     destination, identical audible behaviour to a direct connect.
+    //   - inputChannels[] tracking. Channel 0 populated inline, no async
+    //     side-trip.
+
+    // Cleanup (all sync). Runs even on first call — no-ops on null fields.
     this.stopCapture()
     if (this.mediaStream) {
       this.mediaStream.getAudioTracks().forEach(t => t.stop())
       this.mediaStream = null
     }
+    // Tear down any prior multi-input channels too — without this, a
+    // re-init (e.g. retry button) leaks the prior streams' tracks and
+    // mobile Chrome refuses to reuse the mic.
+    for (const ch of this.inputChannels) {
+      try { ch.gainNode.disconnect() } catch {}
+      try { ch.source.disconnect() } catch {}
+      try { ch.analyser.disconnect() } catch {}
+      ch.mediaStream.getAudioTracks().forEach(t => t.stop())
+    }
+    this.inputChannels = []
+    this.nextChannelId = 0
+    if (this.inputSumGain) { try { this.inputSumGain.disconnect() } catch {} this.inputSumGain = null }
+    if (this.outputBus) { try { this.outputBus.disconnect() } catch {} this.outputBus = null }
     if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
     if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
     if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
@@ -548,47 +586,21 @@ export class AudioService {
     this.txCount = 0; this.rxCount = 0; this.playCount = 0
 
     try {
-      // User-selectable AudioContext rate. Stored in localStorage so the
-      // choice survives a reload. Null/missing → let the browser pick (its
-      // default, usually the OS audio device's native rate). Explicitly
-      // setting 48000 lines up with the wire rate and bypasses both the
-      // capture-side and worklet-side resamplers entirely — a useful
-      // diagnostic when chasing residual distortion.
       const userRate = AudioService.readUserRate()
       const requestedRate = userRate ?? SAMPLE_RATE
 
-      // Mobile fallback. iOS Safari (some versions) throws on a non-native
-      // AudioContext sample rate, and `getUserMedia` can throw
-      // OverconstrainedError when `sampleRate: 48000` doesn't match the
-      // device. Try the constrained path first for desktop / modern
-      // mobile (where it gives us nice 48 kHz alignment with the wire);
-      // if anything throws, fall back to "let the browser decide" so the
-      // user at least gets *some* audio path. The capture worklet's
-      // resampler handles the rate mismatch transparently — this is
-      // exactly the codepath the desktop 44.1 kHz case already exercises.
-      const tryGetUserMedia = async (constrained: boolean): Promise<MediaStream> => {
+      // Plain getUserMedia — no Promise.race wrapper. Mobile devices
+      // sometimes reject `channelCount: 1`, so we omit it; the wire
+      // protocol is mono-PCM and the worklets handle whatever the
+      // device gives us.
+      const tryGetUserMedia = (constrained: boolean): Promise<MediaStream> => {
         const audio: MediaTrackConstraints = {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl:  false,
-          channelCount:     CHANNELS,
         }
         if (constrained) audio.sampleRate = requestedRate
-        // v3.7.5: 30 s timeout. iOS Safari (and some Chrome Android
-        // builds) occasionally hang the getUserMedia promise instead
-        // of rejecting — the permission dialog flickers, the user
-        // taps "Allow," but the promise never settles. Without a
-        // timeout, runInit() hangs, the error banner never shows,
-        // the retry button is unreachable, and the user thinks the
-        // app is broken. 30 s is generous enough for slow permission
-        // dialogs but short enough that the user can still try the
-        // retry button before giving up on the page.
-        return Promise.race([
-          navigator.mediaDevices.getUserMedia({ audio, video: false }),
-          new Promise<MediaStream>((_, reject) =>
-            setTimeout(() => reject(new Error('麦克风请求超时（请重试）')), 30_000),
-          ),
-        ])
+        return navigator.mediaDevices.getUserMedia({ audio, video: false })
       }
       const tryAudioContext = (constrained: boolean): AudioContext => {
         return constrained
@@ -596,20 +608,20 @@ export class AudioService {
           : new AudioContext()
       }
 
-      // First-attempt mic acquisition is just to get the permission
-      // grant. Real source/gain/analyser construction happens via
-      // addInputChannel below, which builds channel 0's full subgraph.
-      let initialStream: MediaStream
+      // Try with sampleRate hint first; fall back to "let the browser
+      // decide" if mobile rejects it (OverconstrainedError).
       try {
-        initialStream     = await tryGetUserMedia(true)
+        this.mediaStream  = await tryGetUserMedia(true)
         this.audioContext = tryAudioContext(true)
       } catch (constrainedErr) {
         console.warn('[Audio] Constrained init failed, retrying without sampleRate hint:', constrainedErr)
-        try { initialStream!.getAudioTracks().forEach(t => t.stop()) } catch {}
-        initialStream     = await tryGetUserMedia(false)
+        if (this.mediaStream) {
+          try { this.mediaStream.getAudioTracks().forEach(t => t.stop()) } catch {}
+          this.mediaStream = null
+        }
+        this.mediaStream  = await tryGetUserMedia(false)
         this.audioContext = tryAudioContext(false)
       }
-      // FIX: Resume the AudioContext to unfreeze it from browser autoplay policy.
       await this.audioContext.resume()
       if (this.audioContext.sampleRate !== requestedRate) {
         console.warn(`[Audio] AudioContext rate is ${this.audioContext.sampleRate} Hz, requested ${requestedRate}. Capture and worklet will resample.`)
@@ -617,24 +629,34 @@ export class AudioService {
         console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz`)
       }
 
-      // Multi-input infrastructure: master input bus that all channels
-      // feed into. Capture worklet (and the ScriptProcessor fallback)
-      // read this node, not individual sources.
+      // Build channel 0's subgraph inline (no async indirection).
+      this.analyser = this.audioContext.createAnalyser()
+      this.analyser.fftSize = 256
+      this.analyser.smoothingTimeConstant = 0.3
+
+      this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
+      this.source.connect(this.analyser)
+
+      // Multi-input bus. Channel 0's gain stage feeds it.
       this.inputSumGain = this.audioContext.createGain()
       this.inputSumGain.gain.value = 1.0
+      const ch0Gain = this.audioContext.createGain()
+      ch0Gain.gain.value = 1.0
+      this.source.connect(ch0Gain)
+      ch0Gain.connect(this.inputSumGain)
 
-      // v3.7.4: reuse the gestural getUserMedia stream as channel 0
-      // instead of calling getUserMedia a second time. Mobile Chrome
-      // sometimes hangs / fails on a back-to-back getUserMedia after
-      // stopping the first stream's tracks (race between track
-      // teardown and re-acquire). Single call → one permission grant →
-      // one stream → wire it directly.
-      await this.adoptStreamAsChannel(initialStream, 'default')
-      // Legacy aliases for back-compat with the rest of the codebase.
-      const ch0 = this.inputChannels[0]
-      this.mediaStream = ch0?.mediaStream ?? null
-      this.source      = ch0?.source ?? null
-      this.analyser    = ch0?.analyser ?? null
+      const ch0Label = this.mediaStream.getAudioTracks()[0]?.label || 'Default Input'
+      this.inputChannels = [{
+        id: `ch${this.nextChannelId++}`,
+        deviceId:    'default',
+        deviceLabel: ch0Label,
+        mediaStream: this.mediaStream,
+        source:      this.source,
+        gainNode:    ch0Gain,
+        analyser:    this.analyser,
+        userGain:    1.0,
+        muted:       false,
+      }]
 
       this.startLevelMonitoring()
       await this.initPlayback()  // P0-1 fix: await async initPlayback
@@ -664,9 +686,12 @@ export class AudioService {
     this.outputBus.connect(this.audioContext.destination)
     void this.ensureMonitorWorklet()
     await this.initPlaybackWorklet()
-    // Apply speaker-mode preference now that the audio graph + audio
-    // element constraints are settled. setSpeakerMode is idempotent.
-    void this.setSpeakerMode(AudioService.readSpeakerMode())
+    // v3.7.6: speaker-mode is user-driven only. Auto-applying from
+    // localStorage at init time spawned an audio.play() outside any
+    // gesture, which threw NotAllowedError and contaminated init's
+    // promise chain in subtle ways on mobile Safari. The user can
+    // re-toggle the speaker switch in Settings after entering the
+    // room — it's a single tap.
   }
 
   // ── Multi-input channel management ─────────────────────────────────────

@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.6] - 2026-04-29
+
+### Fixed — mobile mic permission was completely broken (regression hunt)
+
+User report: even after pressing the "🔄 启用麦克风" retry button on
+mobile, getUserMedia still doesn't grant. Compared current `init()`
+against v3.5.1 (last known-working pre-multi-input). Found four
+v3.6.x → v3.7.x additions piling extra awaits between the click
+gesture and the gUM call — iOS' user-activation tracking is fussy
+about gesture chains, and we'd built up enough indirection that
+iOS was no longer treating gUM as "in-gesture":
+
+1. `Promise.race(gUM, setTimeout(reject, 30s))` — added v3.7.5 to
+   surface hangs. Suspected to interfere with iOS' permission
+   grant in subtle ways. **Removed.**
+2. `channelCount: 1` constraint — some mobile devices reject this
+   even when the device is mono-capable. Wire protocol is mono PCM
+   downstream regardless. **Removed.**
+3. `adoptStreamAsChannel(stream, deviceId)` indirection — extra
+   await + function-call between gUM resolution and source
+   creation. **Replaced** with inline channel-0 wiring.
+4. `setSpeakerMode(readSpeakerMode())` auto-apply at init time —
+   spawned an `audio.play()` outside any user gesture, throwing
+   NotAllowedError that propagated. **Removed** — speaker mode
+   is now purely user-driven via the SettingsModal toggle.
+
+`init()` is now near-identical in shape to v3.5.1 — single gUM,
+inline source/analyser, then sync wiring of the multi-input bus.
+The multi-input architecture (inputSumGain + inputChannels[]) is
+still here, just built around channel 0 inline rather than via
+async indirection.
+
+Also: cleanup preamble now iterates and tears down `inputChannels`,
+`inputSumGain`, `outputBus`. Pre-v3.7.6 these leaked across re-init
+calls — a retry after a half-completed init left orphan mic streams
+that mobile Chrome refused to re-acquire.
+
+If mic still doesn't grant after this:
+- The Settings → 扬声器 toggle still works (user-driven), and the
+  v3.7.5 reuse-MSD-across-toggles fix is still in place.
+- Browser-level permission denial (user previously rejected, or
+  Safari "always ask" set to deny) requires user to fix in
+  browser settings; no JS workaround.
+
 ## [3.7.5] - 2026-04-29
 
 ### Fixed — mobile refresh hang + iPhone speaker re-toggle failure
