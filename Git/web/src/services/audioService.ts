@@ -322,6 +322,15 @@ export class AudioService {
   // slider, save fires (debounced); when RESET fires, we wipe the slot
   // and re-apply defaults.
   private static readonly TUNING_KEY_PREFIX = 'tonel.tuning.'
+  // Bumped whenever we change a default in `tuning` / `serverTuning` that
+  // would silently regress users with saved per-room overrides. v4.1.0
+  // raised maxScale 1.012 → 1.025 and added the proportional fast-adjust
+  // — a v3.x-era saved blob carries the old maxScale and would pin
+  // rateScale at the OLD rail, defeating the entire Phase A.1 fix.
+  // Schema mismatch on load → discard the stale blob, fall back to
+  // current defaults (and the user can re-tune via the debug panel if
+  // they had reasons for the old values).
+  private static readonly TUNING_SCHEMA_VERSION = 2
   private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
@@ -1641,7 +1650,11 @@ export class AudioService {
       this.tuningSaveTimer = null
       try {
         const key = AudioService.tuningStorageKey(this.roomId, this.userId)
-        const blob = JSON.stringify({ client: this.tuning, server: this.serverTuning })
+        const blob = JSON.stringify({
+          v: AudioService.TUNING_SCHEMA_VERSION,
+          client: this.tuning,
+          server: this.serverTuning,
+        })
         localStorage.setItem(key, blob)
       } catch (err) {
         console.warn('[Audio] tuning save failed:', err)
@@ -1675,8 +1688,21 @@ export class AudioService {
       return
     }
     try {
-      const parsed = JSON.parse(raw) as { client?: Partial<AudioService['tuning']>;
+      const parsed = JSON.parse(raw) as { v?: number;
+                                          client?: Partial<AudioService['tuning']>;
                                           server?: Partial<AudioService['serverTuning']> }
+      // Schema-version gate: a saved blob older than the current schema
+      // (or missing the version field, which means pre-v4.1.0) carries
+      // defaults that are now considered wrong (e.g. maxScale 1.012 from
+      // v3.x pins rateScale at the OLD rail and defeats Phase A.1).
+      // Discard + reset rather than partially applying stale knobs.
+      if (typeof parsed.v !== 'number' || parsed.v < AudioService.TUNING_SCHEMA_VERSION) {
+        console.log(`[Audio] saved tuning schema v${parsed.v ?? '?'} < current v${AudioService.TUNING_SCHEMA_VERSION}; discarding stale slot for ${this.roomId}:${this.userId}`)
+        try { localStorage.removeItem(key) } catch {}
+        this.setPlaybackTuning(AudioService.DEFAULT_PB,  { persist: false })
+        this.setServerTuning(AudioService.DEFAULT_SRV,   { persist: false })
+        return
+      }
       if (parsed.client) this.setPlaybackTuning(parsed.client, { persist: false })
       if (parsed.server) this.setServerTuning (parsed.server, { persist: false })
     } catch (err) {

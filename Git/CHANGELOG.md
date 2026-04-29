@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1] - 2026-04-30
+
+### Fixed — v4.1.0 Phase A.1 silently overridden by stale localStorage tuning
+
+v4.1.0 raised the playback rate controller's `maxScale` 1.012 →
+1.025 to give the proportional fast-adjust enough headroom to
+drain server mix-tick burst patterns. **Real-user validation
+revealed the change took no effect** for users with a saved
+per-room tuning slot (the "📍 saved for ROOM:USER" indicator in
+the debug panel). Their `rate=` still pegged at +12000ppm — the
+OLD 1.012 rail — because `loadRoomTuningIntoState()` reads
+`localStorage[tonel.tuning.${roomId}:${userId}]` and overlays
+the persisted client-side knobs verbatim. Saved blobs from v3.x
+days carry `maxScale: 1.012` and silently overwrote the new
+1.025 default.
+
+**Fix**: schema-version the saved tuning blob.
+- New `TUNING_SCHEMA_VERSION = 2` constant (was implicitly 1 / no
+  version pre-v4.1.1).
+- Save path writes `{ v: 2, client, server }`.
+- Load path: if `parsed.v` is missing or `< current schema`,
+  treat the slot as stale → `localStorage.removeItem` + reapply
+  current defaults. One log line per discard so the user / engineer
+  can see migrations happening.
+
+**Migration behaviour**: every existing user who saved tuning
+pre-v4.1.1 has their slot wiped on next room join, falls back to
+v4.1.0's new defaults (the ones they actually wanted). If they
+had genuinely valuable per-room tuning, they'll need to re-set
+it via the debug panel; cost is acceptable because the previous
+tuning was actively hurting them (rate stuck at rail).
+
+**Future schema bumps**: any further change to `DEFAULT_PB` /
+`DEFAULT_SRV` defaults that would silently regress saved-tuning
+users should bump this constant. Phase B / C / D will likely
+each bump it once.
+
+### Process note — caught by mandated post-release validation
+
+Per the new pre-release rule (memory: `feedback_pre_release_browser_test`),
+v4.1.0 was put through the full pretest.sh sweep before release
+— all 5 layers passed. **The localStorage migration gap was
+invisible to those tests** because Layer 2 (Playwright Chromium)
+runs in a fresh browser profile with empty localStorage every
+time. The bug only surfaced once a real user with a populated
+localStorage joined the deployed page. This is a known coverage
+hole in our testing setup (pretest doesn't model "user upgrading
+from prior version with saved state").
+
+Mitigation for future Phase releases: when changing default
+tuning values, **always bump TUNING_SCHEMA_VERSION**. Long-term
+fix: add a Layer 2 scenario that pre-populates localStorage with
+a known-stale blob and verifies the load path discards it. Tracked
+as a follow-up; not blocking Phase B.
+
 ## [4.1.0] - 2026-04-30
 
 ### Phase A — 解锁底（rate controller + outputLatency UI + sample-rate auto-align）
