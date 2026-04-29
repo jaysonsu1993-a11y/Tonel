@@ -399,7 +399,12 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         <div className="mixer-section">
           <div className="mixer-header">
             <span className="mixer-label">MIXER</span>
-            <span className="mixer-count">{peers.length + 1} CH</span>
+            <span className="mixer-count">
+              {/* +1 for self-monitor strip; max() so signaling/mixer
+                  disagreement (e.g. peers=0 roomUsers=2) doesn't lie
+                  about how many strips will render below. */}
+              {Math.max(peers.length, Object.keys(peerLevels).filter(u => u !== userId).length) + 1} CH
+            </span>
           </div>
           <div className="mixer-channels">
             <ChannelStrip
@@ -415,32 +420,56 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
                 setMonitorMuted(muted)
                 audioService.setMonitorMuted(muted)
               }}
-              onVolume={(v) => {
-                // ChannelStrip yields 0-1 from its 0-100 fader. Map
-                // straight through; setMonitorBaseGain itself clamps
-                // to its [0, 2] range. 1.0 = unity (default).
-                audioService.setMonitorBaseGain(v)
-              }}
+              onVolume={(v) => audioService.setMonitorBaseGain(v)}
             />
-            {peers.map(p => {
-              const pl = peerLevels[p.user_id] ?? 0
-              return (
-                <ChannelStrip
-                  key={p.user_id}
-                  peerId={p.user_id}
-                  name={p.nickname || p.user_id.slice(0, 8)}
-                  avatarUrl={p.avatar_url}
-                  level={pl}
-                  peak={pl > 0 ? pl * 1.1 : 0}
-                  isSolo={soloId === p.user_id}
-                  onSolo={(solo) => handleSolo(p.user_id, solo)}
-                  onVolume={(v) => handlePeerVolume(p.user_id, v)}
-                />
-              )
-            })}
-            {peers.length === 0 && (
-              <p className="empty-hint">等待其他乐手加入…</p>
-            )}
+            {(() => {
+              // Render peer strips from the UNION of two sources:
+              //   (a) signaling `peers` — has nickname/avatar metadata.
+              //   (b) mixer LEVELS keys (peerLevels) — every user the
+              //       mixer is currently broadcasting to/from.
+              // The two paths are independent; we'd seen sessions where
+              // signaling reported `peers=0` while mixer reported
+              // `roomUsers=2` (e.g., a flaky signaling reconnect after
+              // create_room). Pre-v3.6.1 the strips disappeared whenever
+              // signaling went quiet, even though audio was flowing.
+              // The union keeps strips visible whenever EITHER path
+              // confirms the peer exists; signaling metadata is layered
+              // on when available.
+              const byId = new Map<string, { id: string; name: string; avatar?: string }>()
+              for (const p of peers) {
+                byId.set(p.user_id, {
+                  id:     p.user_id,
+                  name:   p.nickname || p.user_id.slice(0, 8),
+                  avatar: p.avatar_url,
+                })
+              }
+              for (const uid of Object.keys(peerLevels)) {
+                if (uid === userId) continue   // exclude self
+                if (!byId.has(uid)) {
+                  byId.set(uid, { id: uid, name: uid.slice(0, 8) })
+                }
+              }
+              const list = Array.from(byId.values())
+              if (list.length === 0) {
+                return <p className="empty-hint">等待其他乐手加入…</p>
+              }
+              return list.map(p => {
+                const pl = peerLevels[p.id] ?? 0
+                return (
+                  <ChannelStrip
+                    key={p.id}
+                    peerId={p.id}
+                    name={p.name}
+                    avatarUrl={p.avatar}
+                    level={pl}
+                    peak={pl > 0 ? pl * 1.1 : 0}
+                    isSolo={soloId === p.id}
+                    onSolo={(solo) => handleSolo(p.id, solo)}
+                    onVolume={(v) => handlePeerVolume(p.id, v)}
+                  />
+                )
+              })
+            })()}
           </div>
         </div>
 

@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.1] - 2026-04-29
+
+### Fixed — peer strips now show even when signaling reports `peers=0`
+
+User report: in v3.6.0 the MIXER section had no peer strips, even
+though audio from peers was clearly flowing (debug strip:
+`peers=0 roomUsers=2`).
+
+This wasn't a v3.6.0 regression — the peer strips have always been
+sourced from the signaling-side `peers` array. But in this user's
+session the signaling side was reporting `peers=0` while the
+mixer-side LEVELS broadcast (which feeds `audioService.peerLevels`)
+correctly tracked both users. Pre-v3.6.1 the UI trusted only
+signaling, so any time signaling went quiet the strips vanished
+even with healthy audio.
+
+Fix: render peer strips from the **union** of:
+- signaling `peers` array (has nickname / avatar metadata)
+- `peerLevels` keys (every uid the mixer is currently broadcasting)
+
+Signaling-supplied metadata layers on when available; for any uid
+known only to the mixer, we synthesize a minimal entry using the
+first 8 chars of the uid as the display name. The MIXER header's
+`N CH` count uses `max(peers.length, peerLevels.size - self) + 1`
+so it doesn't lie about what's about to render.
+
+This sidesteps the underlying signaling discrepancy as a UX matter
+— users see their peers regardless. The signaling-vs-mixer
+disagreement itself is still worth tracking down separately
+(potential reconnect path bug or the create_room PEER_LIST not
+hitting the creator post-join). Filed mentally for next session.
+
 ## [3.6.0] - 2026-04-29
 
 ### Added — multi-input + per-channel device + meter↔fader linking
