@@ -534,30 +534,60 @@ export class AudioService {
   }
 
   /**
-   * Wire the source → monitorWorklet → monitorGain → masterGain chain.
-   * Idempotent — a second call is a no-op while the worklet exists.
-   * Returns true when the worklet path is in place; false if the
-   * `addModule` call failed (in which case we skip the monitor — the
-   * direct GainNode path doesn't work on iOS Safari, see the field
-   * comment for `monitorWorklet`).
+   * Wire the source → monitorWorklet → destination chain.
+   *
+   * v3.4.4 routed monitor `worklet → monitorGain → masterGain → destination`
+   * on the theory that going through the same gain stages as peer audio
+   * would dodge iOS Safari's mic-to-speaker gate. That worked on iOS
+   * but on desktop Chrome the path remained inaudible despite
+   * `mon=1.00`. Two-stage GainNode chain seems to trigger a different
+   * (or additional) gating layer.
+   *
+   * v3.4.5: skip the GainNodes entirely. Connect the worklet directly
+   * to `destination` and apply gain *inside* the worklet by scaling
+   * samples in `process()`. The "old accidental loopback" pattern from
+   * pre-v1.0.x was exactly this: `worklet → destination` direct, with
+   * any output level controlled in the worklet itself. That combination
+   * is browsers' "blessed" mic-passthrough path because the worklet is
+   * audio-thread code that the browser treats as a generated stream
+   * rather than a mic-to-speaker shortcut.
+   *
+   * Side-effect: `setMasterGain(0)` no longer mutes the monitor (the
+   * masterGain isn't on the monitor's path anymore), so soloing self
+   * keeps you hearing yourself locally — which is closer to what the
+   * user wants anyway. Independent monitor mute can be added later.
    */
   private async ensureMonitorWorklet(): Promise<boolean> {
-    if (!this.audioContext || !this.source || !this.masterGain) return false
+    if (!this.audioContext || !this.source) return false
     if (this.monitorWorklet) return true
-    if (!this.monitorGain) {
-      this.monitorGain = this.audioContext.createGain()
-      this.monitorGain.gain.value = 0
-      this.monitorGain.connect(this.masterGain)
-    }
     const code = `
       class MonitorProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super()
+          this.gain = 0   // updated via postMessage from updateMonitorGain
+          this.port.onmessage = (ev) => {
+            if (ev.data && typeof ev.data.gain === 'number') {
+              this.gain = ev.data.gain
+            }
+          }
+        }
         process(inputs, outputs) {
           const inp = inputs[0]
           const out = outputs[0]
-          if (inp && inp[0] && out && out[0]) {
-            out[0].set(inp[0])
-            // Fan mono mic out to all destination channels.
-            for (let c = 1; c < out.length; c++) out[c].set(inp[0])
+          if (!inp || !inp[0] || !out || !out[0]) return true
+          if (this.gain <= 0) {
+            // Silence — but still write zeros so the worklet's output
+            // channel count doesn't go ambiguous and trigger an upstream
+            // node disconnect on some browsers.
+            for (let c = 0; c < out.length; c++) out[c].fill(0)
+            return true
+          }
+          const src = inp[0]
+          const g   = this.gain
+          for (let c = 0; c < out.length; c++) {
+            const dst = out[c]
+            const n   = Math.min(dst.length, src.length)
+            for (let i = 0; i < n; i++) dst[i] = src[i] * g
           }
           return true
         }
@@ -567,11 +597,16 @@ export class AudioService {
     const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))
     try {
       await this.audioContext.audioWorklet.addModule(url)
-      if (!this.audioContext || !this.source || !this.monitorGain) return false
-      this.monitorWorklet = new AudioWorkletNode(this.audioContext, 'monitor-processor')
+      if (!this.audioContext || !this.source) return false
+      // Force stereo output so mono → stereo upmix isn't browser-dependent.
+      this.monitorWorklet = new AudioWorkletNode(this.audioContext, 'monitor-processor', {
+        numberOfInputs:    1,
+        numberOfOutputs:   1,
+        outputChannelCount: [2],
+      })
       this.source.connect(this.monitorWorklet)
-      this.monitorWorklet.connect(this.monitorGain)
-      this.updateMonitorGain()
+      this.monitorWorklet.connect(this.audioContext.destination)
+      this.updateMonitorGain()   // posts initial gain (0)
       return true
     } catch (err) {
       console.warn('[Audio] monitor worklet init failed:', err)
@@ -596,24 +631,15 @@ export class AudioService {
    * audio thread under load.
    */
   private updateMonitorGain(): void {
-    if (!this.monitorGain || !this.audioContext) return
     const target = (this.peerLevels.size >= 2) ? this.monitorBaseGain : 0
-    const now = this.audioContext.currentTime
-    const param = this.monitorGain.gain
-    // `cancelScheduledValues` first so a previous ramp doesn't fight the
-    // new one. setValueAtTime anchors the *current* value as the ramp
-    // start so linearRampToValueAtTime knows what to interpolate from.
-    try {
-      param.cancelScheduledValues(now)
-      param.setValueAtTime(param.value, now)
-      param.linearRampToValueAtTime(target, now + 0.01)
-    } catch {
-      // Some older WebKit revisions throw on cancelScheduledValues with
-      // a past time. Fall back to direct assignment — louder click but
-      // functionally correct.
-      param.value = target
-    }
     this._monitorTarget = target
+    // v3.4.5: gain lives inside the monitor worklet. The audio thread
+    // smoothing (small per-quantum glide) could be added there if a
+    // click is heard at the boundary; for now an instant gain step is
+    // sufficient since the boundary only fires on user join/leave (rare).
+    if (this.monitorWorklet) {
+      this.monitorWorklet.port.postMessage({ gain: target })
+    }
   }
   private _monitorTarget = 0
   /** Current monitor gain target (post-ramp). Surfaced in the debug strip. */
@@ -631,7 +657,7 @@ export class AudioService {
   }
   /** Whether the local monitor is currently audible (≥2 peers). */
   get monitorActive(): boolean {
-    return !!this.monitorGain && this.peerLevels.size >= 2
+    return !!this.monitorWorklet && this.peerLevels.size >= 2
   }
 
   private async initPlaybackWorklet(): Promise<void> {

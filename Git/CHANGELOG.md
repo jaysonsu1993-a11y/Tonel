@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.5] - 2026-04-29
+
+### Fixed — monitor connects directly to destination (desktop Chrome silent in v3.4.4)
+
+User report: v3.4.4's worklet pass-through fixed iOS Safari (phone
+hears self in 2-user room ✓) but desktop Chrome still silent
+despite `mon=1.00`. So the iOS gate isn't the only one — the
+two-stage GainNode chain (`monitorGain → masterGain`) appears to
+trigger an additional gating layer on Chromium-based desktops.
+
+User reminded me: "in some earlier version we accidentally got
+local loopback working." Git history confirms — pre-v1.0.x had
+`captureWorklet → audioContext.destination` *direct*, no gain
+stages. That accidental pattern is the one path browsers
+universally allow: an audio-thread worklet writing samples to
+destination is treated as a generated stream, not a mic-to-speaker
+shortcut.
+
+v3.4.5 adopts this pattern intentionally:
+
+```
+source → monitorWorklet → destination
+              ↑
+       internal gain controlled by postMessage({gain})
+```
+
+Changes:
+- `MonitorProcessor` now has a `this.gain` field, settable via
+  postMessage. `process()` multiplies samples by `this.gain` and
+  writes to all output channels. Gain 0 → silence (fills zeros so
+  downstream channel layout stays stable).
+- `AudioWorkletNode` constructor uses `outputChannelCount: [2]` so
+  mono mic fans out to stereo destination explicitly — no reliance
+  on browser-side upmix rules.
+- `updateMonitorGain` posts `{gain: target}` instead of touching a
+  GainNode. Instant step (no ramp) — the boundary only fires on
+  peer join/leave, so the click-avoidance ramp is unnecessary and
+  was complicating debugging.
+- `monitorGain` GainNode is no longer used (left as a no-op private
+  field for back-compat with disconnect cleanup paths).
+
+Side-effect: `setMasterGain(0)` (solo-self) no longer mutes the
+monitor — the masterGain isn't on the monitor's path anymore. This
+is *closer* to what the user wants: soloing self should still let
+you hear yourself. Independent monitor mute can be added later.
+
+Verified Layer 1 (SNR 84 dB / THD 0.006 %, no regression),
+Layer 2 (PASS first try). Default behaviour in single-user rooms
+unchanged (`gain=0` → silence written by worklet, identical to
+v3.4.4's GainNode-at-zero state).
+
 ## [3.4.4] - 2026-04-29
 
 ### Fixed — monitor uses worklet pass-through to bypass iOS mic-routing gate
