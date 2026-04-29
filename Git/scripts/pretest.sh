@@ -14,14 +14,16 @@
 #   3. Layer 1.5 jitter / PLC sweep               (~70 s — 12 scenarios × ~5 s)
 #   4. Signaling integration test (Node)          (~2–4 s)  ← v3.6.2 regression coverage
 #   5. Layer 2 browser audio (Playwright/Chromium)(~25 s first time, ~10 s after)
+#   6. State migration (Vite + Playwright)        (~10 s)   ← v4.1.2 regression coverage
 #
-# Layers 1–4 are deterministic; layer 5 has been observed to flake on
+# Layers 1–4 + 6 are deterministic; layer 5 has been observed to flake on
 # the very first invocation (Chromium not yet warm). The runner gives
 # layer 5 one auto-retry before declaring failure.
 #
 # Usage:
-#   Git/scripts/pretest.sh           # full suite
-#   SKIP_L2=1 Git/scripts/pretest.sh # skip browser audio (e.g. headless server)
+#   Git/scripts/pretest.sh                        # full suite
+#   SKIP_L2=1 Git/scripts/pretest.sh              # skip browser audio (e.g. headless server)
+#   SKIP_MIGRATION=1 Git/scripts/pretest.sh       # skip state migration (e.g. dev iteration)
 #
 # Used by:
 #   Git/scripts/release.sh — inserted as step [0/6] before bump.
@@ -74,11 +76,11 @@ run_step_retry () {
 
 # ── 1. Server build + AudioMixer unit tests ───────────────────────────────
 
-run_step "1/5 server build (cmake)" \
+run_step "1/6 server build (cmake)" \
     cmake --build "$GIT_DIR/server/build"
 
 # AudioMixer tests are deterministic, no audio device needed.
-run_step "1b/5 AudioMixer unit tests" \
+run_step "1b/6 AudioMixer unit tests" \
     "$GIT_DIR/server/build/mixer_server" --test
 
 # ── 2. Layer 1 — Node SPA1 audio quality ──────────────────────────────────
@@ -101,7 +103,7 @@ run_layer1 () {
 # under main-thread load the measured rate can briefly exceed budget
 # even when the server timer is fine. Treat that as flake — one
 # auto-retry, same pattern as Layer 2.
-run_step_retry "2/5 Layer 1 (1 kHz sine SNR/THD)" run_layer1
+run_step_retry "2/6 Layer 1 (1 kHz sine SNR/THD)" run_layer1
 
 # Layer 1.5 — show TSV always (cheap, useful), grade by last column.
 run_layer15 () {
@@ -115,20 +117,35 @@ run_layer15 () {
         return 1
     fi
 }
-run_step "3/5 Layer 1.5 (jitter sweep)" run_layer15
+run_step "3/6 Layer 1.5 (jitter sweep)" run_layer15
 
 # ── 4. Signaling integration ──────────────────────────────────────────────
 
-run_step "4/5 signaling integration" \
+run_step "4/6 signaling integration" \
     node "$GIT_DIR/server/test/signaling_integration.js"
 
 # ── 5. Layer 2 — Browser audio (Chromium) ────────────────────────────────
 
 if [ "${SKIP_L2:-0}" = "1" ]; then
-    warn "5/5 Layer 2 skipped (SKIP_L2=1)"
+    warn "5/6 Layer 2 skipped (SKIP_L2=1)"
 else
-    run_step_retry "5/5 Layer 2 (browser audio)" \
+    run_step_retry "5/6 Layer 2 (browser audio)" \
         bash "$GIT_DIR/server/test/browser/run.sh"
+fi
+
+# ── 6. State migration — localStorage schema upgrade ─────────────────────
+#
+# Spawns Vite dev server + Chromium and replays the upgrade path:
+# stale tuning blob → migration discard → current defaults applied.
+# Added v4.1.2 to catch the regression class where bumping default
+# values silently fails for users with a pre-existing localStorage slot.
+# Cheap (~10s wall-clock); critical for any change that touches
+# DEFAULT_PB / DEFAULT_SRV / TUNING_SCHEMA_VERSION.
+if [ "${SKIP_MIGRATION:-0}" = "1" ]; then
+    warn "6/6 state migration skipped (SKIP_MIGRATION=1)"
+else
+    run_step "6/6 state migration (localStorage schema upgrade)" \
+        node "$GIT_DIR/server/test/browser/state_migration_test.js"
 fi
 
 ok "all pretest layers passed — safe to release"

@@ -1,0 +1,21 @@
+{
+  "name": "tonel-analytics-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Visitor analytics + admin dashboard for tonel.io",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "geoip-lite": "^1.4.10",
+    "jsonwebtoken": "^9.0.2",
+    "sqlite3": "^5.1.7",
+    "ua-parser-js": "^1.0.38"
+  }
+}

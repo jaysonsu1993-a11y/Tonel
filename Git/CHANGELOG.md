@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.3] - 2026-04-30
+
+### Added — pretest Layer 6: state migration test (固化 v4.1.1/v4.1.2 教训)
+
+The two consecutive hotfixes (v4.1.1 schema-version + v4.1.2
+DEFAULT_PB) were both invisible to the existing pretest layers
+because Layer 2 (browser audio) launches a fresh Chromium profile
+with empty localStorage every time — there's no "user upgrading
+from prior version with saved state" coverage anywhere in the
+release pipeline.
+
+Both bugs were also invisible to code review (a stale constant
+hidden 1300 lines from the live initializer). They only surfaced
+once a real user with a populated localStorage joined the
+deployed page and reported "didn't change". That's the worst
+feedback loop possible — round-trip cost ~30 minutes per
+iteration vs. ~10 seconds for an automated test.
+
+#### `Git/server/test/browser/state_migration_test.js`
+
+New standalone Node + Playwright test that:
+1. Spawns Vite dev server on port 5174 (port-probe readiness, ~3s)
+2. Launches headless Chromium
+3. Navigates to the dev server URL
+4. Inside the page, dynamic-imports `audioService.ts`, plants
+   synthetic localStorage blobs at known schemas, calls the
+   private `loadRoomTuningIntoState()` migration entry point,
+   reads back state, and asserts.
+
+Three baseline scenarios:
+- **Stale slot** (no `v` field) → discarded + CURRENT defaults
+  applied (`maxScale === 1.025`, `primeTarget === 1440`).
+  Catches the v4.1.2 regression class.
+- **Current schema slot** (`v: 2`) with user-customised values →
+  preserved, user values overlay. Catches "schema check too
+  aggressive, eats valid current-schema slots" regression.
+- **No slot at all** → defaults applied. Sanity baseline.
+
+#### Wired into pretest as Layer 6
+
+`Git/scripts/pretest.sh` extended:
+- New `6/6 state migration` step at the end (after Layer 2)
+- `SKIP_MIGRATION=1` env to skip (e.g. dev iteration on an
+  unrelated subsystem); not for release flow
+- Step labels renumbered `1/6`...`6/6` throughout
+
+Total cost: ~10 s wall-clock added to pretest. Critical for any
+future change that touches `DEFAULT_PB` / `DEFAULT_SRV` /
+`TUNING_SCHEMA_VERSION`.
+
+#### Memory entry: `feedback_state_migration_test`
+
+Added a permanent rule in this project's auto-memory:
+- Bumping `DEFAULT_PB` or `DEFAULT_SRV` MUST be paired with a
+  `TUNING_SCHEMA_VERSION` bump (otherwise stale slots silently
+  pin users to old defaults — exactly what v4.1.2 caught).
+- Bumping `TUNING_SCHEMA_VERSION` MUST add a scenario to
+  `state_migration_test.js` planting the previous schema and
+  asserting it's discarded.
+- Pre-existing scenarios stay as regression coverage.
+
+Phases B / C / D ahead each likely bump `TUNING_SCHEMA_VERSION`
+once (B: smaller `primeTarget` default; C: maybe new server
+tuning fields; D: probably no localStorage change). The test
+infra now ensures none of those silently strands users on stale
+saved state.
+
 ## [4.1.2] - 2026-04-30
 
 ### Fixed — v4.1.1 schema migration discarded stale slot but reapplied OLD defaults
