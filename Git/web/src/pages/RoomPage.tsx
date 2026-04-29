@@ -2,8 +2,10 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { audioService } from '../services/audioService'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
+import { InputChannelStrip } from '../components/InputChannelStrip'
 import { SettingsModal } from '../components/SettingsModal'
 import { AudioDebugPanel, toggleAudioDebugPanel } from '../components/AudioDebugPanel'
+import type { InputChannel } from '../services/audioService'
 
 interface Props {
   roomId: string
@@ -23,6 +25,49 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   // without affecting the mic the user sends to peers. Wired to the
   // MIXER section's self-strip mute button.
   const [monitorMuted, setMonitorMuted] = useState(false)
+
+  // Input channels shown in INPUT TRACKS. We snapshot audioService state
+  // on every render-relevant change (channel add/remove/device-swap +
+  // periodic level poll for meters). Per-channel level is read from
+  // each channel's analyser via audioService.getInputChannelLevel.
+  const [inputChannels, setInputChannels] = useState<readonly InputChannel[]>([])
+  const [channelLevels, setChannelLevels] = useState<Record<string, number>>({})
+  const [inputDevices, setInputDevices]   = useState<MediaDeviceInfo[]>([])
+
+  // Refresh the device list whenever it changes (cable plug, BT pair).
+  // The browser fires 'devicechange' on `navigator.mediaDevices`.
+  useEffect(() => {
+    const refresh = async () => {
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices()
+        setInputDevices(all.filter(d => d.kind === 'audioinput'))
+      } catch (err) {
+        console.warn('[RoomPage] enumerateDevices failed:', err)
+      }
+    }
+    void refresh()
+    navigator.mediaDevices.addEventListener?.('devicechange', refresh)
+    return () => navigator.mediaDevices.removeEventListener?.('devicechange', refresh)
+  }, [])
+
+  // Re-read the channel list snapshot. Called after any add/remove/swap
+  // mutation and once at mount (channel 0 created during init).
+  const refreshChannels = useCallback(() => {
+    setInputChannels([...audioService.getInputChannels()])
+  }, [])
+
+  // Poll per-channel meters at 10 Hz — same cadence as the existing
+  // selfLevel poll. Cheap (analyser-tap RMS computation per channel).
+  useEffect(() => {
+    const tick = setInterval(() => {
+      const next: Record<string, number> = {}
+      for (const ch of audioService.getInputChannels()) {
+        next[ch.id] = audioService.getInputChannelLevel(ch.id)
+      }
+      setChannelLevels(next)
+    }, 100)
+    return () => clearInterval(tick)
+  }, [])
   const [copied, setCopied] = useState(false)
   const [latency, setLatency] = useState<number>(-1)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -54,6 +99,28 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   // standard iOS Safari workaround for AudioContext / getUserMedia: the
   // first attempt (post-navigate from the password modal) may not count
   // as a user gesture, but a button tap unambiguously does.
+  // Channel mutation helpers (defined inside the component so they can
+  // close over `refreshChannels`).
+  const handleAddInputChannel = useCallback(async () => {
+    try {
+      await audioService.addInputChannel('default')
+      refreshChannels()
+    } catch (err) {
+      console.error('[RoomPage] addInputChannel failed:', err)
+    }
+  }, [refreshChannels])
+  const handleRemoveInputChannel = useCallback((chId: string) => {
+    if (audioService.removeInputChannel(chId)) refreshChannels()
+  }, [refreshChannels])
+  const handleInputChannelDevice = useCallback(async (chId: string, deviceId: string) => {
+    try {
+      await audioService.setInputChannelDevice(chId, deviceId)
+      refreshChannels()
+    } catch (err) {
+      console.error('[RoomPage] setInputChannelDevice failed:', err)
+    }
+  }, [refreshChannels])
+
   const runInit = useCallback(async () => {
     setRetrying(true)
     setInitError('')
@@ -66,6 +133,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     try {
       await audioService.init()
       micOk = true
+      refreshChannels()
     } catch (err) {
       console.error('[RoomPage] Audio init (mic + AudioContext) failed:', err)
       // Distinguish common error names so the user gets actionable hints.
@@ -202,9 +270,9 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const handlePeerVolume = useCallback((peerUid: string, gain: number) => {
     audioService.setPeerGain(peerUid, gain)
   }, [])
-  const handleInputVolume = useCallback((gain: number) => {
-    audioService.setInputGain(gain)
-  }, [])
+  // (Per-channel input gain handled by setInputChannelGain in the
+  // multi-channel render path; the old global setInputGain has been
+  // superseded by the per-channel architecture introduced in v3.6.0.)
 
   const selfPeak = selfLevel > 0 ? selfLevel * 1.1 : 0
 
@@ -376,32 +444,52 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           </div>
         </div>
 
-        {/* INPUT TRACKS — the user's own mic input. Separate from MIXER
-            so future per-input controls (gain, monitor, processing) can
-            land here without competing with the peer-mix UI. */}
+        {/* INPUT TRACKS — the user's mic inputs. One strip per channel,
+            each with its own device selector, fader, and mute. The +
+            button at the end adds another input that gets mixed in. */}
         <div className="mixer-section">
           <div className="mixer-header">
             <span className="mixer-label">INPUT TRACKS</span>
-            <span className="mixer-count">1 CH</span>
+            <span className="mixer-count">{inputChannels.length} CH</span>
           </div>
           <div className="mixer-channels">
-            <ChannelStrip
-              peerId={userId}
-              name={userProfile?.nickname || 'YOU'}
-              avatarUrl={userProfile?.avatarUrl}
-              level={selfLevel}
-              peak={selfPeak}
-              isSelf
-              isMuted={isMuted}
-              isSolo={soloId === userId}
-              onMute={(muted) => {
-                if (muted) audioService.mute()
-                else audioService.unmute()
-                setIsMuted(muted)
+            {inputChannels.map((ch, idx) => (
+              <InputChannelStrip
+                key={ch.id}
+                channelId={ch.id}
+                deviceId={ch.deviceId}
+                deviceLabel={ch.deviceLabel}
+                level={channelLevels[ch.id] ?? 0}
+                inputDevices={inputDevices}
+                canRemove={inputChannels.length > 1}
+                onDeviceChange={(did) => void handleInputChannelDevice(ch.id, did)}
+                onMute={(m) => {
+                  audioService.setInputChannelMuted(ch.id, m)
+                  // Channel 0's mute also mutes the mic-to-peers bus
+                  // (legacy `isMuted` state) so the existing MIC ON/OFF
+                  // button in the header stays in sync. Other channels
+                  // mute only that channel's contribution.
+                  if (idx === 0) {
+                    if (m) audioService.mute(); else audioService.unmute()
+                    setIsMuted(m)
+                  }
+                }}
+                onVolume={(v) => audioService.setInputChannelGain(ch.id, v)}
+                onRemove={() => handleRemoveInputChannel(ch.id)}
+              />
+            ))}
+            <button
+              onClick={() => void handleAddInputChannel()}
+              title="添加输入通道"
+              style={{
+                alignSelf: 'stretch', minWidth: 80, fontSize: 14,
+                background: '#1a3a1a', color: '#9f9',
+                border: '2px dashed #4a7a4a', borderRadius: 4,
+                cursor: 'pointer', padding: '12px 8px',
               }}
-              onSolo={(solo) => handleSolo(userId, solo)}
-              onVolume={handleInputVolume}
-            />
+            >
+              ＋ 添加输入
+            </button>
           </div>
         </div>
       </div>

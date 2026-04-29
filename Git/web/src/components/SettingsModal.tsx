@@ -20,9 +20,10 @@ interface Props {
 }
 
 export function SettingsModal({ open, onClose }: Props) {
-  const [inputDevices,  setInputDevices]  = useState<MediaDeviceInfo[]>([])
+  // v3.6.0: input device selection moved to per-channel dropdowns in
+  // INPUT TRACKS, so the settings modal only carries output device +
+  // sample-rate from now on.
   const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([])
-  const [selectedInput,  setSelectedInput]  = useState<string>('')
   const [selectedOutput, setSelectedOutput] = useState<string>('')
   const [requestedRate,  setRequestedRate]  = useState<number | null>(AudioService.readUserRate())
   const [actualRate,     setActualRate]     = useState<number>(audioService.actualSampleRate)
@@ -31,13 +32,9 @@ export function SettingsModal({ open, onClose }: Props) {
     if (!open) return
     let cancelled = false
     ;(async () => {
-      const inputs  = await audioService.getAudioInputDevices()
       const outputs = await audioService.getAudioOutputDevices()
       if (cancelled) return
-      setInputDevices(inputs)
       setOutputDevices(outputs)
-      // Reflect actual current selection by querying audioService where possible.
-      if (!selectedInput  && inputs.length > 0)  setSelectedInput(inputs[0].deviceId)
       if (!selectedOutput && outputs.length > 0) setSelectedOutput(outputs[0].deviceId)
       setActualRate(audioService.actualSampleRate)
     })()
@@ -46,11 +43,6 @@ export function SettingsModal({ open, onClose }: Props) {
 
   if (!open) return null
 
-  const handleInputChange = async (deviceId: string) => {
-    setSelectedInput(deviceId)
-    try { await audioService.setInputDevice(deviceId) }
-    catch (err) { console.error('[Settings] input switch failed:', err) }
-  }
   const handleOutputChange = async (deviceId: string) => {
     setSelectedOutput(deviceId)
     try { await audioService.setOutputDevice(deviceId) }
@@ -90,15 +82,8 @@ export function SettingsModal({ open, onClose }: Props) {
 
         <section className="settings-section">
           <h3>音频设备</h3>
-          <div className="settings-row">
-            <label>输入</label>
-            <select value={selectedInput} onChange={e => handleInputChange(e.target.value)}>
-              {inputDevices.map(d => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label || `Input ${d.deviceId.slice(0, 8)}`}
-                </option>
-              ))}
-            </select>
+          <div className="settings-hint subtle">
+            输入设备已移至 INPUT TRACKS 内的每个通道条 — 每个输入通道可独立选择麦克风。
           </div>
           <div className="settings-row">
             <label>输出</label>

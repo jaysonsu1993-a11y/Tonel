@@ -148,15 +148,66 @@ function pcm16ToFloat32(pcm: Uint8Array): Float32Array {
 type AudioLevelCallback = (level: number) => void
 type PeerLevelCallback = (userId: string, level: number) => void
 
+/**
+ * One mic device routed through its own gain + analyser. The user can
+ * have several of these — each contributes to the local input mix that
+ * goes out as a single SPA1 stream. See the `inputChannels` field
+ * comment in AudioService for the architecture summary.
+ *
+ * Public-ish: returned by `getInputChannels()` for the UI to render
+ * one ChannelStrip per channel. Audio nodes are exposed read-only so
+ * the UI can hook analysers for level meters without re-implementing
+ * the polling.
+ */
+export interface InputChannel {
+  /** Stable id ('ch0', 'ch1', …). Used as the React key on the strip. */
+  id: string
+  /** OS device id from `enumerateDevices()`. 'default' = system default
+   *  (no `{exact}` constraint, lets the browser pick). */
+  deviceId: string
+  /** User-friendly device label, e.g. "MacBook Pro Microphone". */
+  deviceLabel: string
+  mediaStream: MediaStream
+  source: MediaStreamAudioSourceNode
+  gainNode: GainNode
+  analyser: AnalyserNode
+  /** Last-set unmuted user gain (0-2). Effective gainNode value is 0
+   *  when muted, `userGain` otherwise. */
+  userGain: number
+  muted: boolean
+}
+
 export class AudioService {
   private audioContext:     AudioContext | null = null
+  // Single-stream legacy aliases — populated as channel 0's mediaStream/
+  // source so the existing 40+ touch-points keep working unchanged
+  // through the multi-input refactor (v3.6.0). New code should reach
+  // into `inputChannels[0]` instead.
   private mediaStream:       MediaStream | null = null
-  private analyser:         AnalyserNode | null = null
   private source:           MediaStreamAudioSourceNode | null = null
+  private analyser:         AnalyserNode | null = null   // channel 0's analyser, kept as alias
   // levelCallback removed — UI polls currentLevel directly via RAF
   private animationFrameId: number | null = null
   private muted:            boolean = false
   public  currentLevel:     number = 0
+
+  // ── Multi-input architecture (v3.6.0) ─────────────────────────────────────
+  //
+  // Each `InputChannel` is one mic device routed through a per-channel
+  // gain stage and analyser. All channels' gainNode outputs converge on
+  // `inputSumGain`, which is what the capture worklet (and ScriptProcessor
+  // fallback) actually reads. This means a single SPA1 stream goes out,
+  // carrying the *sum* of every channel — peers see the user as one
+  // voice in their channel strip. Locally the user can mix their inputs
+  // in whatever proportion they want via the per-strip faders.
+  //
+  // Cleanest semantic: input fader = "how loud does the room hear THIS
+  // mic of mine." The summed result also feeds the local monitor
+  // (via the existing capture-worklet → main-thread → monitor route),
+  // so the user hears their own mix at the same balance.
+  private inputChannels: InputChannel[] = []
+  private inputSumGain: GainNode | null = null
+  private nextChannelId = 0
 
   // WebSocket connections to mixer (via ws-proxy → ws-mixer-proxy)
   private controlWs:        WebSocket | null = null
@@ -372,10 +423,22 @@ export class AudioService {
     }
 
     const wasCapturing = this.isCapturing
+    // Snapshot device IDs before tearing down — we'll re-acquire each
+    // channel under the new context. The old subgraphs all get torn
+    // down because their AudioNodes belong to the old AudioContext.
+    const channelDeviceIds = this.inputChannels.map(c => c.deviceId)
 
-    // Disconnect everything tied to the old AudioContext, but keep the
-    // MediaStream alive (don't stop its tracks).
+    // Disconnect everything tied to the old AudioContext.
     this.stopCapture()
+    for (const ch of this.inputChannels) {
+      try { ch.gainNode.disconnect() } catch {}
+      try { ch.source.disconnect() } catch {}
+      try { ch.analyser.disconnect() } catch {}
+      ch.mediaStream.getAudioTracks().forEach(t => t.stop())
+    }
+    this.inputChannels = []
+    this.nextChannelId = 0
+    if (this.inputSumGain) { try { this.inputSumGain.disconnect() } catch {} this.inputSumGain = null }
     if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
     if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
     if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
@@ -399,12 +462,18 @@ export class AudioService {
       console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz (in-place rebuild)`)
     }
 
-    this.analyser = this.audioContext.createAnalyser()
-    this.analyser.fftSize = 256
-    this.analyser.smoothingTimeConstant = 0.3
-
-    this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
-    this.source.connect(this.analyser)
+    // Rebuild input bus + channels under the new context. Re-acquire
+    // every channel that existed (or just default if there were none).
+    this.inputSumGain = this.audioContext.createGain()
+    this.inputSumGain.gain.value = 1.0
+    if (channelDeviceIds.length === 0) channelDeviceIds.push('default')
+    for (const did of channelDeviceIds) {
+      try { await this.addInputChannel(did) } catch (e) { console.warn('[Audio] re-add channel failed', did, e) }
+    }
+    const ch0 = this.inputChannels[0]
+    this.mediaStream = ch0?.mediaStream ?? null
+    this.source      = ch0?.source ?? null
+    this.analyser    = ch0?.analyser ?? null
 
     this.masterGain = this.audioContext.createGain()
     this.masterGain.gain.value = 1.0
@@ -476,37 +545,45 @@ export class AudioService {
           : new AudioContext()
       }
 
+      // First-attempt mic acquisition is just to get the permission
+      // grant. Real source/gain/analyser construction happens via
+      // addInputChannel below, which builds channel 0's full subgraph.
+      let initialStream: MediaStream
       try {
-        this.mediaStream  = await tryGetUserMedia(true)
+        initialStream     = await tryGetUserMedia(true)
         this.audioContext = tryAudioContext(true)
       } catch (constrainedErr) {
         console.warn('[Audio] Constrained init failed, retrying without sampleRate hint:', constrainedErr)
-        // Make sure no half-open mic stream from the failed attempt sticks
-        // around — Safari has been known to leak the indicator dot.
-        if (this.mediaStream) {
-          try { this.mediaStream.getAudioTracks().forEach(t => t.stop()) } catch {}
-          this.mediaStream = null
-        }
-        this.mediaStream  = await tryGetUserMedia(false)
+        try { initialStream!.getAudioTracks().forEach(t => t.stop()) } catch {}
+        initialStream     = await tryGetUserMedia(false)
         this.audioContext = tryAudioContext(false)
       }
       // FIX: Resume the AudioContext to unfreeze it from browser autoplay policy.
-      // Without this the context stays in 'suspended' state and no audio flows.
       await this.audioContext.resume()
-      // The sampleRate hint is best-effort — Bluetooth output / system overrides
-      // may force a different rate. Log so we can spot the mismatch.
       if (this.audioContext.sampleRate !== requestedRate) {
         console.warn(`[Audio] AudioContext rate is ${this.audioContext.sampleRate} Hz, requested ${requestedRate}. Capture and worklet will resample.`)
       } else {
         console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz`)
       }
 
-      this.analyser = this.audioContext.createAnalyser()
-      this.analyser.fftSize = 256
-      this.analyser.smoothingTimeConstant = 0.3
+      // Multi-input infrastructure: master input bus that all channels
+      // feed into. Capture worklet (and the ScriptProcessor fallback)
+      // read this node, not individual sources.
+      this.inputSumGain = this.audioContext.createGain()
+      this.inputSumGain.gain.value = 1.0
 
-      this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
-      this.source.connect(this.analyser)
+      // Stop the priming-only mediaStream and let addInputChannel do a
+      // fresh getUserMedia inside the channel-0 subgraph. Two
+      // getUserMedia calls in a row is the standard pattern — the first
+      // unlocks the permission, the second binds to the constraints
+      // we actually care about.
+      try { initialStream.getAudioTracks().forEach(t => t.stop()) } catch {}
+      await this.addInputChannel('default')
+      // Legacy aliases for back-compat with the rest of the codebase.
+      const ch0 = this.inputChannels[0]
+      this.mediaStream = ch0?.mediaStream ?? null
+      this.source      = ch0?.source ?? null
+      this.analyser    = ch0?.analyser ?? null
 
       this.startLevelMonitoring()
       await this.initPlayback()  // P0-1 fix: await async initPlayback
@@ -536,6 +613,183 @@ export class AudioService {
     // we don't need a pre-check here.
     void this.ensureMonitorWorklet()
     await this.initPlaybackWorklet()
+  }
+
+  // ── Multi-input channel management ─────────────────────────────────────
+  //
+  // The methods below own all per-channel audio-graph wiring. `init()` /
+  // `changeSampleRate()` rebuild the channel list by tearing down the
+  // old graph and calling `addInputChannel('default')` to seed channel 0.
+  // The legacy `this.source` / `this.mediaStream` / `this.analyser`
+  // fields are kept as aliases of channel 0 so the existing 40+
+  // touch-points across the codebase don't all have to be rewritten in
+  // one go.
+
+  /**
+   * Acquire a mic device, build its per-channel subgraph, and add it to
+   * the input mix. Returns the new channel's id. Throws if the audio
+   * graph isn't ready (caller must `init()` first).
+   *
+   * deviceId='default' lets the browser pick (usually the OS default).
+   * A specific deviceId pins this channel to that device — survives
+   * device-list reorderings as long as the device stays plugged in.
+   */
+  async addInputChannel(deviceId: string = 'default'): Promise<string> {
+    if (!this.audioContext || !this.inputSumGain) {
+      throw new Error('AudioService not initialized — call init() first')
+    }
+    const requestedRate = AudioService.readUserRate() ?? SAMPLE_RATE
+    const audioConstraint: MediaTrackConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl:  false,
+      sampleRate:       requestedRate,
+      channelCount:     CHANNELS,
+    }
+    if (deviceId && deviceId !== 'default') {
+      audioConstraint.deviceId = { exact: deviceId }
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint, video: false })
+
+    const id = `ch${this.nextChannelId++}`
+    const source = this.audioContext.createMediaStreamSource(stream)
+    const gainNode = this.audioContext.createGain()
+    gainNode.gain.value = 1.0
+    const analyser = this.audioContext.createAnalyser()
+    analyser.fftSize = 256
+    analyser.smoothingTimeConstant = 0.3
+    // Audio: source → gainNode → inputSumGain. Tap: source → analyser
+    // (parallel, no downstream — analyser is leaf, just for level metering).
+    source.connect(gainNode)
+    gainNode.connect(this.inputSumGain)
+    source.connect(analyser)
+
+    // Resolve the label from enumerateDevices for nice display. After
+    // getUserMedia has succeeded, `label` is populated (browsers gate
+    // it on permission).
+    let deviceLabel = ''
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      if (deviceId === 'default') {
+        const trackLabel = stream.getAudioTracks()[0]?.label
+        deviceLabel = trackLabel || 'Default Input'
+      } else {
+        const dev = devices.find(d => d.deviceId === deviceId)
+        deviceLabel = dev?.label || `Input ${id}`
+      }
+    } catch {
+      deviceLabel = `Input ${id}`
+    }
+
+    const channel: InputChannel = {
+      id, deviceId, deviceLabel, mediaStream: stream,
+      source, gainNode, analyser, userGain: 1.0, muted: false,
+    }
+    this.inputChannels.push(channel)
+    return id
+  }
+
+  /**
+   * Tear down a channel's subgraph and stop its mic. The first channel
+   * (`ch0`) cannot be removed — there must always be at least one
+   * input. Returns true if a channel was removed.
+   */
+  removeInputChannel(id: string): boolean {
+    if (this.inputChannels.length <= 1) return false   // never remove the last
+    const idx = this.inputChannels.findIndex(c => c.id === id)
+    if (idx < 0) return false
+    const ch = this.inputChannels[idx]
+    try { ch.gainNode.disconnect() } catch {}
+    try { ch.source.disconnect() } catch {}
+    try { ch.analyser.disconnect() } catch {}
+    ch.mediaStream.getAudioTracks().forEach(t => t.stop())
+    this.inputChannels.splice(idx, 1)
+    return true
+  }
+
+  /** Per-channel gain (channel-strip fader). Stacks with `muted` —
+   *  effective gainNode value is 0 when muted, `userGain` otherwise. */
+  setInputChannelGain(id: string, g: number): void {
+    const ch = this.inputChannels.find(c => c.id === id)
+    if (!ch || !this.audioContext) return
+    ch.userGain = Math.max(0, Math.min(2, g))
+    const eff = ch.muted ? 0 : ch.userGain
+    ch.gainNode.gain.setTargetAtTime(eff, this.audioContext.currentTime, 0.01)
+  }
+  setInputChannelMuted(id: string, b: boolean): void {
+    const ch = this.inputChannels.find(c => c.id === id)
+    if (!ch || !this.audioContext) return
+    ch.muted = b
+    const eff = ch.muted ? 0 : ch.userGain
+    ch.gainNode.gain.setTargetAtTime(eff, this.audioContext.currentTime, 0.01)
+  }
+
+  /**
+   * Swap the device backing an existing channel without losing the
+   * channel slot (gain/mute state stays). Tears down the old subgraph,
+   * acquires the new device, rewires.
+   */
+  async setInputChannelDevice(id: string, deviceId: string): Promise<void> {
+    if (!this.audioContext || !this.inputSumGain) return
+    const ch = this.inputChannels.find(c => c.id === id)
+    if (!ch) return
+    const requestedRate = AudioService.readUserRate() ?? SAMPLE_RATE
+    const audioConstraint: MediaTrackConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl:  false,
+      sampleRate:       requestedRate,
+      channelCount:     CHANNELS,
+    }
+    if (deviceId && deviceId !== 'default') {
+      audioConstraint.deviceId = { exact: deviceId }
+    }
+    const newStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint, video: false })
+    // Rewire: stop old, build new on top of existing gainNode/analyser
+    // (they keep their settings).
+    try { ch.source.disconnect() } catch {}
+    ch.mediaStream.getAudioTracks().forEach(t => t.stop())
+    ch.mediaStream = newStream
+    ch.source = this.audioContext.createMediaStreamSource(newStream)
+    ch.source.connect(ch.gainNode)
+    ch.source.connect(ch.analyser)
+    ch.deviceId = deviceId
+    try {
+      const trackLabel = newStream.getAudioTracks()[0]?.label
+      if (trackLabel) ch.deviceLabel = trackLabel
+      else if (deviceId !== 'default') {
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        ch.deviceLabel = devices.find(d => d.deviceId === deviceId)?.label || ch.deviceLabel
+      }
+    } catch {}
+    // If this is channel 0, refresh the legacy alias so anything still
+    // reading `this.mediaStream` / `this.source` keeps pointing at the
+    // current device.
+    if (this.inputChannels[0] === ch) {
+      this.mediaStream = newStream
+      this.source      = ch.source
+    }
+  }
+
+  /** Read-only snapshot of the current channel list for the UI. */
+  getInputChannels(): readonly InputChannel[] {
+    return this.inputChannels
+  }
+
+  /**
+   * Compute the current per-channel level (RMS, smoothed, scaled to 0-1).
+   * Polled by the UI for each strip's meter. Cheap — uses the channel's
+   * AnalyserNode time-domain buffer.
+   */
+  getInputChannelLevel(id: string): number {
+    const ch = this.inputChannels.find(c => c.id === id)
+    if (!ch) return 0
+    const buf = new Float32Array(ch.analyser.fftSize)
+    ch.analyser.getFloatTimeDomainData(buf)
+    let sum = 0
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
+    const rms = Math.sqrt(sum / buf.length)
+    return Math.min(1, rms * 5)   // same scaling factor as captureWorklet's level meter
   }
 
   /**
@@ -1447,10 +1701,18 @@ export class AudioService {
         //                                    rate, forwarded to monitor.
         //   { frame: Float32Array, stats }   wire-rate frame for SPA1 send.
         if (d.rawBlock && this.monitorWorklet) {
-          // Forward to monitor at context rate. Honour mute by zeroing
-          // here — without this, soloing/muting would still let the user
-          // hear themselves locally even though peers hear nothing.
-          if (this.muted) d.rawBlock.fill(0)
+          // Forward to monitor at context rate. Honour mute + input
+          // gain so the INPUT TRACKS fader audibly affects the user's
+          // own monitor too — pre-v3.5.2 inputGain only scaled the
+          // outgoing SPA1 (so peers heard the change but the user
+          // heard their monitor unchanged, which read as "fader does
+          // nothing").
+          if (this.muted) {
+            d.rawBlock.fill(0)
+          } else if (this.inputGain !== 1.0) {
+            const g = this.inputGain
+            for (let i = 0; i < d.rawBlock.length; i++) d.rawBlock[i] *= g
+          }
           this.monitorWorklet.port.postMessage(d.rawBlock, [d.rawBlock.buffer])
           return
         }
@@ -1459,7 +1721,13 @@ export class AudioService {
         if (stats?.clips) this.captureClipCount += stats.clips
         this.sendCapturedFrame(frame as Float32Array)
       }
-      this.source.connect(node)
+      // v3.6.0: feed from the per-channel summing bus, not from a
+      // single mic source. inputSumGain carries the user's complete
+      // input mix (channel 0 + any additional channels added via
+      // addInputChannel), so the captured frame and the local monitor
+      // both receive the mixed signal.
+      if (this.inputSumGain) this.inputSumGain.connect(node)
+      else if (this.source)  this.source.connect(node)   // safety net
       // AudioWorkletNode needs to be connected somewhere downstream for the
       // audio thread to keep invoking process(). Route through a 0-gain
       // GainNode before destination — this guarantees no mic→speaker
@@ -1557,8 +1825,11 @@ export class AudioService {
       const wireSamples = this.resampleCaptureTo48k(raw)
       if (wireSamples.length > 0) this.onAudioFrame(wireSamples)
     }
-    // Connect source → processor so it receives mic audio
-    if (this.source) {
+    // v3.6.0: feed from inputSumGain so this fallback also gets the
+    // multi-input mix instead of just channel 0's raw source.
+    if (this.inputSumGain) {
+      this.inputSumGain.connect(node)
+    } else if (this.source) {
       this.source.connect(node)
     }
     // Route through a 0-gain GainNode before destination — same defense

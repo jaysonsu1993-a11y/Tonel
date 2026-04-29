@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-04-29
+
+### Added — multi-input + per-channel device + meter↔fader linking
+
+Four UI/UX changes, all driven from the user's last request.
+
+**1. Meter shows post-fader level** — `ChannelStrip.tsx`. Pre-v3.6.0
+the LED meter showed pre-fader input level, which made pulling the
+fader down look like "the mic's still hot" — confusing. Display
+level is now `level * (volume / 100)`, matching what the listener
+(or peer) actually hears.
+
+**2. INPUT TRACKS fader audibly applies** — pre-v3.6.0 the input
+gain was multiplied into the SPA1 frame *after* the monitor block
+had been forwarded, so peers heard the fader move but the user
+heard their monitor unchanged ("fader does nothing"). Now the same
+gain applies to the rawBlock copy on its way to the monitor too.
+(In v3.6.0 this is subsumed by the per-channel gainNode below;
+the legacy `inputGain` JS field is no longer used by any UI path.)
+
+**3. Multi-input architecture** — `audioService.ts`,
+`InputChannelStrip.tsx`. Each input is now its own channel with
+independent device, mute, and fader. Audio graph:
+
+```
+ch0.source → ch0.gain → ┐
+ch1.source → ch1.gain → ├→ inputSumGain → captureWorklet → SPA1 send
+ch2.source → ch2.gain → ┘                              └→ monitor route
+```
+
+`InputChannel` interface holds `{id, deviceId, deviceLabel,
+mediaStream, source, gainNode, analyser, userGain, muted}`. New
+methods on `audioService`:
+
+- `addInputChannel(deviceId='default')` — getUserMedia + build
+  subgraph + push to channel list.
+- `removeInputChannel(id)` — tears down subgraph, stops mic,
+  refuses to remove the last channel.
+- `setInputChannelGain(id, g)` / `setInputChannelMuted(id, b)`.
+- `setInputChannelDevice(id, deviceId)` — swap device backing the
+  channel without losing the slot or its fader/mute state.
+- `getInputChannels()` / `getInputChannelLevel(id)` for the UI.
+
+`init()` and `changeSampleRate()` now seed channel 0 via
+`addInputChannel('default')` and rebuild every channel under the
+new context. The legacy fields (`this.source`, `this.mediaStream`,
+`this.analyser`) become aliases of channel 0 so the existing 40+
+touch-points across the codebase keep working — incremental
+migration path rather than a flag-day.
+
+**4. Per-channel device dropdown** — `InputChannelStrip.tsx`. New
+component composes `ChannelStrip` with a device selector at the
+top and a `×` remove button. Dropdown is populated from
+`navigator.mediaDevices.enumerateDevices()` and refreshed on
+`devicechange` events (cable plug, BT pair). Picking a different
+device calls `setInputChannelDevice` which re-acquires the mic
+without losing the strip's fader/mute state.
+
+`SettingsModal` no longer carries the input-device dropdown — moved
+into the per-channel UI per the user's request. Settings keeps
+output device selection + sample-rate override.
+
+**RoomPage layout:**
+```
+INPUT TRACKS (N CH)
+  [device ▾ ×]   [device ▾ ×]   [＋ 添加输入]
+  [strip 1]     [strip 2]
+```
+First channel hides the `×` (audio graph requires at least one
+input). The `＋` button calls `addInputChannel('default')` which
+prompts for mic permission once and then adds another input.
+
+**Server-side**: no changes. The user still appears to peers as a
+single track — peers see one channel strip per user, and that
+strip carries the user's complete input mix. Per-channel detail is
+local-only.
+
+**Verified** — Layer 1 (SNR 84.0 dB / THD 0.006 %), Layer 2 (PASS
+first try). Default behaviour with one channel + unity gain is
+byte-identical to v3.5.1: `inputSumGain.gain = 1.0` on top of
+`channel0.gainNode.gain = 1.0` is unity, no signal change.
+
 ## [3.5.1] - 2026-04-29
 
 ### Added — channel-strip faders now actually do per-channel work

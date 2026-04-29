@@ -39,7 +39,11 @@ export function ChannelStrip({
   useEffect(() => { setLocalMuted(isMuted) }, [isMuted])
   useEffect(() => { setLocalSolo(isSolo) }, [isSolo])
 
-  const displayLevel = localMuted ? 0 : level
+  // Meter shows POST-fader level so visual matches what the listener
+  // (or peer) actually hears. Pre-v3.5.2 the meter showed pre-fader
+  // input level, which made pulling the fader down look like "the
+  // mic's still hot" — confusing.
+  const displayLevel = localMuted ? 0 : level * (volume / 100)
   const handleMute = () => {
     setLocalMuted(!localMuted)
     onMute?.(!localMuted)
