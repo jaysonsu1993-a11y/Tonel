@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.1] - 2026-04-29
+
+### Reverted — `免费创建房间` opens panel for room id + optional password
+
+Per user feedback: v3.7.0 took the design spec literally and made the
+create button a one-shot auto-generate-id call. The user prefers the
+prior interactive flow — explicit room number entry + optional
+password. Restored.
+
+`HomePage.tsx`:
+- Re-added `showCreatePanel`, `pendingRoomId`, `createPassword` state.
+- `handleCreateClick` opens a modal-style panel (mirrors the join
+  panel shape for visual consistency).
+- Empty room-id field still auto-generates a 6-char upper-case id
+  on confirm — keeps the zero-friction path available without
+  removing the explicit one.
+- `createError` rendered inline in the modal (was floating in the
+  hero left column in v3.7.0).
+
+No other changes — V1 layout / live latency / mobile drawer / nav /
+placeholder routes / signaling fix / pretest gate all unchanged
+from v3.7.0.
+
 ## [3.7.0] - 2026-04-29
 
 ### Three things — signaling root-cause fix, pre-release gate, V1 homepage

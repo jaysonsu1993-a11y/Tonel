@@ -95,17 +95,37 @@ export function HomePage({
   const [showJoinPanel, setShowJoinPanel] = useState(false)
   const [joinRoomId,    setJoinRoomId]    = useState('')
   const [joinPassword,  setJoinPassword]  = useState('')
+  // v3.7.1: restore the interactive create flow. The design spec
+  // suggested zero-friction (auto-generated id, no panel), but the
+  // user wants the prior behaviour — explicit room id + optional
+  // password — back. Modal-style panel mirrors the join panel below.
+  const [showCreatePanel, setShowCreatePanel] = useState(false)
+  const [pendingRoomId,   setPendingRoomId]   = useState('')
+  const [createPassword,  setCreatePassword]  = useState('')
 
-  /** Spec 1.3.4 / mobile 8: "免费创建房间" auto-generates id, no panel. */
-  const handleCreate = async () => {
+  /** Open the create panel. Empty id field — user can type a custom
+   *  room number or leave blank for auto-generation on confirm. */
+  const handleCreateClick = () => {
+    setPendingRoomId('')
+    setCreatePassword('')
+    setShowCreatePanel(true)
+  }
+  const handleCreateConfirm = async () => {
     if (isCreating) return
     setIsCreating(true)
     try {
-      const id = Math.random().toString(36).slice(2, 8).toUpperCase()
-      await onCreateRoom(id)
+      const id = pendingRoomId.trim().toUpperCase()
+        || Math.random().toString(36).slice(2, 8).toUpperCase()
+      await onCreateRoom(id, createPassword || undefined)
+      setShowCreatePanel(false)
     } finally {
       setIsCreating(false)
     }
+  }
+  const handleCreateCancel = () => {
+    setShowCreatePanel(false)
+    setPendingRoomId('')
+    setCreatePassword('')
   }
 
   const handleJoinClick = () => {
@@ -154,7 +174,7 @@ export function HomePage({
               Tonel 是一个为乐手而生的实时排练平台。低于人耳可感知的音频延迟，让远在千里的两位演奏者，听起来像同处一间排练房。
             </p>
             <div className="v1-actions">
-              <button className="v1-cta" onClick={handleCreate} disabled={isCreating}>
+              <button className="v1-cta" onClick={handleCreateClick} disabled={isCreating}>
                 {isCreating ? '创建中…' : '免费创建房间'}
               </button>
               <button className="v1-cta-ghost" onClick={handleJoinClick}>加入房间</button>
@@ -257,7 +277,7 @@ export function HomePage({
         </div>
 
         <div className="v1m-actions">
-          <button className="v1m-cta" onClick={handleCreate} disabled={isCreating}>
+          <button className="v1m-cta" onClick={handleCreateClick} disabled={isCreating}>
             {isCreating ? '创建中…' : '免费创建房间'}
           </button>
           <div className="v1m-row2">
@@ -282,6 +302,44 @@ export function HomePage({
           <span>BUILD 2026.04.29</span>
         </div>
       </div>
+
+      {/* Create panel — modal overlay. Same shape as the join panel
+          for visual consistency. Empty room id field auto-generates
+          a 6-char upper-case id on confirm. */}
+      {showCreatePanel && (
+        <div className="modal-backdrop" onClick={handleCreateCancel}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>创建房间</h3>
+            <input
+              type="text"
+              autoFocus
+              placeholder="自定义房间号（留空自动生成）"
+              value={pendingRoomId}
+              onChange={(e) => setPendingRoomId(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isCreating) void handleCreateConfirm() }}
+              maxLength={20}
+            />
+            <input
+              type="password"
+              placeholder="设置密码（可选）"
+              value={createPassword}
+              onChange={(e) => setCreatePassword(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isCreating) void handleCreateConfirm() }}
+            />
+            {createError && (
+              <div className="error-text" style={{ color: '#e55', marginTop: 8 }}>
+                {createError}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
+              <button className="btn btn-ghost" onClick={handleCreateCancel} disabled={isCreating}>取消</button>
+              <button className="btn btn-primary" onClick={handleCreateConfirm} disabled={isCreating}>
+                {isCreating ? '创建中…' : '创建'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Join panel — modal-like overlay, shared by desktop + mobile.
           Kept as a centred panel rather than inlined in the hero row
