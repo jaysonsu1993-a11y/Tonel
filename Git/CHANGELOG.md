@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.2] - 2026-04-30
+
+### Fixed — v4.1.1 schema migration discarded stale slot but reapplied OLD defaults
+
+v4.1.1 added the schema-version gate to discard stale `tonel.tuning.*`
+localStorage slots and "fall back to current defaults". The discard
+side worked correctly — slots were wiped, the migration log line
+fired. **But the "current defaults" being reapplied were the v3.x
+constants** (`maxScale: 1.012`, `minScale: 0.988`), not the v4.1.0
+new values (`maxScale: 1.025`, `minScale: 0.975`).
+
+Root cause: `tuning` (the live in-memory state, used by the
+worklet on construction) was bumped to ±2.5% in v4.1.0. But there
+is a **second copy** of these defaults — `private static readonly
+DEFAULT_PB` — that the discard-and-reset path in
+`loadRoomTuningIntoState()` (and `resetRoomTuning()`) calls
+through. That static constant still held `maxScale: 1.012`
+because v4.1.0's edit only touched the live initializer.
+
+Two sources of truth, drifted out of sync. Discovered via Preview
+MCP automation: spawned the dev server in a Chromium-based
+preview, planted a fake stale tuning blob into `localStorage`,
+called `loadRoomTuningIntoState()` manually, and observed
+`tuning.maxScale` come back as `1.012` after the supposedly-clean
+migration. The migration log line fired (proving the discard ran);
+the value was wrong (proving the reset side was wrong).
+
+**Fix**: update `DEFAULT_PB` to the v4.1 values (1.025 / 0.975).
+Comment block on `DEFAULT_PB` now explicitly tags it as the
+single source of truth and says any future bump must also bump
+`TUNING_SCHEMA_VERSION`.
+
+**Validation done**: re-ran the same Preview MCP test after the
+fix. Two scenarios verified:
+1. Stale (no `v` field) blob → discarded, defaults applied with
+   correct v4.1 values (`maxScale: 1.025` ✓, `primeTarget: 1440` ✓,
+   slot wiped ✓).
+2. Current (`v: 2`) blob with user's custom aggressive values
+   (`primeTarget: 144`) → preserved, user values overlay correctly.
+   Doesn't accidentally discard valid current-schema slots.
+
+### Process note — automated test caught the regression cleanly
+
+This bug was invisible to `pretest.sh` (Layer 2 Playwright runs
+in a fresh browser profile, no stale localStorage to load). It
+also wasn't visible from a code review of v4.1.1 alone — the
+migration logic looked right; the trap was a stale constant
+hidden 1300 lines away.
+
+Caught by Preview MCP scripted test that:
+1. Started the local Vite dev server
+2. Loaded `audioService.ts` via dynamic import
+3. Planted a synthetic stale blob in `localStorage`
+4. Manually invoked the prototype's private migration method
+5. Read out the post-migration `tuning` state
+6. Asserted on expected values
+
+This is the kind of state-migration test that should live
+permanently — added as a follow-up TODO. For Phase B onward, the
+combination of "stale-state replay test" + the bumped
+`TUNING_SCHEMA_VERSION` rule should prevent this class of
+regression.
+
 ## [4.1.1] - 2026-04-30
 
 ### Fixed — v4.1.0 Phase A.1 silently overridden by stale localStorage tuning

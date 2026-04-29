@@ -335,11 +335,22 @@ export class AudioService {
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
   }
-  /** Default tuning values. Single source of truth — used by both the
-   *  initial `this.tuning` field below and `resetRoomTuning()` below. */
+  /** Default tuning values. SINGLE SOURCE OF TRUTH — used by both the
+   *  initial `this.tuning` field below (via spread) and the
+   *  schema-discard / RESET paths in loadRoomTuningIntoState() and
+   *  resetRoomTuning(). Bumping these values must NOT be done in
+   *  isolation: also bump TUNING_SCHEMA_VERSION so existing users'
+   *  saved-tuning slots get discarded on next load (otherwise a
+   *  stale slot pins the user to the OLD defaults).
+   *
+   *  Phase A v4.1.2: maxScale/minScale here used to be 1.012/0.988
+   *  (v3.x era). v4.1.0 bumped the live `this.tuning` to ±2.5% but
+   *  forgot to update DEFAULT_PB — so the migration path in
+   *  loadRoomTuningIntoState() was applying the OLD constants when
+   *  it discarded a stale slot. Hotfixed in v4.1.2. */
   private static readonly DEFAULT_PB = Object.freeze({
     primeTarget: 1440, primeMin: 128,
-    maxScale: 1.012,   minScale: 0.988,
+    maxScale: 1.025,   minScale: 0.975,
     rateStep: 0.00002,
   })
   private static readonly DEFAULT_SRV = Object.freeze({
