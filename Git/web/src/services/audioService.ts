@@ -1165,7 +1165,19 @@ export class AudioService {
     if (this.source) {
       this.source.connect(node)
     }
-    node.connect(this.audioContext.destination)
+    // Route through a 0-gain GainNode before destination — same defense
+    // the worklet capture path already has. ScriptProcessor's outputBuffer
+    // contents are implementation-defined when not written by the
+    // onaudioprocess handler; most browsers zero them, but a 0-gain sink
+    // is the version that survives every browser quirk and prevents any
+    // stray mic→speaker leak. AudioWorkletNode/ScriptProcessor still need
+    // a downstream connection to keep their callbacks firing — the
+    // 0-gain node satisfies that without making the mic audible locally.
+    const sink = this.audioContext.createGain()
+    sink.gain.value = 0
+    node.connect(sink)
+    sink.connect(this.audioContext.destination)
+    this.captureSink = sink
     this.processor = node
   }
 

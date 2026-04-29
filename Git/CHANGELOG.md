@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.3] - 2026-04-29
+
+### Fixed — same-WeChat-account session collisions (self-echo via solo loopback)
+
+User report: in a 2-user room, desktop user hears their own voice
+through what feels like a server round-trip — and somehow at *higher*
+latency than they hear the mobile peer's voice.
+
+Three independent bugs combined to make this a stable failure mode:
+
+**1. Logged-in users had no per-device suffix on their `userId`.**
+  - `data.nickname || data.unionId` is identical across devices on
+    the same WeChat account, so two devices logging in collided on the
+    mixer's `(roomId, userId)` slot.
+  - `mixer_server.cpp` resolves the collision via session takeover,
+    overwriting `room->users[uid]` with the new ctx. `room.users.size()`
+    drops back to 1 → `soloMode` flips on at line 832 → server sends
+    `fullMix` (every track including the user's own) instead of the
+    N-1 mix to whichever client's UDP `addr` is current.
+  - Net effect: desktop hears its own voice via the server fullMix
+    bounce. The latency is the full server round trip (~30–100 ms),
+    which is what the user reported.
+
+  Fix: `App.tsx` now appends a 4-char per-device suffix
+  (`tonel_device_id` in localStorage) when minting a logged-in
+  `userId`. Two devices on the same WeChat get distinct mixer slots.
+  Guest IDs already used per-device localStorage and are unaffected.
+
+**2. Mixer `SESSION_REPLACED` was emitted but never wired to the UI.**
+  - `audioService.onSessionReplaced(cb)` exists — `audioService.ts:918`
+    — but no caller ever subscribed.
+  - When a session takeover *did* fire, the displaced client logged
+    `[Mixer] Session replaced` and kept right on going — UDP audio
+    continued flowing, the mixer's room counted the displaced uid as
+    still present in some cases, and there was no path for the
+    affected client to leave the room cleanly.
+
+  Fix: `RoomPage` now subscribes on mount and calls `onLeave()` when
+  the mixer signals takeover. Same clean-leave behaviour the signaling
+  server's SESSION_REPLACED already had.
+
+**3. ScriptProcessor capture path connected to `destination` without
+  a 0-gain sink (defense-in-depth gap).**
+  - `audioService.ts:1168` was `node.connect(this.audioContext.destination)`
+    directly. ScriptProcessor's outputBuffer contents are
+    implementation-defined when the `onaudioprocess` handler doesn't
+    write to them — most browsers zero them, but a 0-gain `GainNode`
+    is the version that survives every browser quirk.
+  - The AudioWorklet capture path already had the 0-gain sink
+    (`audioService.ts:1086-1090`); this brings the fallback path into
+    line with it.
+
+  Fix: matching `sink.gain.value = 0` GainNode between the
+  ScriptProcessor and `destination`. Callbacks still fire (downstream
+  connection is what keeps the audio thread invoking the node); local
+  mic→speaker leak is now structurally impossible regardless of
+  browser ScriptProcessor quirks.
+
+Net: in a 2-user room with two devices on the same WeChat account,
+the mixer now sees them as distinct users, N-1 mix engages correctly,
+neither device hears their own voice via the server, and the
+displaced-ctx zombie path is closed off.
+
 ## [3.3.2] - 2026-04-29
 
 ### Fixed — debug-panel target adjustments now actually shrink latency

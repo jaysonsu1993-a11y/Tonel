@@ -28,6 +28,33 @@ function resetGuestId(): string {
   return generateGuestId()
 }
 
+// Per-device suffix for logged-in userIds. Two devices signed into the
+// same WeChat account share `nickname` / `unionId`, which the mixer
+// reads as the same user_id and treats as a session takeover — the
+// "older" device gets displaced, the room collapses to a single user
+// in the mixer's accounting, soloMode flips on, and the user hears
+// their own voice through the server fullMix loop. Mixing in a 4-char
+// random suffix per device decouples the identity without affecting
+// nicknames in the UI (peers still display as the user-typed name
+// because ChannelStrip slices to 8 chars when no nickname is provided).
+//
+// Guest users already get per-device IDs (separate localStorage), so
+// this only matters for the logged-in path.
+const DEVICE_ID_KEY = 'tonel_device_id'
+function getDeviceSuffix(): string {
+  let id: string | null = null
+  try { id = localStorage.getItem(DEVICE_ID_KEY) } catch {}
+  if (id && /^[A-Z0-9]{4}$/.test(id)) return id
+  const fresh = Math.random().toString(36).slice(2, 6).toUpperCase().padEnd(4, 'X').slice(0, 4)
+  try { localStorage.setItem(DEVICE_ID_KEY, fresh) } catch {}
+  return fresh
+}
+/** Decorate a logged-in user's identity with a per-device suffix so
+ *  two devices on the same WeChat account get distinct mixer slots. */
+function makeLoggedInUserId(base: string): string {
+  return `${base}~${getDeviceSuffix()}`
+}
+
 // 用户服务 API 地址
 const USER_API_BASE = import.meta.env.VITE_USER_API_URL || 'https://api.tonel.io'
 
@@ -150,7 +177,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json()
         setUserProfile(data)
-        setUserId(data.nickname || data.unionId)
+        setUserId(makeLoggedInUserId(data.nickname || data.unionId))
         setIsLoggedIn(true)
       } else {
         // Token 无效，清除
@@ -167,7 +194,7 @@ export default function App() {
     localStorage.setItem('tonel_token', newToken)
     setToken(newToken)
     setUserProfile(profile)
-    setUserId(profile.nickname || profile.unionId)
+    setUserId(makeLoggedInUserId(profile.nickname || profile.unionId))
     setIsLoggedIn(true)
     setShowLoginModal(false)
   }, [])

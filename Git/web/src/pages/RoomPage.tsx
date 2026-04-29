@@ -127,6 +127,19 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     // Three-stage init — see retryMicInit for the per-stage rationale.
     void runInit()
 
+    // Wire mixer SESSION_REPLACED. Pre-v3.3.3 this callback was defined
+    // in audioService but never subscribed to from any UI surface, so a
+    // displaced mixer ctx would log "Session replaced" and keep right on
+    // sending audio — UDP packets continued, mixer's room.users still
+    // counted the displaced uid, soloMode flipped, and the user heard
+    // their own voice via the server fullMix loop. Now SESSION_REPLACED
+    // on the mixer triggers the same clean-leave flow as the signaling
+    // server's SESSION_REPLACED: bail out of the room, surface a notice.
+    audioService.onSessionReplaced(() => {
+      console.warn('[RoomPage] Mixer session replaced — leaving room')
+      onLeave()
+    })
+
     return () => {
       audioService.stopCapture()
     }
