@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.7] - 2026-04-29
+
+### Fixed — Chrome desktop monitor: stop tapping mic twice
+
+User report on v3.4.6 with diagnostics:
+```
+mon=1.00  monProc=14880  monIn=9626  monOut=0   (desktop)
+micClip=391                                       (capture worklet HAS samples)
+```
+
+Same `MediaStreamSource` node fed both worklets. Capture saw real
+mic (clipping detected → high-amplitude samples). Monitor's process()
+ran with non-empty inputs, but every input sample was 0. Conclusion:
+**Chrome desktop's WebRTC audio-processing layer marks the FIRST
+consumer as authoritative and zeros samples reaching subsequent
+consumers** — even within Web Audio API. iOS Safari was less
+strict, which is why phone worked while desktop didn't.
+
+Fix: don't tap the mic source twice. The capture worklet already
+has real samples and posts them to main thread for SPA1 send. We
+intercept in `sendCapturedFrame` and post a copy of each frame to
+the monitor worklet via its port. The monitor worklet now has NO
+audio input — it's purely queue-driven from the port. From Chrome's
+perspective there is no second mic→speaker path, so the suppression
+never fires.
+
+Architecture:
+```
+Before:                    After (v3.4.7):
+  source → captureWorklet     source → captureWorklet
+       \→ monitorWorklet                    │
+            ↓                               │ frame.copy
+        destination                         ↓
+                              port → monitorWorklet → destination
+                                    queue-fed, no audio input
+```
+
+`MonitorProcessor` is now queue-fed:
+- `port.onmessage` receives `Float32Array` frames (samples) and
+  `{type:'gain'}` (gain commands).
+- Frames buffer in a FIFO capped at 1 s; oldest frames drop on
+  overflow.
+- `process()` drains the queue across audio quanta, scales by gain,
+  fans mono → stereo to all output channels.
+- Underrun (queue empty mid-quantum) writes silence for the rest
+  of the quantum — clean, no click.
+
+Latency cost: one main-thread postMessage round trip (~5–10 ms) +
+the queue's current depth. Still <1/3 of the server-bounce latency,
+so the user gets near-real-time self-hear on every browser, not just
+WebKit.
+
+Diagnostic counter `monIn` now means "frames received via port"
+rather than "input quanta with non-empty audio". Matches the new
+data-flow model.
+
+Verified Layer 1 (SNR 84 dB / THD 0.006 %), Layer 2 (PASS after
+the standard one-flake retry). No change in single-user rooms —
+gain stays at 0, monitor writes silence.
+
 ## [3.4.6] - 2026-04-29
 
 ### Added — MIXER / INPUT TRACKS UI split + monitor diagnostics

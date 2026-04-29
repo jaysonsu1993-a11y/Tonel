@@ -561,56 +561,113 @@ export class AudioService {
     if (!this.audioContext || !this.source) return false
     if (this.monitorWorklet) return true
     const code = `
+      // v3.4.7: queue-fed monitor processor.
+      //
+      // Background: v3.4.5/3.4.6 connected source → monitorWorklet just
+      // like the capture worklet. On Chrome desktop, the diagnostics
+      // showed monProc=14880 monIn=9626 monOut=0 — process() ran, inputs
+      // had length > 0, but every input sample was 0. Same source feeding
+      // both worklets, yet capture sees real mic (clipping detected!) and
+      // monitor sees silence. That's Chrome's mic-track double-tap
+      // suppression: the WebRTC audio-processing layer marks the *first*
+      // consumer as authoritative and zeros samples reaching subsequent
+      // consumers, even within the Web Audio API.
+      //
+      // Workaround: don't tap mic twice. The capture worklet already has
+      // real mic samples and posts them to main thread for SPA1 send. We
+      // intercept at that hop and postMessage the same frames to this
+      // worklet, which queues them and emits via process(). This monitor
+      // worklet has NO audio input — its source is the port queue. From
+      // Chrome's perspective there's no mic→speaker path here, so the
+      // suppression never fires.
+      //
+      // Latency cost: one main-thread round trip (~5–10 ms) + the queue's
+      // current depth. Still far below the ~30–100 ms server bounce, so
+      // the user gets near-real-time self-hear.
       class MonitorProcessor extends AudioWorkletProcessor {
         constructor() {
           super()
-          this.gain = 0   // updated via postMessage from updateMonitorGain
-          // Diagnostics — surfaced to debug strip so we can localize a
-          // silent monitor (process not running? input empty? output
-          // bypassed?) without guessing.
-          this.procCalls = 0    // total process() invocations
-          this.inSeen    = 0    // process() calls where inputs[0][0] had length > 0
-          this.outWrote  = 0    // process() calls that wrote non-zero samples
+          this.gain      = 0
+          this.queue     = []     // FIFO of Float32Array frames
+          this.queueLen  = 0      // total samples buffered
+          this.readPos   = 0      // position into queue[0]
+          this.procCalls = 0
+          this.framesIn  = 0      // frames received via port
+          this.outWrote  = 0
           this.statsTick = 0
           this.port.onmessage = (ev) => {
-            if (ev.data && typeof ev.data.gain === 'number') {
-              this.gain = ev.data.gain
+            const d = ev.data
+            if (d instanceof Float32Array) {
+              this.queue.push(d)
+              this.queueLen += d.length
+              this.framesIn++
+              // Cap queue at 1 second of audio. Drop oldest frames if a
+              // main-thread stall stuffs in too much.
+              while (this.queueLen > 48000) {
+                const old = this.queue.shift()
+                if (!old) break
+                this.queueLen -= old.length - this.readPos
+                this.readPos = 0
+              }
+            } else if (d && d.type === 'gain' && typeof d.gain === 'number') {
+              this.gain = d.gain
             }
           }
         }
-        process(inputs, outputs) {
+        process(_inputs, outputs) {
           this.procCalls++
-          const inp = inputs[0]
           const out = outputs[0]
-          if (inp && inp[0] && inp[0].length > 0) this.inSeen++
+          if (!out || !out[0]) return true
+          const dst0 = out[0]
+          if (this.gain <= 0) {
+            for (let c = 0; c < out.length; c++) out[c].fill(0)
+            if (++this.statsTick >= 120) {
+              this.statsTick = 0
+              this.port.postMessage({
+                type: 'monStats',
+                procCalls: this.procCalls,
+                framesIn:  this.framesIn,
+                outWrote:  this.outWrote,
+                queueLen:  this.queueLen,
+              })
+            }
+            return true
+          }
+          const g = this.gain
+          let idx = 0
+          let wrote = false
+          while (idx < dst0.length && this.queue.length > 0) {
+            const head = this.queue[0]
+            const avail = head.length - this.readPos
+            const take  = Math.min(avail, dst0.length - idx)
+            for (let i = 0; i < take; i++) {
+              const v = head[this.readPos + i] * g
+              dst0[idx + i] = v
+              if (v !== 0) wrote = true
+            }
+            idx += take
+            this.readPos += take
+            this.queueLen -= take
+            if (this.readPos >= head.length) {
+              this.queue.shift()
+              this.readPos = 0
+            }
+          }
+          // Underrun → silence the rest of this quantum.
+          while (idx < dst0.length) { dst0[idx++] = 0 }
+          // Fan mono signal to all output channels.
+          for (let c = 1; c < out.length; c++) out[c].set(dst0)
+          if (wrote) this.outWrote++
           if (++this.statsTick >= 120) {
             this.statsTick = 0
             this.port.postMessage({
               type: 'monStats',
               procCalls: this.procCalls,
-              inSeen:    this.inSeen,
+              framesIn:  this.framesIn,
               outWrote:  this.outWrote,
-              gain:      this.gain,
+              queueLen:  this.queueLen,
             })
           }
-          if (!inp || !inp[0] || !out || !out[0]) return true
-          if (this.gain <= 0) {
-            for (let c = 0; c < out.length; c++) out[c].fill(0)
-            return true
-          }
-          const src = inp[0]
-          const g   = this.gain
-          let wrote = false
-          for (let c = 0; c < out.length; c++) {
-            const dst = out[c]
-            const n   = Math.min(dst.length, src.length)
-            for (let i = 0; i < n; i++) {
-              const v = src[i] * g
-              dst[i] = v
-              if (v !== 0) wrote = true
-            }
-          }
-          if (wrote) this.outWrote++
           return true
         }
       }
@@ -632,11 +689,16 @@ export class AudioService {
         const d = ev.data
         if (d && d.type === 'monStats') {
           this._monProcCalls = d.procCalls
-          this._monInSeen    = d.inSeen
+          this._monInSeen    = d.framesIn   // now "frames received via port"
           this._monOutWrote  = d.outWrote
         }
       }
-      this.source.connect(this.monitorWorklet)
+      // v3.4.7: NO source.connect(monitorWorklet). The capture worklet's
+      // main-thread message handler forwards every captured frame to
+      // this worklet via postMessage — see `sendCapturedFrame`. That
+      // route avoids Chrome desktop's "second mic-tap returns silence"
+      // suppression because the monitor worklet never tunes a mic
+      // track itself.
       this.monitorWorklet.connect(this.audioContext.destination)
       this.updateMonitorGain()   // posts initial gain (0)
       return true
@@ -665,12 +727,11 @@ export class AudioService {
   private updateMonitorGain(): void {
     const target = (this.peerLevels.size >= 2) ? this.monitorBaseGain : 0
     this._monitorTarget = target
-    // v3.4.5: gain lives inside the monitor worklet. The audio thread
-    // smoothing (small per-quantum glide) could be added there if a
-    // click is heard at the boundary; for now an instant gain step is
-    // sufficient since the boundary only fires on user join/leave (rare).
     if (this.monitorWorklet) {
-      this.monitorWorklet.port.postMessage({ gain: target })
+      // v3.4.7: distinguished message shape `{type:'gain', gain}` so the
+      // worklet's onmessage can disambiguate between gain commands and
+      // raw Float32Array frames coming on the same port.
+      this.monitorWorklet.port.postMessage({ type: 'gain', gain: target })
     }
   }
   private _monitorTarget = 0
@@ -1331,6 +1392,23 @@ export class AudioService {
     const rms = Math.sqrt(sum / frame.length)
     this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
     this.currentLevel = Math.min(1.0, this.smoothedLevel * 5)
+
+    // v3.4.7: forward a *copy* of the frame to the monitor worklet so it
+    // has real mic samples to play back. Must be a copy because:
+    //   (a) the original buffer is sent to the WebSocket below,
+    //   (b) we may zero it for the muted case before sending — but the
+    //       monitor still wants to play the original (or rather, also
+    //       silence when muted, which the muted-zero-fill below covers).
+    // The copy is small (~960 bytes for a 240-sample float frame) so the
+    // alloc cost is well within the 5 ms budget.
+    if (this.monitorWorklet) {
+      const monCopy = new Float32Array(frame)
+      // Honour mute by zeroing here too — without this, muting would
+      // still let the user hear themselves locally even though peers
+      // hear nothing. That'd confuse mic-check workflows.
+      if (this.muted) monCopy.fill(0)
+      this.monitorWorklet.port.postMessage(monCopy, [monCopy.buffer])
+    }
 
     if (this.audioWs?.readyState !== WebSocket.OPEN) return
     if (this.muted) {
