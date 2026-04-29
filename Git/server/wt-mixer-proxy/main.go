@@ -246,6 +246,15 @@ func main() {
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 
+	// MUST call before ListenAndServe — sets H3.EnableDatagrams and
+	// the SETTINGS_ENABLE_WEBTRANSPORT frame the client looks for in
+	// the SETTINGS exchange. Skipping this triggers client-side
+	// "server didn't enable HTTP/3 datagram support" — which is what
+	// bit us during the v4.0.0 first-fire validation. webtransport-go
+	// only auto-configures `quic.Config.EnableDatagrams` inside its
+	// own `Serve()`; the H3 layer SETTINGS still need this helper.
+	webtransport.ConfigureHTTP3Server(wtServer.H3)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(*wtPath, func(w http.ResponseWriter, r *http.Request) {
 		sess, err := wtServer.Upgrade(w, r)

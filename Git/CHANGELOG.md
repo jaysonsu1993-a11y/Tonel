@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.1] - 2026-04-30
+
+### Fixed — WT proxy missing `ConfigureHTTP3Server` call (HTTP/3 datagrams disabled)
+
+v4.0.0 shipped with the WT proxy listening on UDP 4433 but
+**rejecting every WebTransport handshake** with the client-side
+error `server didn't enable HTTP/3 datagram support`. Caught during
+post-deploy validation: once Aliyun security group opened UDP 4433
+and packets actually reached the OS (iptables ACCEPT counter went
+0 → 3), the QUIC handshake completed but the H3 layer's SETTINGS
+frame never advertised the `H3_DATAGRAM` capability that the
+WebTransport client requires.
+
+Root cause: `webtransport-go` v0.10's documented setup requires
+calling `webtransport.ConfigureHTTP3Server(s.H3)` BEFORE
+`ListenAndServe`. The library auto-configures the QUIC layer's
+`EnableDatagrams = true` inside its own `Serve()`, but the HTTP/3
+layer's SETTINGS frame needs the explicit helper to add the
+WebTransport SETTINGS keys + `H3.EnableDatagrams`. v4.0.0's main.go
+called `wtServer.ListenAndServe()` directly without this helper,
+so the QUIC handshake worked but H3 negotiation rejected datagram
+support → client always falls back to WSS.
+
+Fix: one line in `wt-mixer-proxy/main.go`, calling
+`webtransport.ConfigureHTTP3Server(wtServer.H3)` between server
+struct construction and `ListenAndServe`. Both the QUIC layer (was
+already correct) and the H3 SETTINGS frame (was the gap) now
+advertise datagram support, and a probe from the dev machine
+completes the full WT handshake.
+
+User-visible effect: any browser that visits a v4.0.0 page after
+the Aliyun security group rule was added would still see
+`transport=wss` because the server-side handshake silently failed.
+After v4.0.1, capable browsers (Chrome / Edge / Firefox desktop)
+should land on `transport=wt` automatically.
+
+No client-side change. The web bundle from v4.0.0 is unchanged in
+v4.0.1 — only the server proxy binary swaps.
+
 ## [4.0.0] - 2026-04-30
 
 ### Added — WebTransport audio path with WSS fallback (major)
