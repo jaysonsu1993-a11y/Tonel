@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.7] - 2026-04-29
+
+### Reverted — iPhone speaker-mode workaround (it was poisoning getUserMedia)
+
+User report: even on a fresh page load, iPhone Safari throws
+
+```
+InvalidStateError: AudioSession category is not compatible with audio capture.
+```
+
+at the very first `getUserMedia` call. Root cause: my v3.7.2 → v3.7.6
+speaker-mode workaround sets `navigator.audioSession.type = 'playback'`
+to override iOS' default earpiece routing. iOS Safari **persists that
+audio-session category across page reloads in the same tab session**.
+Once any speaker toggle had ever fired, every subsequent
+`getUserMedia` rejected — the user couldn't enter any room until they
+cleared site data or restarted Safari.
+
+Per user request, rolled back the entire speaker-mode feature:
+
+**`audioService.ts`**:
+- Removed `outputBus`, `mediaStreamDest`, `outputAudioEl`,
+  `speakerMode`, the `SPEAKER_KEY` localStorage helpers, and the
+  whole `setSpeakerMode()` method.
+- Restored direct `masterGain → audioContext.destination`
+  wiring (and `monitorWorklet → destination`).
+- New defensive recovery in `init()`: before `getUserMedia`,
+  attempt `navigator.audioSession.type = 'play-and-record'` (wrapped
+  in try/catch — some iOS versions throw on the assignment from a
+  poisoned state). Users whose Safari is still holding the
+  `'playback'` category from a v3.7.2-v3.7.6 page get unstuck on
+  refresh instead of having to nuke site data.
+
+**`SettingsModal.tsx`**:
+- Removed the "扬声器" toggle row + `isIOS` UA sniff + the
+  `speakerMode` state. Settings panel now matches v3.7.1 (输出
+  device dropdown + sample-rate override).
+
+**Net effect on iPhone**: peer audio + local monitor route through
+the earpiece while mic is active. This is the documented iOS
+PlayAndRecord behaviour and is not fixable without the
+audioSession.type override that we now know breaks mic acquisition.
+Future revisit must NOT touch `navigator.audioSession.type` —
+either accept earpiece-only on iPhone with mic, or use a
+`RTCPeerConnection` audio-output bridge (that takes a different
+session category) which is a much bigger refactor.
+
+The v3.7.6 mic-init simplification (single getUserMedia, no
+30 s timeout race, no channelCount constraint, inline channel-0
+wiring) is preserved — those changes were correct and unrelated
+to the speaker-mode regression.
+
 ## [3.7.6] - 2026-04-29
 
 ### Fixed — mobile mic permission was completely broken (regression hunt)

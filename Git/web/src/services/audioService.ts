@@ -233,35 +233,18 @@ export class AudioService {
   // Playback (shares audioContext with capture to avoid autoplay policy issues)
   private masterGain:       GainNode | null = null
 
-  // ── Output routing (speaker vs earpiece on iOS) ─────────────────────────
-  //
-  // iOS Safari sets the audio session category to PlayAndRecord
-  // whenever a getUserMedia mic is active. Default route for that
-  // category is the earpiece — so by default the user hears peers
-  // through the small phone speaker held to their ear, even when
-  // they want loudspeaker.
-  //
-  // The Web Audio API doesn't expose an "override output port" knob.
-  // Workaround: route the audible bus through a `MediaStreamDestination`
-  // and play that stream in an `<audio>` element. Audio elements use
-  // the "media playback" session category, which routes to the
-  // loudspeaker even when mic is active. This is the standard iOS
-  // workaround documented across Safari 14+.
-  //
-  // `outputBus` is the master audible bus (everything that should be
-  // heard converges here). Default: outputBus → audioContext.destination.
-  // Speaker mode: outputBus → mediaStreamDest → outputAudioEl.
-  private outputBus:           GainNode | null = null
-  private mediaStreamDest:     MediaStreamAudioDestinationNode | null = null
-  private outputAudioEl:       HTMLAudioElement | null = null
-  private speakerMode:         boolean = false   // last-applied state
-  private static readonly SPEAKER_KEY = 'tonel.speakerMode'
-  static readSpeakerMode(): boolean {
-    try { return localStorage.getItem(AudioService.SPEAKER_KEY) === '1' } catch { return false }
-  }
-  static writeSpeakerMode(on: boolean): void {
-    try { localStorage.setItem(AudioService.SPEAKER_KEY, on ? '1' : '0') } catch {}
-  }
+  // v3.7.7: speaker-mode (v3.7.2 → v3.7.6) reverted. The iOS
+  // workaround (set `navigator.audioSession.type = 'playback'` then
+  // route through MediaStreamDestination → <audio>) ended up
+  // poisoning the audio session: once 'playback' was set, the next
+  // getUserMedia threw `InvalidStateError: AudioSession category is
+  // not compatible with audio capture`, and the only reliable
+  // recovery was clearing site data + restarting Safari. The
+  // category persists across page reloads in some iOS versions, so
+  // a single failed toggle bricks mic acquisition for the user.
+  // Rolled back per user request; the iPhone will go through the
+  // earpiece when mic is active. Future revisit should NOT touch
+  // navigator.audioSession.type.
 
   // Local monitor — `source → monitorGain → destination`. Lets the user
   // hear their own mic with ~0 ms latency (one audio quantum) instead of
@@ -507,19 +490,10 @@ export class AudioService {
 
     this.masterGain = this.audioContext.createGain()
     this.masterGain.gain.value = 1.0
-    // v3.7.2: route audible nodes through outputBus instead of straight
-    // to destination. Lets setSpeakerMode swap the egress between
-    // audioContext.destination (default) and a MediaStreamDestination
-    // → <audio> element (iOS speaker workaround) without re-wiring
-    // every upstream node.
-    this.outputBus = this.audioContext.createGain()
-    this.outputBus.gain.value = 1.0
-    this.masterGain.connect(this.outputBus)
-    this.outputBus.connect(this.audioContext.destination)
+    // v3.7.7: direct to destination — speaker-mode swap is gone.
+    this.masterGain.connect(this.audioContext.destination)
 
     void this.ensureMonitorWorklet()
-    // v3.7.6: don't auto-apply speakerMode here either. User retoggles
-    // after sample-rate change.
 
     await this.initPlaybackWorklet()
 
@@ -574,7 +548,6 @@ export class AudioService {
     this.inputChannels = []
     this.nextChannelId = 0
     if (this.inputSumGain) { try { this.inputSumGain.disconnect() } catch {} this.inputSumGain = null }
-    if (this.outputBus) { try { this.outputBus.disconnect() } catch {} this.outputBus = null }
     if (this.source) { try { this.source.disconnect() } catch (_) {} this.source = null }
     if (this.playbackWorklet) { try { this.playbackWorklet.disconnect() } catch (_) {} this.playbackWorklet = null }
     if (this.masterGain) { try { this.masterGain.disconnect() } catch (_) {} this.masterGain = null }
@@ -586,6 +559,23 @@ export class AudioService {
     this.txCount = 0; this.rxCount = 0; this.playCount = 0
 
     try {
+      // v3.7.7: defensive recovery. iOS Safari preserves
+      // navigator.audioSession.type across page reloads in the same
+      // tab session. If a previous v3.7.2 → v3.7.6 page set it to
+      // 'playback' for speaker mode, the next getUserMedia rejects
+      // with InvalidStateError. Force it back to 'play-and-record'
+      // here so the iPhone's recovery path is "just refresh" rather
+      // than "clear site data and restart Safari." Wrapped in
+      // try/catch because some iOS versions throw when setting type
+      // while in an incompatible state — we don't want one failed
+      // assignment to prevent the rest of init from running.
+      try {
+        const ns = navigator as { audioSession?: { type?: string } }
+        if (ns.audioSession) ns.audioSession.type = 'play-and-record'
+      } catch (err) {
+        console.warn('[Audio] audioSession.type reset failed (ignoring):', err)
+      }
+
       const userRate = AudioService.readUserRate()
       const requestedRate = userRate ?? SAMPLE_RATE
 
@@ -678,12 +668,8 @@ export class AudioService {
     if (!this.audioContext) return
     this.masterGain = this.audioContext.createGain()
     this.masterGain.gain.value = 1.0
-    // v3.7.2: outputBus is the swappable egress (destination vs
-    // MediaStreamDest for iOS speaker mode) — see field comment.
-    this.outputBus = this.audioContext.createGain()
-    this.outputBus.gain.value = 1.0
-    this.masterGain.connect(this.outputBus)
-    this.outputBus.connect(this.audioContext.destination)
+    // v3.7.7: direct to destination — speaker-mode swap is gone.
+    this.masterGain.connect(this.audioContext.destination)
     void this.ensureMonitorWorklet()
     await this.initPlaybackWorklet()
     // v3.7.6: speaker-mode is user-driven only. Auto-applying from
@@ -1059,12 +1045,8 @@ export class AudioService {
       // route avoids Chrome desktop's "second mic-tap returns silence"
       // suppression because the monitor worklet never tunes a mic
       // track itself.
-      // v3.7.2: route through outputBus (not destination) so iOS
-      // speaker-mode toggle reroutes monitor too — without this, the
-      // user's own voice would still come out the earpiece while
-      // peer audio came out the speaker.
-      if (this.outputBus) this.monitorWorklet.connect(this.outputBus)
-      else this.monitorWorklet.connect(this.audioContext.destination)
+      // v3.7.7: back to direct destination (speaker-mode is gone).
+      this.monitorWorklet.connect(this.audioContext.destination)
       this.updateMonitorGain()   // posts initial gain (0)
       return true
     } catch (err) {
@@ -1140,90 +1122,11 @@ export class AudioService {
     this.updateMonitorGain()
   }
 
-  /**
-   * Speaker-mode toggle (iOS workaround for default-earpiece routing).
-   *
-   * `true`  → outputBus → MediaStreamDestination → <audio> element.
-   *           iOS treats this as media playback → speaker.
-   * `false` → outputBus → audioContext.destination (default).
-   *           iOS routes via the active session category; with mic
-   *           live that's PlayAndRecord → earpiece.
-   *
-   * Persists in localStorage. Idempotent — safe to call repeatedly
-   * with the same value (e.g. on every changeSampleRate).
-   */
-  async setSpeakerMode(on: boolean): Promise<void> {
-    AudioService.writeSpeakerMode(on)
-    // v3.7.3: ignore on non-iOS. See comment on the field.
-    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
-    const isIOS = /iPad|iPhone|iPod/.test(ua) ||
-      (typeof navigator !== 'undefined' &&
-       (navigator as { platform?: string }).platform === 'MacIntel' &&
-       (navigator as { maxTouchPoints?: number }).maxTouchPoints! > 1)
-    if (!isIOS) on = false
-    this.speakerMode = on
-    if (!this.audioContext || !this.outputBus) return
-
-    // v3.7.5: REUSE the MediaStreamDestination + <audio> element across
-    // toggles. Pre-v3.7.5 we tore them down on OFF and re-created on ON,
-    // but that broke iPhone after one earpiece→speaker→earpiece cycle:
-    // iOS audio session doesn't like a fresh MediaStreamDestination
-    // appearing while a mic is still active, and `audio.play()` on the
-    // new element silently routed back to earpiece.
-    //
-    // New strategy: build the MSD + <audio> element ONCE on first
-    // speaker-on, leave them in place forever, and just rewire
-    // outputBus's downstream between destination (OFF) and MSD (ON).
-    // The <audio> element keeps playing — it just receives silence
-    // when outputBus isn't feeding the MSD. iOS's audio session
-    // category therefore stays steady.
-    if (on && (!this.mediaStreamDest || !this.outputAudioEl)) {
-      this.mediaStreamDest = this.audioContext.createMediaStreamDestination()
-      const el = new Audio()
-      el.srcObject = this.mediaStreamDest.stream
-      el.setAttribute('playsinline', 'true')
-      el.setAttribute('webkit-playsinline', 'true')
-      el.autoplay = true
-      el.muted    = false
-      el.controls = false
-      el.style.display = 'none'
-      try { document.body.appendChild(el) } catch {}
-      try {
-        const elAny = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
-        if (typeof elAny.setSinkId === 'function') {
-          await elAny.setSinkId('default')
-        }
-      } catch {}
-      this.outputAudioEl = el
-    }
-
-    // Rewire outputBus only. disconnect() clears all outgoing edges.
-    try { this.outputBus.disconnect() } catch {}
-    if (on && this.mediaStreamDest) {
-      this.outputBus.connect(this.mediaStreamDest)
-      // Keep the audio element actively playing — calling play() inside
-      // the gesture context the toggle button gave us.
-      try {
-        const ns = navigator as { audioSession?: { type?: string } }
-        if (ns.audioSession) ns.audioSession.type = 'playback'
-      } catch {}
-      if (this.outputAudioEl) {
-        try { await this.outputAudioEl.play() } catch (err) {
-          console.warn('[Audio] setSpeakerMode: audio.play() rejected:', err)
-        }
-      }
-    } else {
-      this.outputBus.connect(this.audioContext.destination)
-      // NOTE: deliberately NOT resetting navigator.audioSession.type back
-      // to 'play-and-record' here. iOS sometimes gets confused if we
-      // ping-pong PlayAndRecord ↔ Playback while a mic is active; once
-      // the user has taken us to speaker, leaving the session type as
-      // 'playback' is harmless (the destination route is what matters).
-      // The audio element keeps existing too — just with no input from
-      // outputBus, so it plays silence.
-    }
-  }
-  get speakerModeValue(): boolean { return this.speakerMode }
+  // (v3.7.2 setSpeakerMode + speakerModeValue removed in v3.7.7. The
+  // iOS audioSession.type='playback' override poisoned subsequent
+  // getUserMedia calls — InvalidStateError on init. Until a workaround
+  // exists that doesn't mutate audioSession state, iOS users hear
+  // peer audio through the earpiece while mic is active.)
   /** Toggle the local monitor on/off independent of the population-based
    *  engagement. Wired to the MIXER section's self-strip mute button. */
   setMonitorMuted(muted: boolean): void {
