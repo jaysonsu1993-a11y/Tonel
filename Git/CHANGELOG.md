@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.3] - 2026-04-29
+
+### Copy + UX cleanup
+
+1. Hero subtitle (desktop + mobile) updated:
+   `忘掉视频会议的延迟。Tonel 用专为音频写的网络协议，把每个乐手
+    的声音运回同一个房间——不是比喻，是物理意义上的同一拍。`
+2. `<title>` changed from `乐队排练平台 S1` to `Tonel ｜ 音乐本该同步`.
+3. Speaker-mode toggle is now iOS-only.
+
+   v3.7.2 added the toggle as a generic SettingsModal control, but
+   user feedback was that surfacing it on desktop muddied the UX —
+   desktop's output device is already controlled cleanly by the
+   `setSinkId` dropdown above it, and a redundant "speaker" knob
+   read like the desktop UI was inheriting mobile semantics.
+
+   `SettingsModal.tsx` now hides the toggle on non-iOS via UA sniff
+   (covers iPhone, iPad, and iPadOS-13+ which reports as MacIntel
+   with `maxTouchPoints > 1`).
+
+   `audioService.setSpeakerMode` also gates the actual routing
+   change behind the same iOS check — defends against a stale
+   `tonel.speakerMode=1` in localStorage (e.g. inherited from prior
+   iOS testing on the same browser profile) accidentally rerouting
+   desktop output through the `<audio>` bridge and breaking the
+   `setSinkId` path.
+
 ## [3.7.2] - 2026-04-29
 
 ### Added — speaker / earpiece toggle for iPhone Safari

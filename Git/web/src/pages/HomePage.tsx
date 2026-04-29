@@ -171,7 +171,7 @@ export function HomePage({
               <span className="accent">不再有距离。</span>
             </h1>
             <p className="v1-sub">
-              Tonel 是一个为乐手而生的实时排练平台。低于人耳可感知的音频延迟，让远在千里的两位演奏者，听起来像同处一间排练房。
+              忘掉视频会议的延迟。Tonel 用专为音频写的网络协议，把每个乐手的声音运回同一个房间——不是比喻，是物理意义上的同一拍。
             </p>
             <div className="v1-actions">
               <button className="v1-cta" onClick={handleCreateClick} disabled={isCreating}>
@@ -272,7 +272,7 @@ export function HomePage({
             <br /><span className="accent">不再有距离。</span>
           </h1>
           <p className="v1m-sub">
-            为乐手而生的实时排练平台。低于人耳可感知的延迟，让千里之外的两位演奏者，像同处一间排练房。
+            忘掉视频会议的延迟。Tonel 用专为音频写的网络协议，把每个乐手的声音运回同一个房间——不是比喻，是物理意义上的同一拍。
           </p>
         </div>
 

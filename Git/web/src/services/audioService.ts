@@ -1099,6 +1099,19 @@ export class AudioService {
    */
   async setSpeakerMode(on: boolean): Promise<void> {
     AudioService.writeSpeakerMode(on)
+    // v3.7.3: ignore on non-iOS. Desktop's output device is controlled
+    // by the SettingsModal output dropdown via setSinkId on
+    // AudioContext.destination — re-routing through an <audio>
+    // element bypasses that path and breaks the dropdown. We hide
+    // the toggle from non-iOS UIs, but a stale `tonel.speakerMode=1`
+    // in localStorage (e.g. inherited from prior iOS testing on the
+    // same browser profile) would otherwise still apply on init.
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
+    const isIOS = /iPad|iPhone|iPod/.test(ua) ||
+      (typeof navigator !== 'undefined' &&
+       (navigator as { platform?: string }).platform === 'MacIntel' &&
+       (navigator as { maxTouchPoints?: number }).maxTouchPoints! > 1)
+    if (!isIOS) on = false
     this.speakerMode = on
     if (!this.audioContext || !this.outputBus) return
 
