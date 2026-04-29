@@ -225,11 +225,45 @@ function chunkWindow(since, until, maxHours = 24) {
     return out;
 }
 
+// Cloudflare's GraphQL endpoint returns transient 5xx / rate-limit errors
+// when many requests fire in parallel (cold dashboard load = ~7 endpoints
+// × ~7 chunks = ~49 concurrent calls). Cap concurrency and retry transient
+// failures with backoff so the dashboard loads cleanly.
+async function withRetry(fn, retries = 2) {
+    let lastErr;
+    for (let i = 0; i <= retries; i++) {
+        try { return await fn(); }
+        catch (e) {
+            lastErr = e;
+            const msg = String(e.message || '');
+            const transient = /HTTP 5\d\d|HTTP 429|fetch failed|ECONNRESET|timeout/i.test(msg);
+            if (!transient || i === retries) throw e;
+            await new Promise(r => setTimeout(r, 200 * (i + 1) + Math.random() * 100));
+        }
+    }
+    throw lastErr;
+}
+
+async function mapWithConcurrency(items, limit, fn) {
+    const out = new Array(items.length);
+    let next = 0;
+    async function worker() {
+        while (true) {
+            const i = next++;
+            if (i >= items.length) return;
+            out[i] = await fn(items[i], i);
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+    return out;
+}
+
 async function cfAdaptive(since, until, dims, opts = {}) {
     const chunks = chunkWindow(since, until, 24);
     if (chunks.length === 1) return cfAdaptiveOne(since, until, dims, opts);
 
-    const all = await Promise.all(chunks.map(([s, u]) => cfAdaptiveOne(s, u, dims, opts)));
+    const all = await mapWithConcurrency(chunks, 3,
+        ([s, u]) => withRetry(() => cfAdaptiveOne(s, u, dims, opts)));
 
     // Merge by dimensions identity. Time-bucket dims (datetimeHour/Minute/date)
     // never collide across chunks, so this just concatenates them; non-time
@@ -301,7 +335,7 @@ app.get('/api/dashboard/summary', async (req, res) => {
         const uniques = Math.round(visits / 4);
 
         res.json({ visits, uniques, countries, visits_24h });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/dashboard/trend', async (req, res) => {
@@ -327,7 +361,7 @@ app.get('/api/dashboard/trend', async (req, res) => {
             }));
 
         res.json({ bucket_seconds: isHour ? 3600 : 86400, points });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/dashboard/countries', async (req, res) => {
@@ -351,7 +385,7 @@ app.get('/api/dashboard/countries', async (req, res) => {
             .sort((a, b) => b.visits - a.visits);
 
         res.json({ countries });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 // City breakdown isn't in the GraphQL schema — try ASN/network as a
@@ -401,7 +435,7 @@ app.get('/api/dashboard/cities', async (req, res) => {
                 ? 'CF API exposes ASN, not city — shown in city column'
                 : 'Free plan: ASN dim unavailable — showing country only',
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 // World map points — one dot per country at its centroid, sized by visits.
@@ -432,7 +466,7 @@ app.get('/api/dashboard/geo', async (req, res) => {
             .filter(Boolean);
 
         res.json({ points });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/dashboard/devices', async (req, res) => {
@@ -467,7 +501,7 @@ app.get('/api/dashboard/devices', async (req, res) => {
             .slice(0, 10);
 
         res.json({ devices, browsers: top(browsersMap), os: top(osMap) });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/dashboard/paths', async (req, res) => {
@@ -486,13 +520,13 @@ app.get('/api/dashboard/paths', async (req, res) => {
             .slice(0, 20);
 
         res.json({ paths });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 // "Recent" — Cloudflare doesn't store individual request rows, so we
 // approximate with per-minute aggregates over the last hour, broken
 // down by country + path + device. Each row is activity in a 1-min window.
-app.get('/api/dashboard/recent', async (_req, res) => {
+app.get('/api/dashboard/recent', async (req, res) => {
     try {
         const until = new Date();
         const since = new Date(until.getTime() - 60 * 60 * 1000);
@@ -514,7 +548,7 @@ app.get('/api/dashboard/recent', async (_req, res) => {
         }));
 
         res.json({ recent });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ─── Static admin page ──────────────────────────────────────────────────────

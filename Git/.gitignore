@@ -8,6 +8,10 @@ cmake-build-*/
 _build/
 **/_build/
 
+# clangd LSP local index (machine-specific, gets rebuilt on demand)
+.cache/
+**/.cache/
+
 # Binaries
 bin/
 server/bin/

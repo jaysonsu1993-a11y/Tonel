@@ -1608,26 +1608,62 @@ export class AudioService {
             this.count -= (newIdx - idx)
             this.readPos = newReadPos % ${RING_SIZE}
             if (this.count < this.primeMin) {
-              // Mid-callback underrun. Apply a raised-cosine fade to the
-              // samples already written before silencing the rest. Cosine
-              // taper is smoother than linear at both ends — no bend in
-              // the envelope's first or last derivative — so the residual
-              // artifact is below the ear's click-detection threshold
-              // even at quiet listening levels.
+              // Mid-callback underrun. Phase B v4.2.1 — extend PLC to
+              // this path (was top-of-callback only in v4.2.0).
               //
-              // The 240-sample fade-len cap is historical (was 5 ms @
-              // 48 kHz); with Web Audio's 128-sample output quantum the
-              // cap never engages — fadeLen always = i+1 ≤ 128. Kept
-              // for safety in case the quantum size changes upstream.
+              // With v4.2.0's small primeTarget (144 samp = 3 ms), the
+              // ring drains fast enough that most underruns happen
+              // partway through a quantum, not at the start. The old
+              // cosine-fade-then-zero path was bypassing PLC entirely,
+              // producing a reprime cascade (2020+ in a 5-min session)
+              // with plc=0. This branch now produces a continuous
+              // PLC-style output: keep the samples we already wrote
+              // (ramped down briefly to mask the splice), then fill
+              // the remainder of the quantum from lastBlock with the
+              // same decay schedule as the start-of-callback PLC.
+              //
+              // Note we don't reset primed. The next quantum will
+              // either continue PLC (if ring still empty) or resume
+              // normal output with the existing wasConcealing ramp-in.
+              const decay = this.concealDecay[this.concealQuanta] ?? 0
+              if (decay > 0) {
+                // Crossfade region: hold the last real sample (out0[i],
+                // already valid) decaying linearly to 0, while ramping
+                // in the PLC tail from lastBlock. Sum is a smooth bridge
+                // — no sample-step at the splice point.
+                const lastReal = out0[i]
+                const xfLen = Math.min(16, out0.length - i - 1)
+                for (let j = 1; j <= xfLen; j++) {
+                  const t = j / xfLen   // 0 → 1
+                  const plcVal = this.lastBlock[(i + j) % 128] * decay
+                  out0[i + j] = lastReal * (1 - t) + plcVal * t
+                }
+                // Fill remaining with pure PLC content (decay applied).
+                for (let j = i + 1 + xfLen; j < out0.length; j++) {
+                  out0[j] = this.lastBlock[j % 128] * decay
+                }
+                this.concealQuanta++
+                if (this.concealQuanta === 1) {
+                  this.concealCount++
+                  this.port.postMessage({ type: 'plc', count: this.concealCount })
+                }
+                // Don't reset primed — next quantum either continues
+                // PLC or resumes normal output. The post-render
+                // lastBlock save below will capture this filled quantum
+                // for the next PLC iteration if needed.
+                break
+              }
+              // PLC budget exhausted (concealDecay[concealQuanta] = 0
+              // because index ≥ length): fall back to original cosine
+              // fade + zero + reprime.
               const fadeLen = i + 1 < 240 ? i + 1 : 240
               for (let f = 0; f < fadeLen; f++) {
-                // Half-cosine from 1 (at start of fade) to 0 (at end of fade).
-                // f/fadeLen ∈ [0,1); cos transitions 1 → 0 over 0 → π/2.
                 const w = 0.5 * (1 + Math.cos(Math.PI * (1 - f / fadeLen)))
                 out0[i - f] *= w
               }
               for (let j = i + 1; j < out0.length; j++) out0[j] = 0
               this.primed = false
+              this.concealQuanta = 0     // reset for next episode
               this.reprimeCount++
               this.port.postMessage({ type: 'reprime', count: this.reprimeCount })
               break

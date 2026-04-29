@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.1] - 2026-04-30
+
+### Fixed — v4.2.0 PLC only covered top-of-callback; mid-callback bypassed it
+
+User reported v4.2.0 was producing `reprime=2020` and `plc=0` in
+a 5-min session — i.e. PLC never fired despite ~2k underrun
+events. Root cause: B.2's PLC was added to the **start-of-callback**
+underrun path (`if (!this.primed || this.count < this.primeMin)`
+at the top of `process()`), but the **mid-callback** underrun path
+(detected during the per-sample render loop) was untouched and
+still went straight to cosine fade-out + reprime.
+
+This was invisible in v4.1.x because the old `primeTarget=1440`
+(30 ms) made mid-callback underruns rare — the ring almost always
+drained between quanta, so top-of-callback was the dominant path.
+v4.2.0's `primeTarget=144` (3 ms) flipped this: the ring drains
+within a single output quantum (128 samples = 2.7 ms), so
+mid-callback underruns now dominate. They went straight to reprime,
+defeating the entire B.2 PLC win.
+
+**Fix**: extend the PLC algorithm to the mid-callback branch.
+Same `concealDecay = [1.0, 0.7, 0.4, 0.15]` envelope. New behaviour
+on mid-callback underrun:
+
+1. Hold the last real sample (`out0[i]`) and crossfade over 16
+   samples into the lastBlock-derived PLC content.
+2. Fill the remainder of the quantum from lastBlock × decay.
+3. Don't reset `primed` — next quantum either continues PLC or
+   resumes normal output (with the existing wasConcealing ramp-in).
+4. Increment `concealCount` (stat: `playPlcCount`); only fall
+   through to the original cosine + reprime path if the PLC
+   budget is exhausted (4 quanta × ~2.67 ms ≈ 10 ms).
+
+Expected delta vs v4.2.0 in real session: `reprime` count drops
+sharply (only sustained drops escalate now), `plc` count rises
+proportionally. Net audio quality should be markedly smoother.
+
+### Fixed — debug panel jitter labels stuck on 5 ms (was 2.5 ms after v4.2.0)
+
+`AudioDebugPanel.tsx` had `jitterTargetMs = s.jitterTarget * 5`
+hardcoded — same display-vs-runtime drift class as v4.1.2's
+DEFAULT_PB bug, just smaller blast radius (cosmetic only).
+Server tick is 2.5 ms post-v4.2.0, so jitterTarget=1 frame =
+2.5 ms not 5 ms. New `FRAME_MS = 2.5` constant used in the
+calc; `totalAddedMs` (the headline "added latency budget"
+display) also fixed.
+
+### Validation done
+
+- typecheck — clean (caught two backtick-in-comment bugs inside
+  the worklet template literal that would have blown up
+  `addModule()`; fixed by stripping backticks)
+- Preview MCP — loaded the modified worklet via dynamic import +
+  `audioContext.audioWorklet.addModule()` against a real Chromium
+  context. PASS — worklet code parses cleanly.
+- pretest 6/6 PASS (Layer 2 needed one auto-retry on 44.1k
+  playback test, second pass clean — known flake)
+- Layer 6 state migration: 4/4 PASS
+
 ## [4.2.0] - 2026-04-30
 
 ### Phase B — 压管线缓冲（PCM PLC + primeTarget 30→3 ms + frame 5→2.5 ms）

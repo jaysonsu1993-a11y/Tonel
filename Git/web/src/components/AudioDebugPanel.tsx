@@ -143,12 +143,16 @@ export function AudioDebugPanel() {
   const ratePpm       = ((stats.rateScale - 1) * 1e6) | 0
   const maxPpm        = ((t.maxScale  - 1) * 1e6) | 0
   const minPpm        = ((t.minScale  - 1) * 1e6) | 0
-  const jitterTargetMs = s.jitterTarget * 5
-  const jitterCapMs    = s.jitterMaxDepth * 5
+  // Phase B v4.2.0 halved the server mix tick from 5 ms to 2.5 ms, so
+  // each jitter-buffer "frame" now represents 2.5 ms of audio (was
+  // 5 ms). These display calcs were stuck on the old multiplier.
+  const FRAME_MS = 2.5
+  const jitterTargetMs = s.jitterTarget * FRAME_MS
+  const jitterCapMs    = s.jitterMaxDepth * FRAME_MS
 
   // Latency budget surfaces the sum of the user-facing knobs. This is the
   // primary thing the engineer is here to minimise — show it large.
-  const totalAddedMs = Number(primeTargetMs) + (s.jitterTarget - 0.5) * 5
+  const totalAddedMs = Number(primeTargetMs) + (s.jitterTarget - 0.5) * FRAME_MS
 
   return (
     <div style={{
