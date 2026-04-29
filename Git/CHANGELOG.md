@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.9] - 2026-04-30
+
+### Changed — AudioContext `latencyHint: 0` for minimum output buffer
+
+`new AudioContext()` was being constructed with only `{ sampleRate }`,
+no `latencyHint`. Default behaviour is `'interactive'`, which is fine
+but conservative — Chrome/Firefox honour the **numeric** form by
+asking the OS audio stack for the smallest buffer it will give.
+
+Both AudioContext call sites in `audioService.ts` (in-place
+sample-rate rebuild and the constrained/unconstrained init pair) now
+pass `latencyHint: 0`. On macOS CoreAudio in Chrome this typically
+drops `baseLatency` from ~25 ms to ~5 ms — a free ~20 ms off the
+end-to-end estimate for users on capable hardware. Safari tends to
+ignore the numeric form and use its default; the call is a no-op
+there, no regression.
+
+Trade-off: smaller output buffer = less CPU headroom for the
+playback worklet under load. Tonel's worklet is light (PCM ring +
+linear interp + adaptive rate), so the risk of new underruns is
+small relative to the latency win. The existing reprime / underrun
+counters in the debug panel will surface a regression immediately.
+
+This is the lowest-effort step from the latency-reduction roadmap
+discussed with the user — one constructor parameter, no behavioural
+risk. The next steps in that roadmap (TCP_NODELAY audit, client-side
+PLC, eventual WebTransport / WebRTC DataChannel transport swap) are
+larger and tracked separately.
+
 ## [3.7.8] - 2026-04-30
 
 ### Added — split end-to-end vs RTT in the room latency display

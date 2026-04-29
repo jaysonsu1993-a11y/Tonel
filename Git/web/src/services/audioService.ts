@@ -466,7 +466,14 @@ export class AudioService {
     this.audioContext = null
 
     const requestedRate = (AudioService.readUserRate() ?? SAMPLE_RATE)
-    this.audioContext = new AudioContext({ sampleRate: requestedRate })
+    // latencyHint: 0 asks the browser for the smallest output buffer it can
+    // give. Chrome/Firefox honour the numeric form by reducing baseLatency
+    // (typically ~25 ms → ~5 ms on macOS CoreAudio). Safari tends to ignore
+    // it and use its default, so the call is safe everywhere. Trade-off:
+    // smaller buffer → less CPU headroom for the playback worklet. Tonel's
+    // worklet is light (PCM ring + linear interp), so the risk of new
+    // underruns is small relative to the latency win.
+    this.audioContext = new AudioContext({ sampleRate: requestedRate, latencyHint: 0 })
     await this.audioContext.resume()
 
     if (this.audioContext.sampleRate !== requestedRate) {
@@ -593,9 +600,10 @@ export class AudioService {
         return navigator.mediaDevices.getUserMedia({ audio, video: false })
       }
       const tryAudioContext = (constrained: boolean): AudioContext => {
+        // latencyHint: 0 — see in-place rebuild path above for rationale.
         return constrained
-          ? new AudioContext({ sampleRate: requestedRate })
-          : new AudioContext()
+          ? new AudioContext({ sampleRate: requestedRate, latencyHint: 0 })
+          : new AudioContext({ latencyHint: 0 })
       }
 
       // Try with sampleRate hint first; fall back to "let the browser
