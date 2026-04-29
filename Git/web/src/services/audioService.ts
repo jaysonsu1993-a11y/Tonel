@@ -353,9 +353,21 @@ export class AudioService {
   public tuning = {
     primeTarget: 1440,    // 30 ms @ 48 kHz; latency cost = ring depth
     primeMin:    128,     // re-prime floor; below = audible reprime click
-    maxScale:    1.012,
-    minScale:    0.988,
-    rateStep:    0.00002, // integrator step per quantum (rate-loop convergence)
+    // ±2.5% rate range (Phase A v4.1: widened from ±1.2% in v4.0.1).
+    // Real-world consumer crystal drift is normally < 500 ppm, but we
+    // saw rateScale stick at +12000 ppm rail post-WT — diagnosed as
+    // server mix-tick scheduling jitter creating recurring small
+    // bursts that the controller's fixed-step integrator can't drain
+    // before the next burst. 2.5% gives the proportional fast-adjust
+    // (in playback worklet) enough headroom to absorb 5-frame bursts
+    // in < 1 second instead of staying railed for the whole session.
+    // 2.5% is ~43 cents pitch shift — audible on critical music
+    // listening but well within speech tolerance, and only on the
+    // tail of a burst-recovery transient (steady state stays at the
+    // tiny scale needed for actual clock drift).
+    maxScale:    1.025,
+    minScale:    0.975,
+    rateStep:    0.00002, // integrator step per quantum (base; multiplied by 4x/8x when far from target)
   }
   // Server-side per-user jitter buffer. Defaults overwritten by MIXER_JOIN_ACK.
   public serverTuning = {
@@ -415,6 +427,21 @@ export class AudioService {
   /** Actual AudioContext sample rate (after browser negotiation). */
   get actualSampleRate(): number {
     return this.audioContext?.sampleRate ?? 0
+  }
+
+  /**
+   * Browser-reported output device latency in ms (Chrome / Firefox).
+   * Returns 0 when unsupported (Safari) or when the AudioContext
+   * isn't yet built. Used by RoomPage to warn users on high-latency
+   * output devices (Bluetooth headphones routinely add 100-200 ms).
+   *
+   * `outputLatency` settles after the first audio quantum has played,
+   * so callers should poll over the first 1-2 seconds of a session
+   * rather than reading once at init time.
+   */
+  get outputLatencyMs(): number {
+    const ol = (this.audioContext as any)?.outputLatency
+    return typeof ol === 'number' ? ol * 1000 : 0
   }
 
   /**
@@ -596,47 +623,85 @@ export class AudioService {
       }
 
       const userRate = AudioService.readUserRate()
-      const requestedRate = userRate ?? SAMPLE_RATE
 
       // Plain getUserMedia — no Promise.race wrapper. Mobile devices
       // sometimes reject `channelCount: 1`, so we omit it; the wire
       // protocol is mono-PCM and the worklets handle whatever the
       // device gives us.
-      const tryGetUserMedia = (constrained: boolean): Promise<MediaStream> => {
+      const tryGetUserMedia = (rateHint: number | null): Promise<MediaStream> => {
         const audio: MediaTrackConstraints = {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl:  false,
         }
-        if (constrained) audio.sampleRate = requestedRate
+        if (rateHint !== null) audio.sampleRate = rateHint
         return navigator.mediaDevices.getUserMedia({ audio, video: false })
       }
-      const tryAudioContext = (constrained: boolean): AudioContext => {
+      const tryAudioContext = (rateHint: number | null): AudioContext => {
         // latencyHint: 0 — see in-place rebuild path above for rationale.
-        return constrained
-          ? new AudioContext({ sampleRate: requestedRate, latencyHint: 0 })
+        return rateHint !== null
+          ? new AudioContext({ sampleRate: rateHint, latencyHint: 0 })
           : new AudioContext({ latencyHint: 0 })
       }
 
-      // Try with sampleRate hint first; fall back to "let the browser
-      // decide" if mobile rejects it (OverconstrainedError).
-      try {
-        this.mediaStream  = await tryGetUserMedia(true)
-        this.audioContext = tryAudioContext(true)
-      } catch (constrainedErr) {
-        console.warn('[Audio] Constrained init failed, retrying without sampleRate hint:', constrainedErr)
-        if (this.mediaStream) {
-          try { this.mediaStream.getAudioTracks().forEach(t => t.stop()) } catch {}
-          this.mediaStream = null
+      // Phase A.3 — sample rate auto-alignment.
+      //
+      // If the user has explicitly set a rate (Settings → 采样率), honour
+      // it. Otherwise:
+      //   1. Acquire the mic with NO rate constraint → browser picks the
+      //      mic's native rate (typical: 48000 on most external mics,
+      //      44100 on built-in laptop mics, sometimes 16000 on Bluetooth
+      //      headsets).
+      //   2. Read that native rate from `track.getSettings().sampleRate`.
+      //   3. Build the AudioContext at that exact rate.
+      //
+      // This skips Chrome's internal mic→ctx resampler when they
+      // mismatch. Resampling adds ~5-10 ms of latency on the capture
+      // side (one extra buffer for the polyphase filter). Pre-Phase-A
+      // we always asked for 48 kHz, which forced resampling on any
+      // 44.1 kHz built-in mic.
+      let requestedMicRate: number | null = userRate
+      let actualMicRate = 0
+
+      if (userRate !== null) {
+        // Explicit user choice — try it, fall back to browser default
+        // if rejected (OverconstrainedError on mobile).
+        try {
+          this.mediaStream = await tryGetUserMedia(userRate)
+        } catch (err) {
+          console.warn('[Audio] Constrained getUserMedia (user rate) failed, retrying unconstrained:', err)
+          this.mediaStream = await tryGetUserMedia(null)
         }
-        this.mediaStream  = await tryGetUserMedia(false)
-        this.audioContext = tryAudioContext(false)
+      } else {
+        // Auto: no rate constraint. Browser picks mic native.
+        this.mediaStream = await tryGetUserMedia(null)
+      }
+
+      // Inspect what the mic actually gave us.
+      try {
+        const settings = this.mediaStream.getAudioTracks()[0]?.getSettings()
+        if (settings?.sampleRate) actualMicRate = settings.sampleRate
+      } catch (_) { /* getSettings unsupported on some old Safari */ }
+
+      // Pick the AudioContext rate. If we know the mic native rate AND
+      // the user didn't pin a specific rate, follow the mic. Otherwise
+      // fall back to the user's choice or 48 kHz default.
+      const ctxRate = (userRate === null && actualMicRate > 0) ? actualMicRate
+                    : (userRate ?? SAMPLE_RATE)
+      requestedMicRate = ctxRate
+
+      try {
+        this.audioContext = tryAudioContext(ctxRate)
+      } catch (ctxErr) {
+        console.warn('[Audio] Constrained AudioContext failed, retrying unconstrained:', ctxErr)
+        this.audioContext = tryAudioContext(null)
       }
       await this.audioContext.resume()
-      if (this.audioContext.sampleRate !== requestedRate) {
-        console.warn(`[Audio] AudioContext rate is ${this.audioContext.sampleRate} Hz, requested ${requestedRate}. Capture and worklet will resample.`)
+      const aligned = (actualMicRate === 0 || this.audioContext.sampleRate === actualMicRate)
+      if (this.audioContext.sampleRate !== requestedMicRate || !aligned) {
+        console.warn(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz, mic native ${actualMicRate || '?'} Hz, requested ${requestedMicRate}. Capture/worklet will resample.`)
       } else {
-        console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz`)
+        console.log(`[Audio] AudioContext rate ${this.audioContext.sampleRate} Hz aligned with mic native ${actualMicRate} Hz — no resampler`)
       }
 
       // Build channel 0's subgraph inline (no async indirection).
@@ -1385,17 +1450,35 @@ export class AudioService {
           // back, ring would refill from drift, drift the rate back,
           // refill, ... a slow oscillation that occasionally clipped
           // PRIME_MIN and fired a reprime even when no real issue was
-          // present.
+          // present. v1.0.25 fixed that with a hold-in-deadband
+          // integrator (no oscillation in steady state).
           //
-          // v1.0.25 holds rateScale once we're inside the deadband. The
-          // loop is now an integrator (+ saturation): outside the
-          // deadband the rate moves; inside, it stays. Steady state
-          // converges to whatever rate matches producer/consumer
-          // exactly, no oscillation.
-          if (this.count > this.targetCount * 1.3) {
-            this.rateScale = Math.min(this.MAX_SCALE, this.rateScale + this.rateStep)
-          } else if (this.count < this.targetCount * 0.7) {
-            this.rateScale = Math.max(this.MIN_SCALE, this.rateScale - this.rateStep)
+          // Phase A v4.1 — proportional fast-adjust. With fixed rateStep,
+          // recovering from a 5-frame burst (count = 2.5x target)
+          // takes ~12 seconds even at the rail, and during recovery a
+          // second burst can pile on. We saw users stuck with
+          // rate=+12000ppm for entire sessions and ring=774 (vs
+          // target 288) for that reason. The fix: when count is FAR
+          // from target, scale the integrator step up so we drain
+          // bursts in < 1 sec; near target the step is unchanged so
+          // steady-state pitch jitter is identical.
+          //
+          //   excess > 2.0×  → step × 8   (catastrophic burst recovery)
+          //   excess > 1.5×  → step × 4   (large burst)
+          //   excess > 1.3×  → step × 1   (normal slow drift adjust)
+          //   inside deadband → no change (hold)
+          //   below 0.7×     → step × 1   (slow drain too slow)
+          //   below 0.5×     → step × 4   (about to underrun)
+          const r = this.count / this.targetCount
+          let step = 0
+          if      (r > 2.0)  step =  this.rateStep * 8
+          else if (r > 1.5)  step =  this.rateStep * 4
+          else if (r > 1.3)  step =  this.rateStep
+          else if (r < 0.5)  step = -this.rateStep * 4
+          else if (r < 0.7)  step = -this.rateStep
+          if (step !== 0) {
+            this.rateScale = Math.min(this.MAX_SCALE,
+                              Math.max(this.MIN_SCALE, this.rateScale + step))
           }
           const effRatio = this.ratio * this.rateScale
 

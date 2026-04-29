@@ -95,6 +95,20 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   // human-readable line to debug from.
   const [initError, setInitError] = useState<string>('')
   const [retrying,  setRetrying]  = useState<boolean>(false)
+  // High-output-latency hint. Bluetooth output (AirPods etc.) typically
+  // reports `outputLatency` 100-200 ms — this single variable can blow
+  // past every server-side optimisation we've done. We poll the value
+  // for the first ~5 s of a session (Chrome only sets it after the
+  // first audio quantum has actually played) and surface a dismissible
+  // banner if it crosses the perceptible threshold.
+  const [outputLatencyMs, setOutputLatencyMs] = useState<number>(0)
+  const [outputHintDismissed, setOutputHintDismissed] = useState<boolean>(() => {
+    try { return sessionStorage.getItem('tonel.outputHintDismissed') === '1' } catch { return false }
+  })
+  const dismissOutputHint = useCallback(() => {
+    try { sessionStorage.setItem('tonel.outputHintDismissed', '1') } catch {}
+    setOutputHintDismissed(true)
+  }, [])
 
   // Initialise audio + mixer in three explicitly-decoupled stages:
   //   1. callbacks (pure JS state setup, always succeeds)
@@ -189,6 +203,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     const fast = setInterval(() => {
       setSelfLevel(audioService.currentLevel)
       setE2e(audioService.audioE2eLatency)
+      setOutputLatencyMs(audioService.outputLatencyMs)
     }, 150)
     const slow = setInterval(() => {
       const cap = audioService.captureModeValue === 'worklet' ? 'wkt'
@@ -360,6 +375,35 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
 
         <button className="btn-leave" onClick={onLeave}>离开房间</button>
       </header>
+      {/* High output-latency hint. Threshold 30 ms catches Bluetooth
+          (AirPods ~150 ms, generic BT 100-200 ms) without false
+          positives on USB DACs (3-8 ms) or wired output (5-10 ms).
+          Banner stays dismissed for the rest of the browser session. */}
+      {!outputHintDismissed && outputLatencyMs > 30 && (
+        <div
+          role="status"
+          style={{
+            background: '#3b2a0d', color: '#ffe6b3', padding: '8px 24px',
+            fontSize: 13, borderTop: '1px solid #7a5a1a',
+            borderBottom: '1px solid #7a5a1a',
+            display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ flex: '1 1 auto' }}>
+            ⚠ 检测到高延迟输出设备（约 {Math.round(outputLatencyMs)}ms）。蓝牙耳机会让端到端延迟增加 100ms 以上，建议改用有线耳机或 USB 声卡获取最佳低延迟体验。
+          </span>
+          <button
+            onClick={dismissOutputHint}
+            style={{
+              fontSize: 12, padding: '4px 10px',
+              background: 'transparent', color: '#ffe6b3',
+              border: '1px solid #ffe6b3', borderRadius: 3, cursor: 'pointer',
+            }}
+          >
+            知道了
+          </button>
+        </div>
+      )}
       {initError && (
         <div
           role="alert"

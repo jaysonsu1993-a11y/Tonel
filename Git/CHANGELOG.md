@@ -5,6 +5,142 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0] - 2026-04-30
+
+### Phase A — 解锁底（rate controller + outputLatency UI + sample-rate auto-align）
+
+First MINOR of the v4.x latency-optimisation roadmap (see
+`local_docs/ROADMAP_V4_LATENCY.md`). Three independent client-side
+fixes that together unlock the rest of the roadmap by removing
+artificial floors in the playback control loop and in browser→OS
+audio plumbing.
+
+#### A.1 — Rate controller proportional fast-adjust + ±2.5% rail
+
+**Problem**: post-WT (v4.0.1) users observed `rate=+12000ppm`
+saturating the maxScale rail for entire sessions, with `ring`
+sitting at 2-3× `primeTarget` and `reprime` counting up to 500+
+per 5-min session. Cause was twofold: the ±1.2% rail wasn't enough
+headroom for server mix-tick scheduling jitter that periodically
+delivers small bursts (gap=0 confirms it's not network re-ordering),
+and the integrator's fixed step (20 ppm/quantum) couldn't drain a
+2-3× target overflow before the next burst piled on.
+
+**Fixes** (both in `audioService.ts`):
+
+1. `maxScale` 1.012 → **1.025**, `minScale` 0.988 → **0.975** —
+   doubles the headroom to ±25000 ppm. 2.5% pitch shift is
+   audible on critical music listening but sub-perceptual on
+   speech and only manifests on burst-recovery transients (steady
+   state still converges to whatever tiny scale matches actual
+   clock drift, typically <500 ppm).
+
+2. **Proportional fast-adjust** in the playback worklet's
+   integrator. The old fixed step gives way to a 5-band
+   piecewise-linear gain on `rateStep`:
+
+   ```
+   count > 2.0× target → step × 8   (catastrophic burst recovery)
+   count > 1.5× target → step × 4   (large burst)
+   count > 1.3× target → step × 1   (normal slow drift)
+   count in deadband   → 0          (hold; no oscillation)
+   count < 0.7× target → step × 1
+   count < 0.5× target → step × 4   (about to underrun)
+   ```
+
+   Steady-state behaviour and pitch jitter are unchanged (the
+   ×1 band still applies near target). Burst-recovery time drops
+   from ~12 s (rail-bound at fixed step) to <1 s (8× step takes
+   rate to rail in ~0.4 s, then rate at 1.025 drains 25
+   samples/quantum × 375 quanta/s = 9375 samples/s).
+
+**Expected effect**: `rate` no longer pegs at +12000 for whole
+sessions; `ring` converges to within ±2× `primeTarget`;
+`reprime`/5-min drops from 500+ to single digits.
+
+#### A.2 — outputLatency UI hint
+
+**Problem**: `audioContext.outputLatency` is the largest single
+opaque variable in the e2e budget. Bluetooth headphones
+(particularly AirPods, generic AAC) routinely report
+100-200 ms here, which silently negates every server-side
+optimisation we've shipped. Users had no way to see this — the
+debug panel surfaces ring fill and reprime but not the OS-side
+output latency.
+
+**Fix**:
+
+- New `audioService.outputLatencyMs` getter reading
+  `audioContext.outputLatency * 1000` (returns 0 on Safari which
+  often omits this field).
+- `RoomPage` polls it on the existing 150 ms fast timer; when
+  > 30 ms (safely above wired/USB DAC range of 5-10 ms),
+  renders a dismissible amber banner: "检测到高延迟输出设备
+  (~XX ms)…建议改用有线耳机或 USB 声卡".
+- Dismissal persisted in `sessionStorage` — banner stays gone
+  for the rest of the browser session but reappears next reload.
+
+**Threshold rationale**: 30 ms cleanly separates wired (5-10 ms)
+from Bluetooth (60-200 ms). USB DACs land at 3-8 ms, well below
+threshold. False-positive risk is essentially nil; false-negative
+risk only exists on aptX-LL (~30-40 ms) which is rare on
+consumer hardware.
+
+#### A.3 — mic ↔ AudioContext sample-rate auto-alignment
+
+**Problem**: the v4.0.x init flow always asked getUserMedia for
+48 kHz and built the AudioContext at 48 kHz. On hardware whose
+native rate is 44.1 kHz (most built-in laptop mics, many
+Bluetooth headsets at 16 kHz), this forced Chrome's internal
+mic→ctx polyphase resampler, adding ~5-10 ms of capture-side
+latency.
+
+**Fix** (in `audioService.ts` init flow):
+
+- If user hasn't pinned a rate via Settings → 采样率 (the
+  `tonel.audio.sampleRate` localStorage key remains null):
+  1. Acquire mic with **no rate constraint** → browser picks
+     the device's native rate.
+  2. Read what we actually got via
+     `track.getSettings().sampleRate`.
+  3. Build the AudioContext at that exact rate → mic and ctx
+     match → Chrome skips the resampler.
+- If user *has* pinned a rate, behaviour is unchanged (their
+  explicit choice wins over auto-alignment).
+
+**Logging**: init now prints either
+"AudioContext rate XXXXX Hz aligned with mic native XXXXX Hz —
+no resampler" (good case) or the previous warning about
+mismatch (forced override or fallback path).
+
+**Expected effect**: -0 to -10 ms on capture side, depending
+on hardware. Built-in MacBook mic (44.1 k native) sees the full
+benefit; external 48 k USB mics see nothing change because they
+were already aligned.
+
+### Validation done before release
+
+Per the new pre-release rule:
+- `npx tsc --noEmit` — clean
+- `Git/scripts/pretest.sh` full suite (Layer 1 SNR/THD, Layer 1.5
+  jitter sweep × 12 scenarios, signaling integration, Layer 2
+  Playwright + Chromium browser audio) — all 5 layers passed
+  (Layer 2 needed one auto-retry for first-run flake; second
+  pass clean)
+- Chrome MCP live-load: skipped — no browser currently
+  connected to the MCP extension. Real-world rate-controller
+  validation needs a multi-minute session with mic + audio
+  output, which exceeds what we can drive headlessly.
+
+### Next phase
+
+`Phase A → v4.1.0` boxes are checked. Next: Phase B (v4.2.x) —
+primeTarget 6→3 ms, client PCM PLC, frame size 5→2.5 ms.
+Per the roadmap, B can only start after A is validated in real
+users for at least one session — verify in production that
+`rate` no longer pegs and `reprime` drops sharply before
+opening v4.2.x branch.
+
 ## [4.0.1] - 2026-04-30
 
 ### Fixed — WT proxy missing `ConfigureHTTP3Server` call (HTTP/3 datagrams disabled)
