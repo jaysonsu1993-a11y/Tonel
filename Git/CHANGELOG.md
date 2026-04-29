@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] - 2026-04-29
+
+### Changed — monitor uses linear ramp + visible in debug strip
+
+Diagnostic patch on top of v3.4.0's local-monitor feature: user
+reported "can hear peer but not self" at 2-user room population.
+Code audit didn't find a definitive root cause, but two changes
+should resolve it or expose what's actually wrong:
+
+1. `updateMonitorGain` switched from `setTargetAtTime` (exponential,
+   asymptotic, hard to reason about while debugging) to an explicit
+   `cancelScheduledValues` + `setValueAtTime` + `linearRampToValueAtTime`
+   sequence with a 10 ms tail. Same anti-click guarantee, but the
+   ramp lands at the target value in finite time.
+2. Added `mon=N.NN` to the RoomPage debug strip (next to
+   `roomUsers=`). New `audioService.monitorGainTarget` getter
+   surfaces the *committed* target, so a value mismatch with
+   `roomUsers` (e.g. `roomUsers=2 mon=0.00`) immediately points
+   to either the LEVELS handler not firing or the gain ramp being
+   eaten by an exception.
+
+If the user still can't hear self at 2-user room, the next debug
+session has the data to localize it: `mon=1.00 roomUsers=2` with no
+audible monitor → audio routing issue (source → monitorGain →
+destination not flowing); `mon=0.00 roomUsers=2` → updateMonitorGain
+not running or peerLevels stale.
+
 ## [3.4.0] - 2026-04-29
 
 ### Added — local mic monitoring (low-latency self-hear when room has peers)

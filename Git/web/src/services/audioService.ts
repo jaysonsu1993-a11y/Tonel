@@ -532,15 +532,36 @@ export class AudioService {
    * when there are peers (server runs N-1 → monitor is the only path
    * to hear self).
    *
-   * Uses `setTargetAtTime` with a 50 ms time constant — instantaneous
-   * `gain.value =` would click on the audio thread when the population
-   * crosses the boundary at the same time as audio is playing.
+   * Uses a tight `linearRampToValueAtTime` (10 ms) instead of
+   * `setTargetAtTime` (which is exponential and can land at fractional
+   * values that are hard to reason about during debugging). 10 ms is
+   * short enough not to be perceptible as a fade-in but long enough to
+   * avoid the click an instant `gain.value =` would produce on the
+   * audio thread under load.
    */
   private updateMonitorGain(): void {
     if (!this.monitorGain || !this.audioContext) return
     const target = (this.peerLevels.size >= 2) ? this.monitorBaseGain : 0
-    this.monitorGain.gain.setTargetAtTime(target, this.audioContext.currentTime, 0.05)
+    const now = this.audioContext.currentTime
+    const param = this.monitorGain.gain
+    // `cancelScheduledValues` first so a previous ramp doesn't fight the
+    // new one. setValueAtTime anchors the *current* value as the ramp
+    // start so linearRampToValueAtTime knows what to interpolate from.
+    try {
+      param.cancelScheduledValues(now)
+      param.setValueAtTime(param.value, now)
+      param.linearRampToValueAtTime(target, now + 0.01)
+    } catch {
+      // Some older WebKit revisions throw on cancelScheduledValues with
+      // a past time. Fall back to direct assignment — louder click but
+      // functionally correct.
+      param.value = target
+    }
+    this._monitorTarget = target
   }
+  private _monitorTarget = 0
+  /** Current monitor gain target (post-ramp). Surfaced in the debug strip. */
+  get monitorGainTarget(): number { return this._monitorTarget }
 
   /**
    * Future-proof user-facing knob — not yet wired to the debug panel,

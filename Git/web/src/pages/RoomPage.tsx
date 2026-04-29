@@ -113,6 +113,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         `rxPeak=${audioService.rxLevelPeak.toFixed(3)} ws=${audioService.audioWsState} ` +
         `cap=${cap} micClip=${audioService.captureClipCountValue} ` +
         `roomUsers=${audioService.serverPeerCount} ` +
+        `mon=${audioService.monitorGainTarget.toFixed(2)} ` +
         `repri=${audioService.playReprimeCount} gap=${audioService.rxSeqGapCount} ` +
         `ring=${audioService.playRingFill} rate=${rateStr}ppm${muteFlag}`
       )
