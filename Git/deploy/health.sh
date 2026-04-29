@@ -99,12 +99,15 @@ check_remote_port u 9003 "mixer-udp   "
 check_remote_port t 9004 "ws-proxy    "
 check_remote_port t 9005 "ws-mixer-prx"
 check_remote_port u 9006 "ws-mixer-udp"
+check_remote_port u 9007 "wt-mixer-udp"
+check_remote_port u 4433 "wt-mixer-h3 "
 
 log "─── pm2 processes ───"
 check_pm2_online tonel-signaling
 check_pm2_online tonel-mixer
 check_pm2_online tonel-ws-proxy
 check_pm2_online tonel-ws-mixer-proxy
+check_pm2_online tonel-wt-mixer-proxy
 
 log "─── public WSS endpoints ───"
 check_wss_handshake "https://srv.tonel.io/mixer-tcp" "srv.tonel.io/mixer-tcp" strict

@@ -2,16 +2,21 @@
 # Deploy server-side artifacts to /opt/tonel/.
 #
 # Usage:
-#   Git/deploy/server.sh [--component=binary|proxy|ops|all] [--dry-run]
+#   Git/deploy/server.sh [--component=binary|proxy|wt-proxy|ops|all] [--dry-run]
 #
 # Components:
-#   binary  — rsync server/ source → remote build → swap signaling_server + mixer_server
-#   proxy   — rsync ws-proxy.js + ws-mixer-proxy.js + node_modules
-#   ops     — rsync ops/ artifacts (PM2 ecosystem, nginx, cloudflared, scripts)
-#   all     — binary + proxy + ops, in that order
+#   binary    — rsync server/ source → remote build → swap signaling_server + mixer_server
+#   proxy     — rsync ws-proxy.js + ws-mixer-proxy.js + node_modules
+#   wt-proxy  — cross-compile Go WebTransport proxy locally → rsync binary → pm2 reload
+#   ops       — rsync ops/ artifacts (PM2 ecosystem, nginx, cloudflared, scripts)
+#   all       — ops + proxy + wt-proxy + binary, in that order
 #
 # After all components: PM2 reload, nginx -t + reload, cloudflared restart if changed.
 # Health check runs at the end (deploy/health.sh).
+#
+# The wt-proxy component requires Go on the operator's machine (`brew install go`
+# on macOS). Build is local, only the resulting Linux/amd64 binary lands on the
+# server — no Go runtime needed remotely.
 
 source "$(dirname "$0")/lib/common.sh"
 
@@ -26,7 +31,7 @@ for arg in "$@"; do
     esac
 done
 
-[[ "$COMPONENT" =~ ^(binary|proxy|ops|all)$ ]] || die "invalid --component=$COMPONENT"
+[[ "$COMPONENT" =~ ^(binary|proxy|wt-proxy|ops|all)$ ]] || die "invalid --component=$COMPONENT"
 
 load_env
 require_clean_git
@@ -122,6 +127,40 @@ EOF
     ok "[proxy] done"
 }
 
+# ─── wt-proxy ────────────────────────────────────────────────────────────────
+
+deploy_wt_proxy() {
+    local src="$GIT_DIR/server/wt-mixer-proxy"
+    [ -d "$src" ] || die "wt-proxy source missing at $src"
+
+    log "[wt-proxy] cross-compile Go binary (linux/amd64)"
+    command -v go >/dev/null 2>&1 || die "go not found locally — install with 'brew install go' (or apt) and rerun"
+
+    local out="$src/build/wt-mixer-proxy"
+    mkdir -p "$src/build"
+    (
+        cd "$src"
+        # CGO off so the binary is fully static — drops without
+        # libc-version concerns on the production host.
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "$out" ./...
+    ) || die "go build failed"
+    file "$out" | grep -q 'ELF 64-bit LSB' || die "wt-mixer-proxy build is not Linux ELF"
+
+    log "[wt-proxy] rsync binary to remote bin/"
+    ssh_exec "mkdir -p '$TONEL_DEPLOY_DIR/bin'"
+    rsync_to_remote "$out" "$TONEL_DEPLOY_DIR/bin/wt-mixer-proxy"
+    ssh_exec "chmod +x '$TONEL_DEPLOY_DIR/bin/wt-mixer-proxy'"
+
+    log "[wt-proxy] pm2 reload tonel-wt-mixer-proxy"
+    ssh_exec "
+        pm2 reload tonel-wt-mixer-proxy 2>/dev/null \
+        || pm2 startOrReload '$TONEL_DEPLOY_DIR/ops/ecosystem.config.cjs' --only tonel-wt-mixer-proxy
+    "
+
+    write_deploy_log wt-proxy "$VERSION" "$COMMIT"
+    ok "[wt-proxy] done"
+}
+
 # ─── ops ─────────────────────────────────────────────────────────────────────
 
 deploy_ops() {
@@ -164,12 +203,16 @@ deploy_ops() {
 # ─── Run selected components ─────────────────────────────────────────────────
 
 case "$COMPONENT" in
-    binary) deploy_binary ;;
-    proxy)  deploy_proxy ;;
-    ops)    deploy_ops ;;
+    binary)   deploy_binary   ;;
+    proxy)    deploy_proxy    ;;
+    wt-proxy) deploy_wt_proxy ;;
+    ops)      deploy_ops      ;;
     all)
         deploy_ops      # ops first so PM2 ecosystem matches expectations before swaps
-        deploy_proxy
+        deploy_proxy    # WSS proxies — fallback path; deployed first so the WT
+                        # rollout can't strand users on a stale ecosystem
+        deploy_wt_proxy # WT proxy — new in v4.0.0; failures here are non-fatal
+                        # because the web client falls back to WSS automatically
         deploy_binary
         ;;
 esac

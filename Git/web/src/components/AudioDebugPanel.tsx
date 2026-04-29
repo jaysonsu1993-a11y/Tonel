@@ -220,6 +220,11 @@ export function AudioDebugPanel() {
           />
           <hr style={hrStyle} />
           <div style={sectionTitle}>LIVE</div>
+          <div>
+            transport=<b style={{ color: audioService.audioTransport === 'wt' ? '#0ff' : audioService.audioTransport === 'wss' ? '#ff0' : '#888' }}>
+              {audioService.audioTransport}
+            </b>
+          </div>
           <div>ring={stats.ringFill} samp · {ringFillMs} ms</div>
           <div>rate={ratePpm >= 0 ? '+' : ''}{ratePpm} ppm</div>
           <div>reprime={stats.reprime} · seqGap={stats.seqGap}</div>

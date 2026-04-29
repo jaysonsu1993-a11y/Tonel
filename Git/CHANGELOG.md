@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - 2026-04-30
+
+### Added — WebTransport audio path with WSS fallback (major)
+
+The browser → server audio leg now runs over **HTTP/3 WebTransport
+datagrams** (UDP / QUIC) for capable browsers, with the existing
+WSS-over-TCP path retained as fallback for Safari and older
+browsers. This is the architectural change that's been blocking
+sub-30 ms end-to-end latency: the WSS path's TCP head-of-line
+blocking and Nagle-induced bursts were the root cause of the
+ring=6920 / reprime=1525 oscillation pattern visible in the v3.7.9
+debug panel even on a 10 ms RTT link.
+
+#### Server: new `tonel-wt-mixer-proxy`
+
+`Git/server/wt-mixer-proxy/` — Go binary built on `quic-go` +
+`webtransport-go`. Listens on UDP `:4433` with the existing
+`srv.tonel.io` LetsEncrypt cert (no nginx in front; nginx HTTP/3
+support isn't mature enough for WT upgrade). Serves WebTransport
+sessions at path `/mixer-wt`.
+
+For each session: client `SendDatagram(SPA1 packet)` is forwarded
+to the mixer at `127.0.0.1:9003` from a single bound UDP port
+(`:9007`). Reverse path reads from that bound port, parses the
+`userId` field out of each SPA1 header, and routes the datagram to
+the matching WT session. Same demux pattern as
+`ws-mixer-proxy.js`'s `wsByUid` map, just with QUIC datagrams
+instead of WebSocket frames.
+
+The Go binary is **statically linked, CGO disabled** — drops in to
+the production host with no libc-version concerns. Cross-compiled
+on the operator's macOS box during deploy, only the resulting
+Linux/amd64 ELF lands on the server.
+
+PM2 entry: `tonel-wt-mixer-proxy`, autorestart, logs to
+`/var/log/tonel/wt-mixer-proxy.{out,err}.log`.
+
+#### Web: transport abstraction in `audioService.ts`
+
+New helpers — `sendAudioPacket()`, `tryWebTransport()`,
+`runAudioWTReadLoop()`, `chooseAudioTransport()` — let the four
+SPA1 send sites (capture worklet, capture script-processor, initial
+handshake, reconnect handshake) be transport-agnostic.
+
+`connectMixer()` now:
+1. Decides transport via `chooseAudioTransport()`:
+   - `?transport=wss` forces WSS (useful for A/B testing)
+   - `?transport=wt` forces WT (fails loudly if unsupported)
+   - default: WT if `'WebTransport' in window`, otherwise WSS
+2. If WT chosen: `await new WebTransport(url).ready` — on success
+   spawn the datagram read loop; on any failure (cert mismatch,
+   UDP 4433 blocked by user's network, server not running) fall
+   through to WSS automatically with one warning line.
+3. WSS audio socket is **only** created when WT is the inactive
+   path. No double-connect, no idle WS holding a TCP slot.
+4. Control channel (`/mixer-tcp`) stays WSS regardless — control
+   traffic isn't latency-sensitive and the WS path is battle-tested.
+
+The same SPA1 handshake packet works for both transports — the
+proxy uses `userId` from the header to register the session. No
+protocol-level changes; only the wire envelope differs.
+
+#### Debug panel
+
+LIVE section now shows `transport=wt|wss` colour-coded so an
+engineer can confirm at a glance which path is active. Cyan = WT,
+yellow = WSS, grey = pre-handshake.
+
+#### Why WebTransport over WebRTC DataChannel
+
+Tonel is a client-server architecture: the mixer has a public IP,
+no NAT involved. WebRTC's ICE/STUN/SCTP overhead exists to enable
+P2P NAT traversal — none of it buys us anything in this topology,
+and ~5-10 RTT of ICE handshake delays room entry meaningfully on
+high-RTT connections.
+
+WebTransport is the standard the spec authors built specifically
+for this case: 1-RTT QUIC handshake, datagrams as a first-class
+primitive, standard HTTPS cert verification, single connection.
+Cost is Safari unsupported (no roadmap commitment as of 2026 Q2).
+Tonel's Safari users already accept reduced functionality
+(speaker-mode reverted in v3.7.7, earpiece-only routing on iPhone)
+so deferring WT to "Safari Y+1" is acceptable.
+
+#### Operational notes for first deploy
+
+1. **UDP 4433 must be reachable** from the public internet.
+   Check with `ufw allow 4433/udp` (or equivalent) on the server.
+   If the port is firewall-blocked, all WT clients fall back to
+   WSS — no outage, just no latency improvement until fixed.
+
+2. **TLS cert read access**: the proxy runs as root (under PM2)
+   and reads `/etc/letsencrypt/live/srv.tonel.io/{fullchain,privkey}.pem`
+   directly. Cert auto-renewal will require a manual
+   `pm2 reload tonel-wt-mixer-proxy` on the next renewal — TODO
+   to wire a certbot deploy hook for this in v4.0.x.
+
+3. **Cross-compile dependency**: the operator's machine needs Go
+   installed (`brew install go` on macOS). Only the resulting
+   binary lands on the production server.
+
+#### What did NOT change
+
+- Wire format: SPA1 packets unchanged (76 B header + payload).
+- Mixer server: unchanged. Still listens on UDP 9003 for SPA1
+  packets from any source. The WT proxy is a transparent bridge,
+  same as the WSS proxy.
+- Native AppKit / Desktop clients: unchanged. They still use raw
+  UDP 9003 directly.
+- Control channel: still WSS to `/mixer-tcp`.
+- Existing WSS audio path: still works, still deployed,
+  automatically used by Safari and any browser without WT.
+
+#### Risk profile
+
+Low. The fallback chain is exhaustive — any failure in the WT
+path (server down, firewall blocking, browser unsupported, cert
+problem, network UDP throttling) lands the user back on the v3.7.9
+WSS audio path with a single warning line in console. There is no
+state in the WT proxy that can corrupt the mixer; bridge mode only.
+
+Mid-session WT close currently does not auto-fall to WSS — the
+existing WT-only reconnect logic kicks in instead. If WT becomes
+permanently unavailable mid-session, the user has to refresh.
+TODO for v4.0.x: graceful WT → WSS demotion mid-session.
+
 ## [3.7.9] - 2026-04-30
 
 ### Changed — AudioContext `latencyHint: 0` for minimum output buffer

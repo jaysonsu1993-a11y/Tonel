@@ -212,6 +212,18 @@ export class AudioService {
   // WebSocket connections to mixer (via ws-proxy → ws-mixer-proxy)
   private controlWs:        WebSocket | null = null
   private audioWs:          WebSocket | null = null
+  // Audio data path can also run over WebTransport (HTTP/3 datagrams)
+  // — same SPA1 packet format on the wire, but UDP-style unreliable
+  // unordered transport that kills the TCP HoL/burst pattern. Set
+  // when WT is the active audio transport; null = WSS audio path.
+  // The control channel (controlWs) stays WSS regardless — it carries
+  // low-volume JSON + PING/PONG and doesn't benefit from WT.
+  private audioWT:          WebTransport | null = null
+  private audioWTWriter:    WritableStreamDefaultWriter<Uint8Array> | null = null
+  private audioWTReader:    ReadableStreamDefaultReader<Uint8Array> | null = null
+  // Reported in debug panel + tooltips so the user / engineer can see
+  // which transport is active without inspecting the network panel.
+  public  audioTransport:   'wt' | 'wss' | 'unknown' = 'unknown'
   private userId:           string = ''
   private roomId:           string = ''
 
@@ -1873,7 +1885,10 @@ export class AudioService {
     // wire-rate (48 kHz) frame caused queue accumulation when the
     // AudioContext rate ≠ 48 kHz. Raw block is at context rate.)
 
-    if (this.audioWs?.readyState !== WebSocket.OPEN) return
+    // Gate the capture send on whichever audio transport is active.
+    // No-op early-out keeps the level meter and per-channel processing
+    // running even when the wire is briefly down (mid-reconnect).
+    if (!this.isAudioTransportReady()) return
     if (this.muted) {
       // Worklet doesn't know about mute; zero the frame here so server
       // sees silence rather than mic content while muted.
@@ -1890,8 +1905,19 @@ export class AudioService {
     const uid = `${this.roomId}:${this.userId}`
     const pcm16 = float32ToPcm16(frame)
     const spa1 = buildSpa1Packet(pcm16, SPA1_CODEC_PCM16, this.sequence++, 0, uid)
-    this.audioWs.send(spa1)
+    this.sendAudioPacket(spa1)
     this.txCount++
+  }
+
+  /**
+   * True if at least one audio transport (WT or WSS) is ready to
+   * accept a packet. Used as the early-out gate in the capture
+   * callback so the level meter / channel UI keeps running across
+   * reconnect blips.
+   */
+  private isAudioTransportReady(): boolean {
+    if (this.audioWT && this.audioWTWriter) return true
+    return this.audioWs?.readyState === WebSocket.OPEN
   }
 
   private startCaptureWithScriptProcessor(): void {
@@ -2028,7 +2054,7 @@ export class AudioService {
       const frame = buf.subarray(offset, offset + FRAME_SAMPLES)
       const pcm16 = float32ToPcm16(frame)
       const spa1 = buildSpa1Packet(pcm16, SPA1_CODEC_PCM16, this.sequence++, 0, uid)
-      this.audioWs.send(spa1)
+      this.sendAudioPacket(spa1)
       this.txCount++
       offset += FRAME_SAMPLES
     }
@@ -2040,17 +2066,136 @@ export class AudioService {
 
   // ── Mixer WebSocket connection (control + audio) ───────────────────────────
 
+  /**
+   * Send one SPA1 audio packet to the mixer over whichever audio
+   * transport is currently active. Routes through WebTransport
+   * datagrams when available, falls back to the WSS audio socket
+   * otherwise. Silent no-op if neither is connected — capture loop
+   * runs at 200 Hz and we don't want to log-spam during a brief
+   * reconnect window.
+   *
+   * Note: WT writes return a Promise we deliberately don't await —
+   * fire-and-forget is the right model for unreliable datagrams,
+   * matching the WSS path's WebSocket.send() semantics.
+   */
+  private sendAudioPacket(buf: ArrayBuffer): void {
+    if (this.audioWT && this.audioWTWriter) {
+      // WT writer typing wants a Uint8Array view; the underlying
+      // bytes are the same so this is a zero-copy wrap.
+      void this.audioWTWriter.write(new Uint8Array(buf)).catch((_err) => {
+        // WT writer rejects when the session has closed mid-send.
+        // The wt.closed promise handler will tear down state; we
+        // just drop this packet rather than logging on every send.
+      })
+      return
+    }
+    if (this.audioWs?.readyState === WebSocket.OPEN) {
+      this.audioWs.send(buf)
+    }
+  }
+
+  /**
+   * Decide which audio transport to use for this connect. Honours
+   * `?transport=wt|wss|auto` so a developer can force a path
+   * without code changes; defaults to "WT if the browser supports
+   * it, WSS otherwise". Safari / older browsers fall through to
+   * WSS automatically — there's no `WebTransport` global there.
+   */
+  private chooseAudioTransport(): 'wt' | 'wss' {
+    const forced = new URLSearchParams(location.search).get('transport')
+    if (forced === 'wss') return 'wss'
+    if (forced === 'wt')  return 'wt'   // user explicitly asked for WT — let connect fail loudly if unsupported
+    return (typeof WebTransport !== 'undefined') ? 'wt' : 'wss'
+  }
+
+  /**
+   * Try to open a WebTransport audio session. Returns true on success
+   * (audioWT/Writer/Reader populated, read loop spawned). Returns
+   * false on any failure — the caller should fall back to WSS.
+   *
+   * Failure modes we tolerate cleanly:
+   *   - browser has no WebTransport global (older Chrome / Safari)
+   *   - server cert invalid for the WT host (LetsEncrypt mis-issue)
+   *   - UDP 4433 blocked by user's network (corporate firewalls
+   *     often block non-443 UDP — common reason WT can't connect
+   *     even when the spec says it should)
+   *   - server-side `tonel-wt-mixer-proxy` is down (mid-rollout
+   *     scenario where we ship the client before the server)
+   *
+   * Each of these collapses to "fall back to WSS" with one warning
+   * line, never an unhandled rejection.
+   */
+  private async tryWebTransport(audioWtUrl: string): Promise<boolean> {
+    if (typeof WebTransport === 'undefined') return false
+    try {
+      const wt = new WebTransport(audioWtUrl)
+      // wt.ready resolves after the QUIC + WT handshakes complete.
+      // If the server is unreachable or the cert is bad this rejects.
+      await wt.ready
+      this.audioWT       = wt
+      this.audioWTWriter = wt.datagrams.writable.getWriter()
+      this.audioWTReader = wt.datagrams.readable.getReader()
+      // Background reader loop. Each datagram is one SPA1 packet.
+      void this.runAudioWTReadLoop()
+      // Watch for session close so we can clean up references —
+      // the resolved value is { closeCode, reason } on graceful
+      // close; rejected for transport errors. Either way we drop
+      // state and the next reconnect cycle will retry WT.
+      wt.closed.then((info) => {
+        console.log('[Mixer] WebTransport closed:', info)
+      }).catch((err) => {
+        console.warn('[Mixer] WebTransport closed with error:', err)
+      }).finally(() => {
+        this.audioWT       = null
+        this.audioWTWriter = null
+        this.audioWTReader = null
+      })
+      return true
+    } catch (err) {
+      console.warn('[Mixer] WebTransport connect failed, will fall back to WSS:', err)
+      return false
+    }
+  }
+
+  /**
+   * Read datagrams off the WT session and route them through the
+   * same handler the WSS audio path uses. Each datagram is a full
+   * SPA1 packet; `handleMixerMessage` already takes ArrayBuffer.
+   */
+  private async runAudioWTReadLoop(): Promise<void> {
+    if (!this.audioWTReader) return
+    try {
+      while (true) {
+        const { value, done } = await this.audioWTReader.read()
+        if (done) break
+        // value is a Uint8Array view; copy into a fresh ArrayBuffer
+        // so we don't pin the WT runtime's internal pool buffer
+        // (it gets reused across reads). The cast is safe because
+        // the WT spec guarantees standard ArrayBuffer-backed views.
+        const copy = new Uint8Array(value.byteLength)
+        copy.set(value)
+        this.handleMixerMessage(copy.buffer)
+      }
+    } catch (err) {
+      console.warn('[Mixer] WT read loop ended:', err)
+    }
+  }
+
   public async connectMixer(userId: string, roomId: string): Promise<void> {
     this.userId = userId
     this.roomId = roomId
 
-    // Clean up any existing WebSockets before reconnecting
-    if (this.controlWs || this.audioWs) {
-      console.log('[Mixer] Cleaning up existing WebSockets before reconnect')
+    // Clean up any existing transports before reconnecting
+    if (this.controlWs || this.audioWs || this.audioWT) {
+      console.log('[Mixer] Cleaning up existing transports before reconnect')
       try { this.controlWs?.close() } catch (_) {}
       try { this.audioWs?.close() } catch (_) {}
-      this.controlWs = null
-      this.audioWs = null
+      try { this.audioWT?.close() } catch (_) {}
+      this.controlWs       = null
+      this.audioWs         = null
+      this.audioWT         = null
+      this.audioWTWriter   = null
+      this.audioWTReader   = null
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -2058,33 +2203,55 @@ export class AudioService {
     const host = 'srv.tonel.io'
     const controlUrl = `${protocol}//${host}/mixer-tcp`
     const audioUrl   = `${protocol}//${host}/mixer-udp`
+    // WebTransport listens on UDP 4433 with the same TLS cert as
+    // nginx — the URL is always https:// regardless of page protocol
+    // (WebTransport is HTTPS-only, no ws/wss equivalent).
+    const audioWtUrl = `https://${host}:4433/mixer-wt`
+
+    // Decide audio transport BEFORE wiring the control channel —
+    // we want the resolve() to wait on the actual audio path that
+    // ends up being used. WT attempt happens up-front so we know
+    // whether to skip creating audioWs or not.
+    const chosen = this.chooseAudioTransport()
+    let useWT = false
+    if (chosen === 'wt') {
+      useWT = await this.tryWebTransport(audioWtUrl)
+    }
+    this.audioTransport = useWT ? 'wt' : 'wss'
+    console.log(`[Mixer] audio transport: ${this.audioTransport}` +
+                (chosen === 'wt' && !useWT ? ' (WT attempted, fell back)' : ''))
 
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error('Mixer WebSocket 连接超时'))
+        reject(new Error('Mixer 连接超时'))
       }, 15000)
 
       let controlReady = false
-      let audioReady = false
+      // When WT is the active audio transport, audioReady is already
+      // true (tryWebTransport returned only on a fully-handshaken
+      // session). When WSS, audioReady flips on audioWs.onopen.
+      let audioReady = useWT
       const checkBothReady = () => {
         if (controlReady && audioReady) {
           clearTimeout(timer)
           // Send MIXER_JOIN via control channel
-          console.log('[Mixer] Both WebSockets open, sending MIXER_JOIN')
+          console.log('[Mixer] Both transports ready, sending MIXER_JOIN')
           this.controlWs?.send(JSON.stringify({
             type:    'MIXER_JOIN',
             room_id: this.roomId,
             user_id: this.userId,
           }) + '\n')
-          // Send SPA1 handshake via audio channel to register UDP return path
-          console.log('[Mixer] Sending SPA1 handshake on audio WebSocket')
+          // Send SPA1 handshake on the audio channel — same packet
+          // works for both WT and WSS. The proxy on the other side
+          // uses it to register the uid → session mapping.
+          console.log(`[Mixer] Sending SPA1 handshake on audio channel (${this.audioTransport})`)
           const pkt = buildSpa1Packet(
             new Uint8Array(0),
             SPA1_CODEC_HANDSHAKE,
             0, 0,
             `${this.roomId}:${this.userId}`
           )
-          this.audioWs?.send(pkt)
+          this.sendAudioPacket(pkt)
           resolve()
         }
       }
@@ -2110,7 +2277,12 @@ export class AudioService {
         reject(new Error('Control WebSocket 连接失败'))
       }
 
-      // ── Audio WebSocket (/mixer-udp) ────────────────────────────────────
+      // ── Audio channel ───────────────────────────────────────────────────
+      // WT path is already established by tryWebTransport above; the
+      // read loop is running. Skip the WSS audio socket entirely.
+      if (useWT) return
+
+      // WSS audio fallback path (Safari / older browsers / WT failure).
       this.audioWs = new WebSocket(audioUrl)
       this.audioWs.binaryType = 'arraybuffer'
       this.audioWs.onopen = () => {
@@ -2135,7 +2307,7 @@ export class AudioService {
                 new Uint8Array(0), SPA1_CODEC_HANDSHAKE, 0, 0,
                 `${this.roomId}:${this.userId}`
               )
-              this.audioWs?.send(pkt)
+              this.sendAudioPacket(pkt)
             }
             this.audioWs.onmessage = (evt) => this.handleMixerMessage(evt.data)
             this.audioWs.onclose = () => {
