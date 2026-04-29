@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.5] - 2026-04-29
+
+### Fixed — mobile refresh hang + iPhone speaker re-toggle failure
+
+**1. Mobile refresh → mic permission dialog hangs forever.**
+
+`navigator.mediaDevices.getUserMedia()` on iOS Safari occasionally
+hangs the promise instead of resolving — the permission dialog
+flickers, the user taps "Allow," but neither `then` nor `catch`
+ever fires. Pre-v3.7.5 `runInit()` blocked indefinitely, the error
+banner never showed, the retry button was unreachable, the user
+saw a frozen-looking page.
+
+Fix: 30 s timeout race on every getUserMedia attempt. After 30 s
+we reject with a Chinese-language timeout message; runInit's
+catch fires, the error banner shows, the retry button (still in
+gesture context when tapped) gets a fresh shot. 30 s is generous
+enough for slow permission dialogs but bounded enough that the
+user has a way out before giving up.
+
+**2. iPhone speaker → earpiece → speaker fails on the second toggle.**
+
+The teardown-and-rebuild approach in v3.7.4 created a fresh
+`MediaStreamAudioDestinationNode` + `<audio>` pair on every ON
+transition. iOS's audio session machinery doesn't tolerate a fresh
+MSD appearing while a mic is still active — the second
+`audio.play()` silently routes back to the earpiece even with the
+correct DOM-attachment + audioSession.type='playback' guards.
+
+Fix: build the MSD and `<audio>` element ONCE on first speaker-on,
+keep them around forever. Toggling now only re-wires outputBus's
+single downstream edge: speaker mode → outputBus connects to MSD,
+default mode → outputBus connects to destination. The audio element
+keeps playing — it just receives silence from a disconnected MSD
+when speaker mode is off, so iOS sees a stable audio session
+category instead of a ping-pong.
+
+Also: deliberately NOT resetting `navigator.audioSession.type` back
+to `'play-and-record'` on speaker-off. iOS gets confused if we
+ping-pong it while a mic is active. Once the user has flipped to
+speaker, the session type stays `'playback'`; the destination route
+(MSD vs destination) is what controls audible behavior, and that's
+all we need to swap.
+
+Verified: pretest 5/5 layers passed (the v3.7.4 layer-1 retry
+cushion absorbed the broadcast-rate timing flake on first attempt).
+
 ## [3.7.4] - 2026-04-29
 
 ### Fixed — three reports from the v3.7.3 round

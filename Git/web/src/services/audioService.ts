@@ -574,7 +574,21 @@ export class AudioService {
           channelCount:     CHANNELS,
         }
         if (constrained) audio.sampleRate = requestedRate
-        return navigator.mediaDevices.getUserMedia({ audio, video: false })
+        // v3.7.5: 30 s timeout. iOS Safari (and some Chrome Android
+        // builds) occasionally hang the getUserMedia promise instead
+        // of rejecting — the permission dialog flickers, the user
+        // taps "Allow," but the promise never settles. Without a
+        // timeout, runInit() hangs, the error banner never shows,
+        // the retry button is unreachable, and the user thinks the
+        // app is broken. 30 s is generous enough for slow permission
+        // dialogs but short enough that the user can still try the
+        // retry button before giving up on the page.
+        return Promise.race([
+          navigator.mediaDevices.getUserMedia({ audio, video: false }),
+          new Promise<MediaStream>((_, reject) =>
+            setTimeout(() => reject(new Error('麦克风请求超时（请重试）')), 30_000),
+          ),
+        ])
       }
       const tryAudioContext = (constrained: boolean): AudioContext => {
         return constrained
@@ -1115,13 +1129,7 @@ export class AudioService {
    */
   async setSpeakerMode(on: boolean): Promise<void> {
     AudioService.writeSpeakerMode(on)
-    // v3.7.3: ignore on non-iOS. Desktop's output device is controlled
-    // by the SettingsModal output dropdown via setSinkId on
-    // AudioContext.destination — re-routing through an <audio>
-    // element bypasses that path and breaks the dropdown. We hide
-    // the toggle from non-iOS UIs, but a stale `tonel.speakerMode=1`
-    // in localStorage (e.g. inherited from prior iOS testing on the
-    // same browser profile) would otherwise still apply on init.
+    // v3.7.3: ignore on non-iOS. See comment on the field.
     const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
     const isIOS = /iPad|iPhone|iPod/.test(ua) ||
       (typeof navigator !== 'undefined' &&
@@ -1131,82 +1139,64 @@ export class AudioService {
     this.speakerMode = on
     if (!this.audioContext || !this.outputBus) return
 
-    // Tear down any previous routing so we end up in a clean state
-    // regardless of which mode we were in. Disconnecting outputBus
-    // clears all its outgoing connections in one call.
-    try { this.outputBus.disconnect() } catch {}
-    if (this.outputAudioEl) {
-      try { this.outputAudioEl.pause() } catch {}
-      this.outputAudioEl.srcObject = null
-      // Remove from DOM if we appended it (v3.7.4 iOS workaround).
-      try { this.outputAudioEl.parentNode?.removeChild(this.outputAudioEl) } catch {}
-      this.outputAudioEl = null
+    // v3.7.5: REUSE the MediaStreamDestination + <audio> element across
+    // toggles. Pre-v3.7.5 we tore them down on OFF and re-created on ON,
+    // but that broke iPhone after one earpiece→speaker→earpiece cycle:
+    // iOS audio session doesn't like a fresh MediaStreamDestination
+    // appearing while a mic is still active, and `audio.play()` on the
+    // new element silently routed back to earpiece.
+    //
+    // New strategy: build the MSD + <audio> element ONCE on first
+    // speaker-on, leave them in place forever, and just rewire
+    // outputBus's downstream between destination (OFF) and MSD (ON).
+    // The <audio> element keeps playing — it just receives silence
+    // when outputBus isn't feeding the MSD. iOS's audio session
+    // category therefore stays steady.
+    if (on && (!this.mediaStreamDest || !this.outputAudioEl)) {
+      this.mediaStreamDest = this.audioContext.createMediaStreamDestination()
+      const el = new Audio()
+      el.srcObject = this.mediaStreamDest.stream
+      el.setAttribute('playsinline', 'true')
+      el.setAttribute('webkit-playsinline', 'true')
+      el.autoplay = true
+      el.muted    = false
+      el.controls = false
+      el.style.display = 'none'
+      try { document.body.appendChild(el) } catch {}
+      try {
+        const elAny = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
+        if (typeof elAny.setSinkId === 'function') {
+          await elAny.setSinkId('default')
+        }
+      } catch {}
+      this.outputAudioEl = el
     }
-    this.mediaStreamDest = null
 
-    if (!on) {
-      // Default: straight to destination.
-      this.outputBus.connect(this.audioContext.destination)
-      // Restore the default audio session type if we changed it.
+    // Rewire outputBus only. disconnect() clears all outgoing edges.
+    try { this.outputBus.disconnect() } catch {}
+    if (on && this.mediaStreamDest) {
+      this.outputBus.connect(this.mediaStreamDest)
+      // Keep the audio element actively playing — calling play() inside
+      // the gesture context the toggle button gave us.
       try {
         const ns = navigator as { audioSession?: { type?: string } }
-        if (ns.audioSession) ns.audioSession.type = 'play-and-record'
+        if (ns.audioSession) ns.audioSession.type = 'playback'
       } catch {}
-      return
-    }
-
-    // Speaker mode: outputBus → MediaStreamDestination → <audio>.
-    //
-    // v3.7.4: layered three iOS workarounds because the
-    // MediaStream-bridge alone wasn't routing reliably on Safari 16+:
-    //
-    //   (a) navigator.audioSession.type = 'playback' — newer iOS
-    //       Safari (16.4+) honours this to override PlayAndRecord's
-    //       earpiece default. Older Safari ignores it (no harm).
-    //   (b) Audio element appended to document.body (display:none).
-    //       Some iOS versions only route an <audio> element through
-    //       the media-playback session if it's actually in the
-    //       document tree — `new Audio()` alone wasn't enough.
-    //   (c) `setSinkId('default')` if the element supports it. This
-    //       is a hint, ignored by Safari, but harmless on Chrome iOS.
-    this.mediaStreamDest = this.audioContext.createMediaStreamDestination()
-    this.outputBus.connect(this.mediaStreamDest)
-
-    // (a) Audio session type override.
-    try {
-      const ns = navigator as { audioSession?: { type?: string } }
-      if (ns.audioSession) ns.audioSession.type = 'playback'
-    } catch (err) {
-      console.warn('[Audio] navigator.audioSession.type set failed:', err)
-    }
-
-    const el = new Audio()
-    el.srcObject = this.mediaStreamDest.stream
-    el.setAttribute('playsinline', 'true')
-    el.setAttribute('webkit-playsinline', 'true')
-    el.autoplay = true
-    el.muted    = false
-    el.controls = false
-    el.style.display = 'none'
-    // (b) DOM-attach so iOS treats it as a real media element.
-    try { document.body.appendChild(el) } catch {}
-    // (c) Hint output sink — best-effort, support is patchy.
-    try {
-      const elAny = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
-      if (typeof elAny.setSinkId === 'function') {
-        await elAny.setSinkId('default')
+      if (this.outputAudioEl) {
+        try { await this.outputAudioEl.play() } catch (err) {
+          console.warn('[Audio] setSpeakerMode: audio.play() rejected:', err)
+        }
       }
-    } catch {}
-    // play() must be inside a user gesture on iOS — caller (settings
-    // toggle) already provides one. If init-time apply (no gesture)
-    // throws, we leave the element parked; user can press the toggle
-    // again to retry inside a gesture.
-    try {
-      await el.play()
-    } catch (err) {
-      console.warn('[Audio] setSpeakerMode: audio.play() rejected (need user gesture?):', err)
+    } else {
+      this.outputBus.connect(this.audioContext.destination)
+      // NOTE: deliberately NOT resetting navigator.audioSession.type back
+      // to 'play-and-record' here. iOS sometimes gets confused if we
+      // ping-pong PlayAndRecord ↔ Playback while a mic is active; once
+      // the user has taken us to speaker, leaving the session type as
+      // 'playback' is harmless (the destination route is what matters).
+      // The audio element keeps existing too — just with no input from
+      // outputBus, so it plays silence.
     }
-    this.outputAudioEl = el
   }
   get speakerModeValue(): boolean { return this.speakerMode }
   /** Toggle the local monitor on/off independent of the population-based
