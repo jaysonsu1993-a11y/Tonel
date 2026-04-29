@@ -609,13 +609,13 @@ export class AudioService {
       this.inputSumGain = this.audioContext.createGain()
       this.inputSumGain.gain.value = 1.0
 
-      // Stop the priming-only mediaStream and let addInputChannel do a
-      // fresh getUserMedia inside the channel-0 subgraph. Two
-      // getUserMedia calls in a row is the standard pattern — the first
-      // unlocks the permission, the second binds to the constraints
-      // we actually care about.
-      try { initialStream.getAudioTracks().forEach(t => t.stop()) } catch {}
-      await this.addInputChannel('default')
+      // v3.7.4: reuse the gestural getUserMedia stream as channel 0
+      // instead of calling getUserMedia a second time. Mobile Chrome
+      // sometimes hangs / fails on a back-to-back getUserMedia after
+      // stopping the first stream's tracks (race between track
+      // teardown and re-acquire). Single call → one permission grant →
+      // one stream → wire it directly.
+      await this.adoptStreamAsChannel(initialStream, 'default')
       // Legacy aliases for back-compat with the rest of the codebase.
       const ch0 = this.inputChannels[0]
       this.mediaStream = ch0?.mediaStream ?? null
@@ -690,7 +690,23 @@ export class AudioService {
       audioConstraint.deviceId = { exact: deviceId }
     }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint, video: false })
+    return this.adoptStreamAsChannel(stream, deviceId)
+  }
 
+  /**
+   * Wire an already-acquired MediaStream as a new input channel.
+   * Used by `init()` to reuse the gestural getUserMedia stream as
+   * channel 0 — without this, init would have to call getUserMedia
+   * twice in quick succession, and on mobile Chrome the second call
+   * sometimes hangs / fails (the v3.7.4 mobile-Chrome no-mic-permission
+   * bug). Public `addInputChannel(deviceId)` for the + button still
+   * does its own getUserMedia for additional inputs (each new
+   * channel needs its own stream / device anyway).
+   */
+  private async adoptStreamAsChannel(stream: MediaStream, deviceId: string): Promise<string> {
+    if (!this.audioContext || !this.inputSumGain) {
+      throw new Error('AudioService not initialized — call init() first')
+    }
     const id = `ch${this.nextChannelId++}`
     const source = this.audioContext.createMediaStreamSource(stream)
     const gainNode = this.audioContext.createGain()
@@ -1122,6 +1138,8 @@ export class AudioService {
     if (this.outputAudioEl) {
       try { this.outputAudioEl.pause() } catch {}
       this.outputAudioEl.srcObject = null
+      // Remove from DOM if we appended it (v3.7.4 iOS workaround).
+      try { this.outputAudioEl.parentNode?.removeChild(this.outputAudioEl) } catch {}
       this.outputAudioEl = null
     }
     this.mediaStreamDest = null
@@ -1129,21 +1147,56 @@ export class AudioService {
     if (!on) {
       // Default: straight to destination.
       this.outputBus.connect(this.audioContext.destination)
+      // Restore the default audio session type if we changed it.
+      try {
+        const ns = navigator as { audioSession?: { type?: string } }
+        if (ns.audioSession) ns.audioSession.type = 'play-and-record'
+      } catch {}
       return
     }
 
     // Speaker mode: outputBus → MediaStreamDestination → <audio>.
+    //
+    // v3.7.4: layered three iOS workarounds because the
+    // MediaStream-bridge alone wasn't routing reliably on Safari 16+:
+    //
+    //   (a) navigator.audioSession.type = 'playback' — newer iOS
+    //       Safari (16.4+) honours this to override PlayAndRecord's
+    //       earpiece default. Older Safari ignores it (no harm).
+    //   (b) Audio element appended to document.body (display:none).
+    //       Some iOS versions only route an <audio> element through
+    //       the media-playback session if it's actually in the
+    //       document tree — `new Audio()` alone wasn't enough.
+    //   (c) `setSinkId('default')` if the element supports it. This
+    //       is a hint, ignored by Safari, but harmless on Chrome iOS.
     this.mediaStreamDest = this.audioContext.createMediaStreamDestination()
     this.outputBus.connect(this.mediaStreamDest)
+
+    // (a) Audio session type override.
+    try {
+      const ns = navigator as { audioSession?: { type?: string } }
+      if (ns.audioSession) ns.audioSession.type = 'playback'
+    } catch (err) {
+      console.warn('[Audio] navigator.audioSession.type set failed:', err)
+    }
+
     const el = new Audio()
     el.srcObject = this.mediaStreamDest.stream
-    // playsinline: stop iOS from going fullscreen for an audio-only
-    // element (it sometimes still does for mediastream).
     el.setAttribute('playsinline', 'true')
     el.setAttribute('webkit-playsinline', 'true')
     el.autoplay = true
     el.muted    = false
     el.controls = false
+    el.style.display = 'none'
+    // (b) DOM-attach so iOS treats it as a real media element.
+    try { document.body.appendChild(el) } catch {}
+    // (c) Hint output sink — best-effort, support is patchy.
+    try {
+      const elAny = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
+      if (typeof elAny.setSinkId === 'function') {
+        await elAny.setSinkId('default')
+      }
+    } catch {}
     // play() must be inside a user gesture on iOS — caller (settings
     // toggle) already provides one. If init-time apply (no gesture)
     // throws, we leave the element parked; user can press the toggle
@@ -1639,6 +1692,21 @@ export class AudioService {
   /** Subscribe to remote peer level updates. Callback receives (userId, level 0-1). */
   onPeerLevel(cb: PeerLevelCallback): void {
     this.peerLevelCallback = cb
+  }
+
+  /**
+   * Snapshot of the current per-peer level map (uid → 0-1).
+   * UI consumers should poll this rather than relying on
+   * `onPeerLevel` callbacks alone — the callbacks only fire for
+   * upserts, so a user who LEFT (and got pruned from the
+   * mixer-side LEVELS broadcast) would otherwise stay in the UI
+   * forever. v3.7.4 added the poll-based reconcile in RoomPage to
+   * close that gap.
+   */
+  get peerLevelsSnapshot(): Record<string, number> {
+    const out: Record<string, number> = {}
+    for (const [uid, lvl] of this.peerLevels) out[uid] = lvl
+    return out
   }
 
   /** Notified once when this session is displaced by a newer join with the

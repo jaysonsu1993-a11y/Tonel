@@ -65,6 +65,14 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         next[ch.id] = audioService.getInputChannelLevel(ch.id)
       }
       setChannelLevels(next)
+      // v3.7.4: reconcile peerLevels with audioService snapshot so
+      // departed users' strips actually disappear from MIXER. The
+      // mixer-side LEVELS broadcast already removes them from
+      // audioService.peerLevels (v3.4.0 fix); this poll propagates
+      // that to React state. Replacing the whole record is fine —
+      // it's small (<10 entries typically) and equality-by-content
+      // is preserved when nothing changed (React skips renders).
+      setPeerLevels(audioService.peerLevelsSnapshot)
     }, 100)
     return () => clearInterval(tick)
   }, [])
@@ -124,9 +132,12 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const runInit = useCallback(async () => {
     setRetrying(true)
     setInitError('')
-    audioService.onPeerLevel((uid, level) => {
-      setPeerLevels(prev => ({ ...prev, [uid]: level }))
-    })
+    // v3.7.4: peerLevels reconcile lives in the periodic poll below,
+    // not in this per-uid callback. The callback only ever fires for
+    // upserts (a peer's LEVEL broadcast updating their value), never
+    // for deletions — so a peer who left would keep their stale
+    // entry in this React state forever, which then kept their
+    // ChannelStrip on screen via the union renderer.
     audioService.onLatency((ms) => setLatency(ms))
 
     let micOk = false

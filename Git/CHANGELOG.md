@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.4] - 2026-04-29
+
+### Fixed — three reports from the v3.7.3 round
+
+**1. Peer ChannelStrip persists after that user leaves.**
+
+`audioService.peerLevels` does prune departed users (the LEVELS-handler
+diff against `present` was added in v3.4.0), but only in-memory.
+RoomPage's React `peerLevels` state was driven by `onPeerLevel`
+callbacks, which only ever fire for upserts — so a user that left
+left a stale entry in React state, and the v3.6.1 union renderer
+(peers ∪ peerLevels) kept their strip on screen.
+
+Fix: added `audioService.peerLevelsSnapshot` getter and folded the
+reconcile into RoomPage's existing 100 ms tick.
+`setPeerLevels(audioService.peerLevelsSnapshot)` replaces the whole
+record per tick — small map (<10 entries typically), React skips
+re-renders when nothing changed. Removed the per-uid callback
+subscription — redundant with the poll.
+
+**2. Mobile Chrome cannot grant mic permission.**
+
+Pre-v3.7.4 `init()` called `getUserMedia` twice:
+1. Priming call (gestural, gets the permission grant).
+2. `addInputChannel('default')` (re-acquires for channel 0's
+   subgraph).
+
+Between (1) and (2) we stopped (1)'s tracks with `track.stop()`.
+On Mobile Chrome, immediately calling getUserMedia again after a
+track-stop occasionally races track teardown vs re-acquire and the
+second call hangs / fails — sometimes with no error, just an
+unresolved promise.
+
+Fix: introduced `adoptStreamAsChannel(stream, deviceId)` private
+helper that builds the channel subgraph around an *already-acquired*
+stream. `init()` now does ONE getUserMedia and adopts that stream
+as channel 0. Public `addInputChannel(deviceId)` (the + button)
+still does its own getUserMedia for additional inputs since each
+new channel needs a different device.
+
+**3. iPhone Safari speaker toggle doesn't actually re-route output.**
+
+Reported: even with the toggle on, audio still plays through the
+earpiece. The MediaStream-bridge alone wasn't enough on Safari 16+ —
+Apple has tightened audio session handling.
+
+Layered three additional iOS workarounds when speaker mode is on:
+
+- `navigator.audioSession.type = 'playback'` — Safari 16.4+ honours
+  this to override PlayAndRecord's earpiece default. Older Safari
+  ignores it (no harm). Reset to `'play-and-record'` when speaker
+  mode turns off.
+- `<audio>` element appended to `document.body` (display:none).
+  Some iOS versions only route an `<audio>` element through the
+  media-playback session if it's actually in the DOM tree; a bare
+  `new Audio()` was ignored.
+- Best-effort `setSinkId('default')` on the audio element — hint
+  for browsers that support it (Chrome iOS), no-op on Safari.
+
+Pretest 5/5 passed (no audio-path regression — outputBus at unity
+gain still byte-equivalent to direct destination wiring).
+
+If iPhone speaker still doesn't engage on a particular iOS version,
+the `audioSession.type` step is the most likely point of failure
+(API not exposed pre-16.4). Last-resort fallback would be a
+WebRTC peer-connection bridge for playback — that re-uses a
+different audio session category — but that's a much bigger
+refactor; we'll do it only if this round still doesn't reach
+speaker on the user's iPhone.
+
 ## [3.7.3] - 2026-04-29
 
 ### Copy + UX cleanup

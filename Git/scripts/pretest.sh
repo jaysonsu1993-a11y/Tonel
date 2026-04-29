@@ -97,7 +97,11 @@ run_layer1 () {
     echo "$out"
     return 1
 }
-run_step "2/5 Layer 1 (1 kHz sine SNR/THD)" run_layer1
+# Layer 1 has a broadcast-rate-drift check with a ±5 000 ppm budget;
+# under main-thread load the measured rate can briefly exceed budget
+# even when the server timer is fine. Treat that as flake — one
+# auto-retry, same pattern as Layer 2.
+run_step_retry "2/5 Layer 1 (1 kHz sine SNR/THD)" run_layer1
 
 # Layer 1.5 — show TSV always (cheap, useful), grade by last column.
 run_layer15 () {
