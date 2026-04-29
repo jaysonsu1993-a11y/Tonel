@@ -112,10 +112,11 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       // between signaling (`peers=`) and mixer (`roomUsers=`) is visible
       // at a glance — that's the v3.4.x same-userId-collision pattern.
       const uidShort = (userId || '').slice(0, 14)
+      const sr = audioService.actualSampleRate || 0
       setDbg(
-        `uid=${uidShort} peers=${peers.length} roomUsers=${audioService.serverPeerCount} ` +
+        `uid=${uidShort} peers=${peers.length} roomUsers=${audioService.serverPeerCount} sr=${sr} ` +
         `mon=${audioService.monitorGainTarget.toFixed(2)} ` +
-        `monProc=${audioService.monitorProcCalls} monIn=${audioService.monitorInSeen} monOut=${audioService.monitorOutWrote} ` +
+        `monProc=${audioService.monitorProcCalls} monIn=${audioService.monitorInSeen} monOut=${audioService.monitorOutWrote} monQ=${audioService.monitorQueueLen} ` +
         `ws=${audioService.audioWsState} cap=${cap} ` +
         `tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
         `rxPeak=${audioService.rxLevelPeak.toFixed(3)} micClip=${audioService.captureClipCountValue} ` +

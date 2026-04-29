@@ -601,9 +601,14 @@ export class AudioService {
               this.queue.push(d)
               this.queueLen += d.length
               this.framesIn++
-              // Cap queue at 1 second of audio. Drop oldest frames if a
-              // main-thread stall stuffs in too much.
-              while (this.queueLen > 48000) {
+              // v3.4.8: tight cap as a defensive backstop. With raw
+              // context-rate blocks producer = consumer, queue should
+              // oscillate near zero. If a main-thread stall briefly
+              // bursts frames in, drop oldest to keep latency bounded
+              // (~10 ms wall-clock at any context rate). Each drop is
+              // an audible click — but a 1-second silent backlog of
+              // your own voice is much worse.
+              while (this.queueLen > 480) {
                 const old = this.queue.shift()
                 if (!old) break
                 this.queueLen -= old.length - this.readPos
@@ -691,6 +696,7 @@ export class AudioService {
           this._monProcCalls = d.procCalls
           this._monInSeen    = d.framesIn   // now "frames received via port"
           this._monOutWrote  = d.outWrote
+          this._monQueueLen  = d.queueLen
         }
       }
       // v3.4.7: NO source.connect(monitorWorklet). The capture worklet's
@@ -753,9 +759,15 @@ export class AudioService {
   private _monProcCalls = 0
   private _monInSeen    = 0
   private _monOutWrote  = 0
+  private _monQueueLen  = 0
   get monitorProcCalls(): number { return this._monProcCalls }
   get monitorInSeen():    number { return this._monInSeen }
   get monitorOutWrote():  number { return this._monOutWrote }
+  /** Current monitor queue depth (samples). At 48 kHz, /48 ≈ ms. With
+   *  raw-block forwarding (v3.4.8+), this should oscillate near 0;
+   *  a sustained nonzero queue indicates main-thread jank or a
+   *  producer/consumer rate mismatch. */
+  get monitorQueueLen(): number { return this._monQueueLen }
 
   /**
    * Future-proof user-facing knob — not yet wired to the debug panel,
@@ -1305,6 +1317,19 @@ export class AudioService {
           if (!input || !input[0] || input[0].length === 0) return true
           const block = input[0]
 
+          // v3.4.8: post the raw input block (pre-resample, AT context
+          // rate) for the monitor worklet. Posting the wire-rate
+          // (48 kHz) frame instead caused queue accumulation at the
+          // monitor whenever AudioContext rate ≠ 48 kHz: capture
+          // produces samples at 48k pace, but monitor's process() runs
+          // at context rate (44.1 kHz on Bluetooth output is the
+          // common bad case), so ~3900 samples/sec accumulate in the
+          // queue → growing latency until the cap kicks in. Raw block
+          // is by definition at context rate, so producer and consumer
+          // match exactly. Each block is 128 samples (one quantum).
+          const rawCopy = new Float32Array(block)
+          this.port.postMessage({ rawBlock: rawCopy }, [rawCopy.buffer])
+
           // Track hardware clipping at the input — surfaces as a stat
           // back to the main thread so the user can tell when their mic
           // gain is the actual problem (vs. our code).
@@ -1358,7 +1383,20 @@ export class AudioService {
       if (!this.audioContext || !this.source) return false
       const node = new AudioWorkletNode(this.audioContext, 'capture-processor')
       node.port.onmessage = (ev) => {
-        const { frame, stats } = ev.data
+        const d = ev.data
+        // Two message shapes:
+        //   { rawBlock: Float32Array }       per-quantum block at context
+        //                                    rate, forwarded to monitor.
+        //   { frame: Float32Array, stats }   wire-rate frame for SPA1 send.
+        if (d.rawBlock && this.monitorWorklet) {
+          // Forward to monitor at context rate. Honour mute by zeroing
+          // here — without this, soloing/muting would still let the user
+          // hear themselves locally even though peers hear nothing.
+          if (this.muted) d.rawBlock.fill(0)
+          this.monitorWorklet.port.postMessage(d.rawBlock, [d.rawBlock.buffer])
+          return
+        }
+        const { frame, stats } = d
         if (!frame) return
         if (stats?.clips) this.captureClipCount += stats.clips
         this.sendCapturedFrame(frame as Float32Array)
@@ -1393,22 +1431,10 @@ export class AudioService {
     this.smoothedLevel = this.smoothedLevel * 0.8 + rms * 0.2
     this.currentLevel = Math.min(1.0, this.smoothedLevel * 5)
 
-    // v3.4.7: forward a *copy* of the frame to the monitor worklet so it
-    // has real mic samples to play back. Must be a copy because:
-    //   (a) the original buffer is sent to the WebSocket below,
-    //   (b) we may zero it for the muted case before sending — but the
-    //       monitor still wants to play the original (or rather, also
-    //       silence when muted, which the muted-zero-fill below covers).
-    // The copy is small (~960 bytes for a 240-sample float frame) so the
-    // alloc cost is well within the 5 ms budget.
-    if (this.monitorWorklet) {
-      const monCopy = new Float32Array(frame)
-      // Honour mute by zeroing here too — without this, muting would
-      // still let the user hear themselves locally even though peers
-      // hear nothing. That'd confuse mic-check workflows.
-      if (this.muted) monCopy.fill(0)
-      this.monitorWorklet.port.postMessage(monCopy, [monCopy.buffer])
-    }
+    // (v3.4.7's forward of the wire-rate frame to the monitor worklet
+    // moved to the capture-worklet's `rawBlock` path in v3.4.8 — the
+    // wire-rate (48 kHz) frame caused queue accumulation when the
+    // AudioContext rate ≠ 48 kHz. Raw block is at context rate.)
 
     if (this.audioWs?.readyState !== WebSocket.OPEN) return
     if (this.muted) {

@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.8] - 2026-04-29
+
+### Fixed — desktop monitor latency was huge because of sample-rate mismatch
+
+User confirmed v3.4.7 made desktop hear self — but at *very high*
+latency (mobile was fine). Diagnosed as a producer/consumer rate
+mismatch in the monitor queue:
+
+- Capture worklet posts frames at WIRE rate = 48 kHz fixed.
+- Monitor worklet's `process()` runs at AudioContext rate.
+- On desktop with Bluetooth output, AudioContext often lands at
+  **44.1 kHz** (or 16/32 kHz for HFP). Producer = 48 000 samples/sec,
+  consumer = 44 100 samples/sec → **3 900 samples/sec accumulate**
+  in the monitor queue.
+- v3.4.7's queue cap was 48 000 samples = 1 second at 48 kHz, so
+  latency could grow to ~1 s before drops kicked in. That's the
+  "very high" the user heard.
+
+Mobile typically gets a 48 kHz AudioContext, so producer = consumer
+exactly and the queue stays empty. That's why the same code worked
+on phone but failed on desktop.
+
+Fix: **send the raw pre-resample mic block** (at AudioContext rate,
+128 samples per quantum) to the monitor instead of the wire-rate
+240-sample frame. Block-rate matches the monitor's consumption rate
+exactly at any AudioContext rate, so the queue oscillates near zero.
+
+Also tightened the queue cap from 48 000 samples (1 s) → 480
+samples (10 ms) as a defensive backstop. With raw-block forwarding
+the queue should never reach 480 in normal operation; if it does,
+something pathological is happening (main-thread stall, etc) and an
+audible click is the right tradeoff vs growing latency.
+
+Capture-worklet message protocol now has two shapes:
+- `{ rawBlock: Float32Array }` — per-quantum, forwarded to monitor.
+- `{ frame, stats }` — wire-rate 240-sample frame for SPA1 send.
+
+Main-thread routes them: rawBlock → monitorWorklet, frame →
+existing send pipeline. v3.4.7's wire-rate forward in
+`sendCapturedFrame` removed.
+
+Plus: surfaced `monQ=<samples>` and `sr=<sampleRate>` in the debug
+strip so a future rate-mismatch issue is visible immediately —
+sustained `monQ=480` means the cap is engaged and we're dropping;
+non-48000 `sr=` flags the AudioContext rate at a glance.
+
+Verified Layer 1 (SNR 84 dB / THD 0.006 %), Layer 2 (PASS first
+try this run). No change in single-user rooms — gain stays at 0.
+
 ## [3.4.7] - 2026-04-29
 
 ### Fixed — Chrome desktop monitor: stop tapping mic twice
