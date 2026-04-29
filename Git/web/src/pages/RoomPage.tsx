@@ -19,6 +19,10 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   const [peerLevels, setPeerLevels] = useState<Record<string, number>>({})
   const [soloId, setSoloId] = useState<string | null>(null)  // null = no solo active
   const [isMuted, setIsMuted] = useState(false)
+  // Independent of `isMuted`: this gates the local monitor (self-hear)
+  // without affecting the mic the user sends to peers. Wired to the
+  // MIXER section's self-strip mute button.
+  const [monitorMuted, setMonitorMuted] = useState(false)
   const [copied, setCopied] = useState(false)
   const [latency, setLatency] = useState<number>(-1)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -309,15 +313,37 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       </div>
 
       <div className="room-content">
-        {/* MIXER — peers' channel strips. Self is separated out into its
-            own INPUT TRACKS section below so the input vs. output buses
-            stay visually distinct (closer to a DAW mental model). */}
+        {/* MIXER — output bus.
+            First strip: SELF MONITOR (volume = local self-hear gain,
+            mute = stop hearing yourself). Distinct from the INPUT
+            TRACKS strip below, which controls the mic going to peers.
+            Followed by per-peer strips. */}
         <div className="mixer-section">
           <div className="mixer-header">
             <span className="mixer-label">MIXER</span>
-            <span className="mixer-count">{peers.length} CH</span>
+            <span className="mixer-count">{peers.length + 1} CH</span>
           </div>
           <div className="mixer-channels">
+            <ChannelStrip
+              key={`${userId}-mon`}
+              peerId={`${userId}-mon`}
+              name={`${userProfile?.nickname || 'YOU'} · Mon`}
+              avatarUrl={userProfile?.avatarUrl}
+              level={selfLevel}
+              peak={selfPeak}
+              isSelf
+              isMuted={monitorMuted}
+              onMute={(muted) => {
+                setMonitorMuted(muted)
+                audioService.setMonitorMuted(muted)
+              }}
+              onVolume={(v) => {
+                // ChannelStrip yields 0-1 from its 0-100 fader. Map
+                // straight through; setMonitorBaseGain itself clamps
+                // to its [0, 2] range. 1.0 = unity (default).
+                audioService.setMonitorBaseGain(v)
+              }}
+            />
             {peers.map(p => {
               const pl = peerLevels[p.user_id] ?? 0
               return (

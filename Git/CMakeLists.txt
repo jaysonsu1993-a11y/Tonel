@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Tonel VERSION 3.4.8 LANGUAGES C CXX)
+project(Tonel VERSION 3.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Force UTF-8 input charset
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -finput-charset=UTF-8")
 
-message(STATUS "Tonel v3.4.8")
+message(STATUS "Tonel v3.5.0")
 message(STATUS "  Build with:")
 message(STATUS "    cd Tonel-Desktop-AppKit && cmake -S . -B build && cmake --build build")
 message(STATUS "    cd Tonel-Desktop && cmake -S . -B build -DJUCE_PATH=/path/to/JUCE && cmake --build build")

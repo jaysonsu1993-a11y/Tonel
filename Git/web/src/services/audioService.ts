@@ -199,7 +199,12 @@ export class AudioService {
   // sidestep this. Same constraint already applied to the solo-loopback
   // path; we accept it here too.
   private monitorGain:      GainNode | null = null
-  private monitorBaseGain   = 1.0   // user-adjustable (future slider)
+  private monitorBaseGain   = 1.0   // user-adjustable via setMonitorBaseGain
+  // Independent monitor mute. Separate from `muted` (which gates the mic
+  // going TO peers). Letting the user mute their *own* hear without
+  // muting their voice to the room is the natural meaning of a mute
+  // button on the MIXER's self-strip vs the INPUT TRACKS' self-strip.
+  private monitorMuted      = false
   // Pass-through worklet placed between source and monitorGain. iOS
   // Safari (and possibly other WebKit-based browsers) silently mutes any
   // path that goes `MediaStreamSource → ... → destination` if the chain
@@ -731,7 +736,8 @@ export class AudioService {
    * audio thread under load.
    */
   private updateMonitorGain(): void {
-    const target = (this.peerLevels.size >= 2) ? this.monitorBaseGain : 0
+    const engaged = (this.peerLevels.size >= 2) && !this.monitorMuted
+    const target  = engaged ? this.monitorBaseGain : 0
     this._monitorTarget = target
     if (this.monitorWorklet) {
       // v3.4.7: distinguished message shape `{type:'gain', gain}` so the
@@ -779,6 +785,15 @@ export class AudioService {
     this.monitorBaseGain = Math.max(0, Math.min(2, g))
     this.updateMonitorGain()
   }
+  /** Toggle the local monitor on/off independent of the population-based
+   *  engagement. Wired to the MIXER section's self-strip mute button. */
+  setMonitorMuted(muted: boolean): void {
+    this.monitorMuted = muted
+    this.updateMonitorGain()
+  }
+  /** Current monitor base gain (0-2). For UI initialisation. */
+  get monitorBaseGainValue(): number { return this.monitorBaseGain }
+  get monitorMutedValue(): boolean { return this.monitorMuted }
   /** Whether the local monitor is currently audible (≥2 peers). */
   get monitorActive(): boolean {
     return !!this.monitorWorklet && this.peerLevels.size >= 2

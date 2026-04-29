@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-04-29
+
+### Added — self-monitor strip in MIXER (volume + mute for your own hear)
+
+User asked: "把用户自己的音轨加一个到 mixer 里, 让用户能调节自己听到的
+自己的声音的音量." Done.
+
+The MIXER section now has a `YOU · Mon` strip as its first channel,
+in addition to whatever appears in the INPUT TRACKS section below.
+Two independent self-strips, two independent meanings:
+
+| Strip | Section | Volume controls | Mute controls |
+|---|---|---|---|
+| `YOU` | INPUT TRACKS | (existing — masterGain, slated to be repurposed for input/send gain) | mic to peers (`audioService.setMuted`) |
+| `YOU · Mon` | MIXER | local monitor self-hear gain (`setMonitorBaseGain`) | local monitor on/off (`setMonitorMuted`) |
+
+Mute on the new strip is *independent* of mic mute: you can stop
+hearing yourself locally while still sending mic to peers, or vice
+versa. Wheel-scroll the fader for fine adjustment (existing
+`ChannelStrip` behaviour).
+
+`audioService` additions:
+- `setMonitorMuted(muted)` + `monitorMutedValue` getter — independent
+  flag combined with the auto-engagement at peerLevels.size ≥ 2.
+- `monitorBaseGainValue` getter for future UI initialisation.
+
+`updateMonitorGain` now folds in the muted flag:
+```
+target = (peerLevels.size >= 2 && !monitorMuted) ? monitorBaseGain : 0
+```
+
+### Note — v3.4.8 root cause was the queue cap, not sample rate
+
+User pointed out their AudioContext was always sr=48000, so the
+sample-rate-mismatch theory in v3.4.8's CHANGELOG was wrong as
+the dominant cause. The actual fix was reducing the queue cap
+from 48 000 samples (1 s) to 480 samples (10 ms) — at sr=48000
+producer and consumer rates match, but main-thread postMessage
+delivery jitter (React renders, GC pauses) bursts frames into
+the queue, and without a draining mechanism the queue retained
+whatever depth a burst put it at. The 10 ms cap forces every
+burst back to baseline. Sample-rate mismatch is still a real
+secondary effect on Bluetooth-44.1k contexts but wasn't this
+user's primary failure mode.
+
 ## [3.4.8] - 2026-04-29
 
 ### Fixed — desktop monitor latency was huge because of sample-rate mismatch
