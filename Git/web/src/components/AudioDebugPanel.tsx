@@ -89,6 +89,7 @@ export function AudioDebugPanel() {
     rateScale:  1.0,
     ringFill:   0,
     reprime:    0,
+    plc:        0,
     seqGap:     0,
     rxPeak:     0,
     serverUsers: 0,
@@ -107,6 +108,7 @@ export function AudioDebugPanel() {
         rateScale:   audioService.playRateScale,
         ringFill:    audioService.playRingFill,
         reprime:     audioService.playReprimeCount,
+        plc:         audioService.playPlcCount,
         seqGap:      audioService.rxSeqGapCount,
         rxPeak:      audioService.rxLevelPeak,
         serverUsers: audioService.serverPeerCount,
@@ -227,7 +229,7 @@ export function AudioDebugPanel() {
           </div>
           <div>ring={stats.ringFill} samp · {ringFillMs} ms</div>
           <div>rate={ratePpm >= 0 ? '+' : ''}{ratePpm} ppm</div>
-          <div>reprime={stats.reprime} · seqGap={stats.seqGap}</div>
+          <div>reprime={stats.reprime} · plc={stats.plc} · seqGap={stats.seqGap}</div>
           <div>rxPeak={stats.rxPeak.toFixed(3)} · roomUsers={stats.serverUsers}</div>
         </>
       )}

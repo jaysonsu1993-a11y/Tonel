@@ -77,8 +77,15 @@ constexpr size_t SPA1_PCM16_FRAME_SIZE = 1920;
 
 class MixerServer {
 public:
-    // audio_frames: number of PCM frames per audio packet (default 240 for 5 ms @ 48 kHz)
-    explicit MixerServer(uv_loop_t* loop, int tcp_port, int udp_port, int audio_frames = 240);
+    // audio_frames: number of PCM samples per audio packet (default 120
+    // for 2.5 ms @ 48 kHz). Phase B v4.2.0 halved this from 240 (5 ms)
+    // to cut capture-side and mix-tick latency by 2.5 ms each (~5 ms
+    // total e2e). Cost: packet rate 200 → 400 fps, header overhead
+    // share doubles. Worth it because the absolute bandwidth is still
+    // < 1 Mbps and the latency budget at this stage is dominated by
+    // per-frame buffering. Native AppKit clients (which assume 240)
+    // will need a corresponding update — see CHANGELOG v4.2.0.
+    explicit MixerServer(uv_loop_t* loop, int tcp_port, int udp_port, int audio_frames = 120);
     ~MixerServer();
 
     void start();
@@ -236,18 +243,25 @@ private:
     std::unordered_map<std::string, std::string> user_room_index_;  // user_id → room_id (O(1) lookup)
     mutable std::mutex rooms_mutex_;
 
-    // Timed mixing: 5 ms interval, anchored to an absolute deadline so the
-    // average broadcast rate stays at 200/s regardless of libuv timer slop.
-    // (The default `uv_timer_start(..., 5, 5)` schedules each fire as
-    // `now + 5 ms`, which compounds whatever delay the event loop took
+    // Timed mixing: 2.5 ms interval, anchored to an absolute deadline so
+    // the average broadcast rate stays at 400/s regardless of libuv timer
+    // slop. (The default `uv_timer_start(..., 2, 2)` schedules each fire
+    // as `now + 2 ms`, which compounds whatever delay the event loop took
     // to dispatch the previous fire — typically ~0.2 ms but occasionally
-    // bigger. Over hours that drift accumulates to ~0.5–1 % rate offset
+    // bigger. Over hours that drift accumulates to ~1–2 % rate offset
     // that the client has to compensate via pitch shift.)
+    //
+    // Phase B v4.2.0 halved this from 5 ms to 2.5 ms. libuv's 1 ms
+    // timeout granularity means the rounded delay alternates 2/3 ms,
+    // averaging 2.5 — the absolute-deadline scheduling absorbs the
+    // alternation. Net jitter at the 2.5 ms tick is ±0.5 ms (vs ±0.5
+    // ms at the old 5 ms tick — same absolute, double relative). PLC
+    // (B.2) absorbs this without reprime.
     uv_timer_t mix_timer_;
     uint16_t   mix_sequence_       = 0;
     int        level_tick_counter_ = 0;  // throttle level broadcasts to ~20Hz
     uint64_t   mix_next_deadline_us_ = 0;  // wall-clock target for next broadcast (us, uv_hrtime base)
-    static constexpr uint64_t MIX_INTERVAL_US = 5000;  // 5 ms in microseconds
+    static constexpr uint64_t MIX_INTERVAL_US = 2500;  // 2.5 ms in microseconds
 
     // Recording
     RecordingManager recording_manager_;

@@ -109,8 +109,10 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       this.readPos = newReadPos % ${RING_SIZE};
 
       if (this.count < ${PRIME_MIN}) {
-        // Mid-callback underrun: 5 ms raised-cosine fade-out (smoother
-        // than linear, no kinks in derivative — below click threshold).
+        // Mid-callback underrun: raised-cosine fade-out (smoother than
+        // linear, no kinks in derivative — below click threshold).
+        // The 240-sample fade-len cap is historical; with Web Audio's
+        // 128-sample output quantum it never engages.
         const fadeLen = i + 1 < 240 ? i + 1 : 240;
         for (let f = 0; f < fadeLen; f++) {
           const w = 0.5 * (1 + Math.cos(Math.PI * (1 - f / fadeLen)));
@@ -175,7 +177,8 @@ function pcm16ToFloat32(pcm) {
 // broken, it won't be 1 kHz.
 //
 // Mirrors Git/web/src/services/audioService.ts (must be kept in sync).
-const FRAME_SAMPLES = 240;     // 5 ms at 48 kHz wire rate
+// Phase B v4.2.0: halved from 240/5ms to 120/2.5ms.
+const FRAME_SAMPLES = 120;     // 2.5 ms at 48 kHz wire rate
 
 function float32ToPcm16(f32) {
   const out = new Uint8Array(f32.length * 2);

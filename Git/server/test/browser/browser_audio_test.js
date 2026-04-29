@@ -47,8 +47,11 @@ async function serveTestPage() {
 }
 
 const WIRE_RATE       = 48000;
-const FRAME_SAMPLES   = 240;
-const FRAME_INTERVAL_MS = 5;
+// Phase B v4.2.0: client+server moved to 2.5 ms frames (120 samples).
+// Test signal generator must match — otherwise the synthetic input
+// rate doesn't line up with what the worklet expects to consume.
+const FRAME_SAMPLES   = 120;
+const FRAME_INTERVAL_MS = 2.5;
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 

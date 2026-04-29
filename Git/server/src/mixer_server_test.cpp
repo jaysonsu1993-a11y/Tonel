@@ -414,7 +414,7 @@ static void run_mixer_server(int tcp_port, int udp_port) {
     uv_loop_t loop;
     uv_loop_init(&loop);
 
-    MixerServer server(&loop, tcp_port, udp_port, 240);  // 5ms frames
+    MixerServer server(&loop, tcp_port, udp_port, 120);  // 2.5ms frames (Phase B v4.2)
     server.start();
 
     std::printf("MixerServer running — TCP:%d UDP:%d\n", tcp_port, udp_port);

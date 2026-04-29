@@ -23,8 +23,15 @@ const SPA1_CODEC_HANDSHAKE = 0xFF  // special codec for UDP address registration
 const SAMPLE_RATE = 48000
 const CHANNELS    = 1
 
-// Frame size: 5ms of audio for lower latency
-const FRAME_SAMPLES = Math.floor(SAMPLE_RATE * 5 / 1000)  // 240 samples @ 48kHz
+// Frame size: 2.5 ms of audio for lower latency.
+// Phase B v4.2.0: halved from 5 ms (240) to 2.5 ms (120). Saves
+// ~2.5 ms of capture-side buffering. Server-side mix tick was halved
+// to match (mixer_server.h MIX_INTERVAL_US = 2500). Combined with
+// the matching server tick, total e2e win is ~5 ms. Cost: packet
+// rate 200 → 400 fps; native AppKit clients (which assume 240) need
+// a corresponding update — see CHANGELOG v4.2.0.
+const FRAME_MS      = 2.5
+const FRAME_SAMPLES = Math.floor(SAMPLE_RATE * FRAME_MS / 1000)  // 120 samples @ 48kHz
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA1 Packet Builder  (matches server's SPA1Packet struct)
@@ -303,6 +310,12 @@ export class AudioService {
                           // between speech and gaps; raw rxLevel can be 0 between
                           // syllables and mislead debugging.
   public playReprimeCount = 0   // playback worklet underrun events (every one is a click)
+  public playPlcCount     = 0   // PLC concealment episodes (Phase B v4.2). Each = a brief
+                                // underrun the worklet rode out by replaying lastBlock
+                                // with energy decay instead of going silent. High plc
+                                // with low reprime = controller doing its job; high
+                                // reprime relative to plc = sustained drops PLC couldn't
+                                // mask (network or server died for >10ms).
   public rxSeqGapCount    = 0   // received SPA1 packets out-of-order or missing
   public playRateScale    = 1.0 // playback worklet's adaptive rate (1.0 = nominal; ±0.5%)
   public playRingFill     = 0   // current ring fill in samples (target ~1440)
@@ -323,14 +336,25 @@ export class AudioService {
   // and re-apply defaults.
   private static readonly TUNING_KEY_PREFIX = 'tonel.tuning.'
   // Bumped whenever we change a default in `tuning` / `serverTuning` that
-  // would silently regress users with saved per-room overrides. v4.1.0
-  // raised maxScale 1.012 → 1.025 and added the proportional fast-adjust
-  // — a v3.x-era saved blob carries the old maxScale and would pin
-  // rateScale at the OLD rail, defeating the entire Phase A.1 fix.
-  // Schema mismatch on load → discard the stale blob, fall back to
-  // current defaults (and the user can re-tune via the debug panel if
-  // they had reasons for the old values).
-  private static readonly TUNING_SCHEMA_VERSION = 2
+  // would silently regress users with saved per-room overrides.
+  //
+  // History:
+  //   v1 (implicit, pre-v4.1.1) — original v3.x defaults. Blobs from
+  //     this era have NO `v` field and are discarded on load.
+  //   v2 (v4.1.1) — Phase A: maxScale 1.012 → 1.025, proportional
+  //     fast-adjust. Discarding v1 was needed so users got the new
+  //     headroom (otherwise rateScale stayed pinned at the old rail).
+  //   v3 (v4.2.0) — Phase B: primeTarget 1440 → 144 (30 ms → 3 ms),
+  //     primeMin 128 → 32. Enabled by client PCM PLC (B.2): now the
+  //     ring can run nearly empty without reprime, so we shrink it by
+  //     10× for matching latency reduction. v2 blobs would carry
+  //     primeTarget=1440 and miss the entire latency win.
+  //
+  // Schema mismatch on load → discard the stale blob, apply current
+  // defaults. Memory rule (`feedback_state_migration_test`) requires
+  // any future bump here to also add a Layer-6 scenario asserting the
+  // discard happens correctly.
+  private static readonly TUNING_SCHEMA_VERSION = 3
   private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
@@ -343,14 +367,18 @@ export class AudioService {
    *  saved-tuning slots get discarded on next load (otherwise a
    *  stale slot pins the user to the OLD defaults).
    *
-   *  Phase A v4.1.2: maxScale/minScale here used to be 1.012/0.988
-   *  (v3.x era). v4.1.0 bumped the live `this.tuning` to ±2.5% but
-   *  forgot to update DEFAULT_PB — so the migration path in
-   *  loadRoomTuningIntoState() was applying the OLD constants when
-   *  it discarded a stale slot. Hotfixed in v4.1.2. */
+   *  History:
+   *    Phase A v4.1.2: maxScale/minScale used to be 1.012/0.988
+   *      (v3.x era). v4.1.0 bumped the live `this.tuning` to ±2.5%
+   *      but forgot to update DEFAULT_PB — migration path applied
+   *      OLD constants. Hotfixed in v4.1.2 with both updated.
+   *    Phase B v4.2.0: primeTarget 1440 → 144, primeMin 128 → 32.
+   *      Enabled by the new PCM PLC (worklet now rides ~10 ms
+   *      underruns smoothly instead of reprime → click). Schema
+   *      bumped v2 → v3 for the discard. */
   private static readonly DEFAULT_PB = Object.freeze({
-    primeTarget: 1440, primeMin: 128,
-    maxScale: 1.025,   minScale: 0.975,
+    primeTarget: 144, primeMin: 32,
+    maxScale: 1.025,  minScale: 0.975,
     rateStep: 0.00002,
   })
   private static readonly DEFAULT_SRV = Object.freeze({
@@ -370,30 +398,28 @@ export class AudioService {
   //       doesn't introduce a re-prime click.
   // serverJitter* are similarly cached locally and reflected to the server
   // via the MIXER_TUNE control message — see `setServerTuning()`.
-  public tuning = {
-    primeTarget: 1440,    // 30 ms @ 48 kHz; latency cost = ring depth
-    primeMin:    128,     // re-prime floor; below = audible reprime click
-    // ±2.5% rate range (Phase A v4.1: widened from ±1.2% in v4.0.1).
-    // Real-world consumer crystal drift is normally < 500 ppm, but we
-    // saw rateScale stick at +12000 ppm rail post-WT — diagnosed as
-    // server mix-tick scheduling jitter creating recurring small
-    // bursts that the controller's fixed-step integrator can't drain
-    // before the next burst. 2.5% gives the proportional fast-adjust
-    // (in playback worklet) enough headroom to absorb 5-frame bursts
-    // in < 1 second instead of staying railed for the whole session.
-    // 2.5% is ~43 cents pitch shift — audible on critical music
-    // listening but well within speech tolerance, and only on the
-    // tail of a burst-recovery transient (steady state stays at the
-    // tiny scale needed for actual clock drift).
-    maxScale:    1.025,
-    minScale:    0.975,
-    rateStep:    0.00002, // integrator step per quantum (base; multiplied by 4x/8x when far from target)
-  }
-  // Server-side per-user jitter buffer. Defaults overwritten by MIXER_JOIN_ACK.
-  public serverTuning = {
-    jitterTarget:   1,    // frames; latency cost = (target − 0.5) × 5 ms
-    jitterMaxDepth: 8,    // frames; cap-drop is 5 ms gone → click
-  }
+  // Live tuning. **Initialised by spreading DEFAULT_PB so there's only
+  // one source of truth** — drift between this and DEFAULT_PB caused
+  // the v4.1.2 regression where migration applied stale defaults.
+  // Don't reintroduce hardcoded numbers here.
+  //
+  // Inline value notes (current as of v4.2.0):
+  //   primeTarget 144 (3 ms @ 48k) — Phase B floor. Was 1440 in v4.1.x;
+  //     the new client PCM PLC absorbs underruns gracefully, so the
+  //     ring no longer needs 30 ms of cushion.
+  //   primeMin 32 (~0.67 ms) — PLC trigger threshold. Lower = trigger
+  //     PLC less, but undershoot risks running the ring negative.
+  //   maxScale ±2.5% — Phase A v4.1 widening; absorbs server mix-tick
+  //     scheduling jitter without pinning at the rail.
+  //   rateStep — integrator step per quantum, scaled 1×/4×/8× by the
+  //     proportional fast-adjust depending on excess.
+  public tuning: { primeTarget: number, primeMin: number, maxScale: number, minScale: number, rateStep: number }
+                = { ...AudioService.DEFAULT_PB }
+  // Server-side per-user jitter buffer. Defaults from DEFAULT_SRV
+  // (single source of truth, see same rationale as tuning above).
+  // Overwritten by MIXER_JOIN_ACK in normal operation.
+  public serverTuning: { jitterTarget: number, jitterMaxDepth: number }
+                     = { ...AudioService.DEFAULT_SRV }
   private tuningChangeCallbacks: Array<() => void> = []
   /** Subscribe to tuning value changes (e.g. from MIXER_JOIN_ACK). UI uses
    *  this to refresh slider positions without polling. */
@@ -1389,6 +1415,35 @@ export class AudioService {
           // around steady state. 2e-5 was the v1.0.25 chosen value.
           this.rateStep    = ${RATE_STEP}
           this.statsTick   = 0   // post stats periodically for the debug strip
+
+          // ── PLC (Packet Loss Concealment) state — Phase B v4.2 ─────────
+          //
+          // When the ring drains (count < primeMin), classic behaviour was
+          // emit silence + set primed=false + wait for ring to refill all
+          // the way to targetCount before resuming. That's a "reprime":
+          // audible click + several quanta of dead air + a fresh latency
+          // floor to climb out of. The rate controller can't tell the
+          // difference between a reprime and a real glitch, so reprime
+          // events also confuse the integrator.
+          //
+          // PLC replaces silence with a *concealment quantum*: replay the
+          // last-emitted 128-sample block with progressive energy decay.
+          // The listener hears the previous signal "ringing out" instead
+          // of a brick wall. If the ring refills within ~10 ms (4 quanta),
+          // we ramp back into real audio with a short crossfade and the
+          // glitch is below perceptual threshold. Only sustained underruns
+          // (>4 quanta) escalate to reprime — those are real network /
+          // server problems, not transient jitter the rate controller
+          // could have ridden out.
+          //
+          // Memory cost: one Float32Array of 128 samples (~512 B).
+          // CPU cost: same as silence path (one fill loop) with a multiply.
+          this.lastBlock     = new Float32Array(128)
+          this.concealQuanta = 0     // how many quanta we've concealed in a row
+          this.concealCount  = 0     // lifetime PLC events (one per "primed → underrun" transition)
+          // Decay envelope per consecutive concealment quantum.
+          // 4 entries = max 4 × ~2.67 ms = ~10.7 ms of PLC before reprime.
+          this.concealDecay  = [1.0, 0.7, 0.4, 0.15]
           this.port.onmessage = (ev) => {
             const m = ev.data
             // Tuning message — runtime knobs from the room debug panel.
@@ -1448,19 +1503,51 @@ export class AudioService {
           if (!channels || !channels[0]) return true
           const out0 = channels[0]
           if (!this.primed || this.count < this.primeMin) {
-            // Cold start / fully drained — emit a clean full-callback silence.
+            // Underrun. Try PLC first; only escalate to silence + reprime
+            // after we've exhausted the concealment budget.
+            //
+            // Three sub-cases:
+            //   1. !this.primed (cold start) — never PLC, just silence
+            //      (we have no last-block content to extend yet).
+            //   2. primed && concealQuanta < 4 — PLC: emit decayed copy
+            //      of lastBlock. Crucially, do NOT set primed=false —
+            //      we want to resume into real audio as soon as count
+            //      crosses primeMin again, NOT wait for a full
+            //      targetCount refill.
+            //   3. primed && concealQuanta >= 4 — give up, silence +
+            //      reprime. This is a real glitch the controller couldn't
+            //      ride out (server died, ~10 ms of network drop, etc.)
+            if (this.primed && this.concealQuanta < this.concealDecay.length) {
+              const decay = this.concealDecay[this.concealQuanta]
+              for (let i = 0; i < out0.length; i++) {
+                out0[i] = this.lastBlock[i % 128] * decay
+              }
+              this.concealQuanta++
+              if (this.concealQuanta === 1) {
+                // Only count one PLC event per "underrun episode" to
+                // mirror the reprime-counting convention.
+                this.concealCount++
+                this.port.postMessage({ type: 'plc', count: this.concealCount })
+              }
+              for (let c = 1; c < channels.length; c++) channels[c].set(out0)
+              return true
+            }
+            // PLC budget exhausted (or never primed) — silence + reprime.
             out0.fill(0)
             for (let c = 1; c < channels.length; c++) channels[c].fill(0)
-            // Only count this as a re-prime event the first time we land
-            // here after a primed state, so we don't keep ticking up while
-            // staying in re-prime across many quanta.
             if (this.primed) {
               this.reprimeCount++
               this.port.postMessage({ type: 'reprime', count: this.reprimeCount })
             }
             this.primed = false
+            this.concealQuanta = 0   // reset — next reprime episode starts fresh
             return true
           }
+          // Reached the normal path. If we just exited concealment, mark
+          // the transition so the post-render ramp-in knows to crossfade
+          // the first few samples.
+          const wasConcealing = this.concealQuanta > 0
+          this.concealQuanta  = 0
           // Slow control loop: nudge rateScale to keep count near target.
           //
           // v1.0.24 had a deadband around target where rateScale drifted
@@ -1521,12 +1608,17 @@ export class AudioService {
             this.count -= (newIdx - idx)
             this.readPos = newReadPos % ${RING_SIZE}
             if (this.count < this.primeMin) {
-              // Mid-callback underrun. Apply a 240-sample (5 ms) raised-
-              // cosine fade to the samples already written before silencing
-              // the rest. Cosine taper is smoother than linear at both
-              // ends — no bend in the envelope's first or last derivative —
-              // so the residual artifact is below the ear's click-detection
-              // threshold even at quiet listening levels.
+              // Mid-callback underrun. Apply a raised-cosine fade to the
+              // samples already written before silencing the rest. Cosine
+              // taper is smoother than linear at both ends — no bend in
+              // the envelope's first or last derivative — so the residual
+              // artifact is below the ear's click-detection threshold
+              // even at quiet listening levels.
+              //
+              // The 240-sample fade-len cap is historical (was 5 ms @
+              // 48 kHz); with Web Audio's 128-sample output quantum the
+              // cap never engages — fadeLen always = i+1 ≤ 128. Kept
+              // for safety in case the quantum size changes upstream.
               const fadeLen = i + 1 < 240 ? i + 1 : 240
               for (let f = 0; f < fadeLen; f++) {
                 // Half-cosine from 1 (at start of fade) to 0 (at end of fade).
@@ -1541,6 +1633,23 @@ export class AudioService {
               break
             }
           }
+          // Ramp-in after concealment: the first 32 samples of the first
+          // post-PLC quantum get a linear 0→1 envelope. This avoids a step
+          // discontinuity between the last (heavily-decayed) concealment
+          // sample and the first real sample. 32 samples = 0.67 ms ramp,
+          // long enough to be inaudible but short enough not to mute a
+          // significant chunk of resumed content.
+          if (wasConcealing) {
+            const rampLen = Math.min(32, out0.length)
+            for (let i = 0; i < rampLen; i++) {
+              out0[i] *= i / rampLen
+            }
+          }
+          // Save this quantum's output for potential PLC use next time.
+          // We snapshot AFTER any ramp-in so the PLC source itself doesn't
+          // contain the previous concealment's tail (would compound
+          // artifacts on back-to-back underruns).
+          this.lastBlock.set(out0.subarray(0, 128))
           for (let c = 1; c < channels.length; c++) channels[c].set(out0)
           return true
         }
@@ -1557,6 +1666,7 @@ export class AudioService {
         const d = ev.data
         if (!d) return
         if (d.type === 'reprime') this.playReprimeCount = d.count
+        else if (d.type === 'plc') this.playPlcCount = d.count
         else if (d.type === 'stats') {
           this.playRateScale = d.rateScale
           this.playRingFill  = d.count
@@ -2817,22 +2927,26 @@ export class AudioService {
    * Estimated mouth-to-ear end-to-end audio latency (ms). Sums every
    * known buffer in the round trip from a talker's mic to a listener's
    * speaker:
-   *   capture frame (5 ms, one Opus frame) +
+   *   capture frame (FRAME_MS, one PCM frame, currently 2.5 ms) +
    *   network RTT (control WS ≈ audio WS) +
-   *   server jitter wait, avg = (jitterTarget − 0.5) × 5 ms +
-   *   server mix tick (5 ms) +
+   *   server jitter wait, avg = (jitterTarget − 0.5) × FRAME_MS +
+   *   server mix tick (FRAME_MS, currently 2.5 ms) +
    *   client playback ring depth (live, samples / sampleRate) +
    *   browser output device latency (audioContext.outputLatency).
    *
    * Returns −1 until the first PONG arrives, since RTT is the only
    * component we don't already know. Recomputed on read — no timer.
+   *
+   * Uses FRAME_MS for the frame-size-dependent terms so the formula
+   * tracks the constant — Phase B v4.2.0 halved this from 5 ms to
+   * 2.5 ms, dropping the static contribution by ~5 ms.
    */
   get audioE2eLatency(): number {
     if (this._audioLatency < 0) return -1
-    const captureMs = 5
+    const captureMs = FRAME_MS
     const rttMs     = this._audioLatency
-    const jitterMs  = Math.max(0, (this.serverTuning.jitterTarget - 0.5) * 5)
-    const mixTickMs = 5
+    const jitterMs  = Math.max(0, (this.serverTuning.jitterTarget - 0.5) * FRAME_MS)
+    const mixTickMs = FRAME_MS
     const sr        = this.audioContext?.sampleRate || 48000
     const ringMs    = (this.playRingFill / sr) * 1000
     // outputLatency is in seconds (Chrome/FF); Safari often omits it.

@@ -207,9 +207,9 @@ tr:last-child td { border-bottom: none; }
         <div id="mapChart"></div>
       </div>
       <div class="panel">
-        <h2>Top 国家</h2>
+        <h2>Top 国家或地区</h2>
         <table>
-          <thead><tr><th></th><th>国家</th><th style="text-align:right">访问</th><th style="text-align:right">独立 IP</th></tr></thead>
+          <thead><tr><th></th><th>国家或地区</th><th style="text-align:right">访问</th><th style="text-align:right">独立 IP</th></tr></thead>
           <tbody id="topCountries"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
         </table>
       </div>
@@ -242,7 +242,7 @@ tr:last-child td { border-bottom: none; }
       <div class="panel">
         <h2>Top 城市</h2>
         <table>
-          <thead><tr><th>城市</th><th>国家</th><th style="text-align:right">访问</th></tr></thead>
+          <thead><tr><th>城市</th><th>国家或地区</th><th style="text-align:right">访问</th></tr></thead>
           <tbody id="topCities"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
         </table>
       </div>
@@ -259,9 +259,38 @@ tr:last-child td { border-bottom: none; }
   </main>
 </div>
 
-<!-- ECharts core. World GeoJSON is loaded + registered at runtime below
-     because ECharts 5 dropped the bundled `map/js/world.js` script. -->
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<!-- ECharts core. World GeoJSON is loaded + registered at runtime below.
+     Multi-source loader: jsdelivr → bootcdn (China-friendly) → unpkg.
+     If all fail (offline / firewall), shows a helpful error message. -->
+<script>
+(function () {
+  var sources = [
+    'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js',
+    'https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js',
+    'https://unpkg.com/echarts@5.5.0/dist/echarts.min.js',
+  ];
+  var i = 0;
+  function tryNext() {
+    if (i >= sources.length) {
+      document.body.innerHTML = '<div style="padding:40px;color:#ef4444;font-family:sans-serif;background:#0b0e14;color:#e6edf3;min-height:100vh">'
+        + '<h2 style="color:#ef4444">无法加载 ECharts</h2>'
+        + '<p>所有 CDN 源都失败（jsdelivr / bootcdn / unpkg）。检查一下网络，或者把 echarts.min.js 下到 public/admin/ 用本地路径。</p></div>';
+      return;
+    }
+    var s = document.createElement('script');
+    s.src = sources[i++];
+    s.onload = function () {
+      console.log('[echarts] loaded from', s.src);
+      var ev = document.createEvent('Event');
+      ev.initEvent('echarts-ready', true, true);
+      document.dispatchEvent(ev);
+    };
+    s.onerror = tryNext;
+    document.head.appendChild(s);
+  }
+  tryNext();
+})();
+</script>
 
 <script>
 // ───────────────────────────────────────────────────────────────────────────
@@ -416,12 +445,7 @@ function renderMap(points, countries) {
   const baseGeo = worldMapReady
     ? {
         map: 'world',
-        // `roam: 'move'` allows panning but disables wheel zoom — wheel
-        // zoom triggers a full re-render on every tick which is the
-        // second-biggest perf hit on a low-end laptop. Use the +/- buttons
-        // (or pinch on trackpad) if you need to zoom in.
-        roam: 'move',
-        scaleLimit: { min: 1, max: 4 },
+        roam: false,         // panning + zoom disabled per user preference
         itemStyle: { areaColor: '#161b25', borderColor: '#1f2632' },
         emphasis: {
           disabled: true,    // no hover-fill repaint on every region
@@ -431,7 +455,7 @@ function renderMap(points, countries) {
         animation: false,
       }
     : {
-        roam: 'move',
+        roam: false,
         zoom: 1,
         center: [0, 20],
         animation: false,
@@ -443,9 +467,16 @@ function renderMap(points, countries) {
     tooltip: {
       trigger: 'item',
       transitionDuration: 0, // tooltips don't fade — instant or nothing
-      formatter: (p) => p.componentSubType === 'scatter'
-        ? `<b>${p.data.name}</b><br/>访问 ${p.data.value[2]}<br/>独立 IP ${p.data.uniques}`
-        : `<b>${p.name}</b><br/>访问 ${(maxByCountry[p.data?.code] || 0)}`,
+      formatter: (p) => {
+        if (p.componentSubType === 'scatter') {
+          return `<b>${p.data.name}</b><br/>访问 ${p.data.value[2]}<br/>独立 IP ${p.data.uniques}`;
+        }
+        // Map/geo region: only show tooltip for countries that actually have visits.
+        // Without this, hovering blank countries shows "访问 0".
+        const visits = maxByCountry[p.data?.code];
+        if (!visits) return '';
+        return `<b>${p.name}</b><br/>访问 ${visits}`;
+      },
     },
     geo: baseGeo,
     series: [],
@@ -665,13 +696,21 @@ renderMap = function (points, countries) {
   _origRenderMap(points, countries);
 };
 
-if (TOKEN) {
-  showApp();
-  initCharts();
-  refreshAll();
-} else {
-  showLogin();
+// ECharts is loaded asynchronously by the loader script above. Defer the
+// boot path that calls initCharts() until echarts is on window — otherwise
+// `echarts.init` throws ReferenceError, the rest of this script never
+// executes, and any const declared below stays in TDZ (renderMap fails).
+function bootApp() {
+  if (TOKEN) {
+    showApp();
+    initCharts();
+    refreshAll();
+  } else {
+    showLogin();
+  }
 }
+if (typeof echarts !== 'undefined') bootApp();
+else document.addEventListener('echarts-ready', bootApp, { once: true });
 
 // ─── ISO 3166-1 alpha-2 → ECharts world map name (subset of common ones) ──
 const ISO_TO_NAME = {

@@ -35,9 +35,14 @@ const CODEC_PCM16      = 0;
 const CODEC_HANDSHAKE  = 0xFF;
 
 const SAMPLE_RATE      = 48000;
-const FRAME_SAMPLES    = 240;          // 5 ms @ 48 kHz mono
+// Phase B v4.2.0: server now ticks at 2.5 ms (audio_frames=120). Test
+// must produce frames at the SAME cadence the server consumes, otherwise
+// the jitter buffer over/underfills and the SNR/THD measurement degrades
+// for reasons unrelated to actual audio quality. Keep this in sync with
+// `MIX_INTERVAL_US` in `mixer_server.h` and `FRAME_MS` in audioService.ts.
+const FRAME_SAMPLES    = 120;          // 2.5 ms @ 48 kHz mono
 const FRAME_BYTES      = FRAME_SAMPLES * 2;
-const FRAME_INTERVAL_MS = 5;
+const FRAME_INTERVAL_MS = 2.5;
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -226,26 +231,32 @@ function* sineFrames(freq, amp, sigma, sampleRate, framesTotal) {
 
 // Voice-like signal for jitter / PLC tests.
 //
-// Design: a 200 Hz carrier (period exactly 240 samples = one frame) with
-// a 5 Hz amplitude-modulation envelope on top. Per-frame phase stays
-// continuous, so a clean broadcast looks like a smooth AM-modulated sine
-// — the click detector reports 0 events. But when a PLC tick fires, the
-// mixer repeats the previous frame: the carrier phase still aligns at
-// the boundary (because the period is one frame), but the *amplitude*
-// is the prev frame's amplitude, while the next-real-frame's amplitude
-// would have been different by a few percent. That mismatch shows up
-// as a sample-step at the boundary, exactly the kind of signature the
+// Design: a 400 Hz carrier (period exactly 120 samples = one frame at
+// the Phase B v4.2.0 frame size) with a 5 Hz amplitude-modulation
+// envelope on top. Per-frame phase stays continuous, so a clean
+// broadcast looks like a smooth AM-modulated sine — the click detector
+// reports 0 events. But when a PLC tick fires, the mixer repeats the
+// previous frame: the carrier phase still aligns at the boundary
+// (because the period is one frame), but the *amplitude* is the prev
+// frame's amplitude, while the next-real-frame's amplitude would have
+// been different by a few percent. That mismatch shows up as a
+// sample-step at the boundary, exactly the kind of signature the
 // 6σ d2 detector flags.
+//
+// (Pre-v4.2.0 used a 200 Hz carrier matching the 240-sample frame.
+// Frequency doubled when frame size halved so the "period == one
+// frame" PLC-detection invariant still holds.)
 //
 // Why not noise: white noise's per-sample d2 magnitude is so large that
 // the local-std threshold drowns out the PLC-boundary step entirely.
 // The detector is unbiased but not informative.
 //
-// Why not pure sine: 1 kHz sine has period 48 samples (5 cycles per
-// frame), so PLC repeat is phase-aligned and looks bit-exact like a
-// continuation. No detectable click even when PLC fires every frame.
+// Why not pure sine: 1 kHz sine has period 48 samples (2.5 cycles per
+// 120-sample frame), so PLC repeat is phase-aligned and looks bit-exact
+// like a continuation. No detectable click even when PLC fires every
+// frame.
 function* voiceFrames(amp, sampleRate, framesTotal) {
-  const f0 = 200;                                 // carrier — period = 240 samples
+  const f0 = 400;                                 // carrier — period = 120 samples
   const dPhase = 2 * Math.PI * f0 / sampleRate;
   const envHz = 5;                                // 5 Hz AM envelope (200 ms cycle)
   let phase = 0;
@@ -316,11 +327,11 @@ function pcm16BufToFloat(buf) {
 // Frame-boundary click detector for PLC / buffer-drop events.
 //
 // Failure modes we care about both manifest at the boundary between two
-// 240-sample server-tick packets in the receiver's capture buffer.
-// First-difference at that boundary is *not* a useful signature for our
-// voice-like test signal: the AM-modulated 200 Hz sine has period equal
-// to the frame, so sample[boundary] and sample[boundary+1] are both 0
-// either way (PLC fill or fresh frame). The signature shows up in the
+// 120-sample server-tick packets in the receiver's capture buffer (was
+// 240 pre-v4.2.0). First-difference at that boundary is *not* a useful
+// signature for our voice-like test signal: the AM-modulated 400 Hz
+// sine has period equal to the frame, so sample[boundary] and
+// sample[boundary+1] are both 0 either way (PLC fill or fresh frame). The signature shows up in the
 // *second* derivative — the transition into the next sample's slope is
 // where the amplitude change between A_prev and A_next becomes visible.
 //
@@ -601,13 +612,17 @@ async function main() {
   const clk = detectClicks(window);
 
   // Measure the server's actual broadcast rate from receive timestamps.
-  // Should be ~200/s with the v1.0.28 absolute-deadline timer; significant
-  // deviation indicates timer drift has crept back in.
+  // Should be ~400/s with v4.2.0's 2.5 ms tick (was 200/s pre-Phase B).
+  // Nominal rate = 1000 / FRAME_INTERVAL_MS, derived so this stays
+  // correct across future tick changes. Significant deviation indicates
+  // timer drift has crept back in (the absolute-deadline scheduler
+  // should keep us within ±5000 ppm).
+  const NOMINAL_RATE = 1000 / FRAME_INTERVAL_MS;
   const rxDurationSec = Number(lastRxTime - firstRxTime) / 1e9;
   const broadcastRate = rxDurationSec > 0 ? rxLossWindow.size / rxDurationSec : 0;
-  const ratePpm = broadcastRate > 0 ? Math.round((broadcastRate / 200 - 1) * 1e6) : 0;
+  const ratePpm = broadcastRate > 0 ? Math.round((broadcastRate / NOMINAL_RATE - 1) * 1e6) : 0;
   const ratePpmSign = ratePpm >= 0 ? '+' : '';
-  const RATE_PPM_BUDGET = 5000;  // ≤ 0.5 % away from 200/s
+  const RATE_PPM_BUDGET = 5000;  // ≤ 0.5 % away from nominal
 
   const ratePass = Math.abs(ratePpm) <= RATE_PPM_BUDGET;
   // SNR / THD pass criteria are skipped automatically when (a) jitter is
@@ -653,7 +668,7 @@ async function main() {
   console.log(`[test] tx frames:  ${txCount}`);
   console.log(`[test] rx packets: ${rxLossWindow.size}`);
   console.log(`[test] broadcast rate: ${broadcastRate.toFixed(2)}/s ` +
-              `(${ratePpmSign}${ratePpm} ppm vs 200/s, budget ±${RATE_PPM_BUDGET})`);
+              `(${ratePpmSign}${ratePpm} ppm vs ${NOMINAL_RATE}/s, budget ±${RATE_PPM_BUDGET})`);
   console.log(`[test] signal:     ${opts.signal}` + (opts.signal === 'sine' ? ` ${opts.freq} Hz` : ''));
   console.log(`[test] window:     ${window.length} samples (${(window.length / SAMPLE_RATE).toFixed(3)} s)`);
   if (opts.signal === 'sine') {

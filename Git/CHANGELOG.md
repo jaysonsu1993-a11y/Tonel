@@ -5,6 +5,139 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] - 2026-04-30
+
+### Phase B — 压管线缓冲（PCM PLC + primeTarget 30→3 ms + frame 5→2.5 ms）
+
+Second MINOR of the v4.x latency-optimisation roadmap. Three
+client-and-server changes that together shrink the e2e latency
+budget by ~8-10 ms and largely eliminate audible reprimes.
+
+**Headline numbers (expected, vs v4.1.3 on the same hardware):**
+- Steady-state e2e: ~32-40 ms → ~25-32 ms (-7 ms)
+- reprime / 5-min session: single digits → ~0
+- Click events / minute: rare → essentially never
+
+#### B.1 — primeTarget default 1440 → 144 samples (30 ms → 3 ms)
+
+The client playback ring's "depth target" used to be 30 ms — a
+generous cushion against burst arrival, jitter, and clock drift,
+but a flat ~30 ms tax on every user's e2e latency. Phase B's PLC
+(B.2 below) makes underruns recoverable without a click + ring
+reset, so the cushion can shrink dramatically. 3 ms is just above
+Web Audio's 128-sample (~2.7 ms) output quantum — the physical
+floor.
+
+`primeMin` also tightened from 128 → 32 samples (~0.67 ms) since
+PLC now activates at 32 instead of triggering full reprime.
+
+`audioService.ts` `DEFAULT_PB.primeTarget` and `primeMin` updated;
+`tuning` initialiser now spreads from `DEFAULT_PB` (single source
+of truth) so future bumps can't have the v4.1.2 drift bug again.
+
+`TUNING_SCHEMA_VERSION` bumped 2 → 3 — saved-tuning slots from
+v4.1.x carry primeTarget=1440 and would silently keep users on the
+v4.1.x latency floor without this discard.
+
+#### B.2 — Client PCM PLC (Packet Loss Concealment)
+
+Replaces the start-of-callback "ring drained → silence + reprime"
+behaviour with progressive concealment using the last emitted
+quantum. Algorithm:
+
+```
+0–1 quanta of underrun: full lastBlock energy
+2 quanta:               70% energy
+3 quanta:               40% energy
+4 quanta:               15% energy
+≥5 quanta (~10 ms):     give up → silence + reprime + reset
+```
+
+When the ring refills mid-concealment and we resume normal output,
+a 32-sample (~0.67 ms) linear ramp-in crossfades from the last
+concealed sample to the new audio — keeps the transition below
+perceptual click threshold.
+
+State cost: one Float32Array(128) (~512 B). CPU cost: same as the
+silence path (one fill loop) plus a multiply.
+
+The mid-callback underrun path (cosine fade-out + zero-fill the
+remainder of the quantum) is unchanged — it handles the rarer case
+of underrun discovered partway through rendering.
+
+New stat `playPlcCount` exposed on `audioService` and rendered in
+the debug panel as `plc=N` next to `reprime=N`. Healthy ratio:
+many `plc`, near-zero `reprime` = controller riding small jitter
+gracefully. Many `reprime` relative to `plc` = sustained drops PLC
+couldn't mask (network or server died for >10 ms).
+
+#### B.3 — Frame size 5 ms → 2.5 ms (client + server, breaking)
+
+The capture frame and server mix tick both halved from 5 ms (240
+samples @ 48 k) to 2.5 ms (120 samples). Saves 2.5 ms each side =
+~5 ms of e2e budget. Cost: packet rate 200 fps → 400 fps; SPA1
+header overhead share doubles (76 B / 240 B = 32% vs the old
+76 B / 480 B = 16%). Total bandwidth still well under 1 Mbps for
+PCM16, no concern.
+
+`audioService.ts`: new `FRAME_MS = 2.5` constant; `FRAME_SAMPLES`
+now derives from it (was the literal 240). The e2e formula updated
+to use `FRAME_MS` for the capture / mix-tick / jitter terms so it
+auto-tracks the constant.
+
+`mixer_server.h`: `MIX_INTERVAL_US = 5000 → 2500`; `audio_frames`
+default 240 → 120. Constructor signature updated (the only caller
+in production passes the default).
+
+`mixer_server.cpp`: first-fire timer delay 5 → 2 (libuv granularity
+is 1 ms; the absolute-deadline scheduler absorbs the alternating
+2/3 ms rounding so average tick is exactly 2.5 ms). Level-broadcast
+throttle bumped from "every 10 ticks" to "every 20 ticks" so the
+~20 Hz LEVEL message rate is preserved.
+
+**Breaking change for native AppKit clients**: they assume 240-sample
+frames (5 ms) and will mis-decode the new 120-sample broadcasts.
+Native clients are currently in `Tonel-Desktop(Legacy)` directory
+and not in active use; updating them is a separate task. **If you
+are running native AppKit clients in production, do not deploy
+v4.2.0 yet** — fall back to v4.1.3 until native is updated.
+
+#### Test infrastructure updates
+
+Layer 1 (`audio_quality_e2e.js`): `FRAME_SAMPLES` 240 → 120,
+`FRAME_INTERVAL_MS` 5 → 2.5, voice-test carrier frequency 200 Hz →
+400 Hz (preserving the "period == one frame" PLC-detection
+invariant). Broadcast-rate assertion now uses `1000 / FRAME_INTERVAL_MS`
+as the nominal target so it tracks the constant.
+
+Layer 2 (`browser_audio_test.js` + `test_page.html`): `FRAME_SAMPLES`
+mirror updated. `test_page.html`'s embedded test-only worklet kept
+on its old defaults (it's a synthetic-input quality test, not a
+production worklet mirror).
+
+Layer 6 (`state_migration_test.js`): added v:2 → v:3 prev-schema
+discard scenario. Existing scenarios refactored to read live
+`DEFAULT_PB` so they self-update across future Phase bumps.
+
+Pretest result on dev machine: all 6 layers PASS clean (no
+retries needed for Layer 2 this run).
+
+#### Validation done
+
+- `npx tsc --noEmit` — clean
+- C++ build (`cmake --build`) — clean
+- `Git/scripts/pretest.sh` — all 6 layers PASS
+- `state_migration_test.js` — 4/4 scenarios PASS (stale, prev,
+  current, no-slot)
+
+#### Roadmap status
+
+[`local_docs/ROADMAP_V4_LATENCY.md`](local_docs/ROADMAP_V4_LATENCY.md)
+Phase B section will be marked `**已完成**`. Phase B's "B.1 must
+precede B.3" sequencing was honoured (B.2 PLC enabled → B.1
+primeTarget reduction safe → B.3 frame size halving last). Next:
+Phase C v4.3.x — adaptive jitter buffer (NetEQ-style).
+
 ## [4.1.3] - 2026-04-30
 
 ### Added — pretest Layer 6: state migration test (固化 v4.1.1/v4.1.2 教训)

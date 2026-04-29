@@ -2,8 +2,10 @@
 
 Lightweight visitor analytics + admin dashboard for **tonel.io**.
 
-Mirrors the layout of `Git/user-service` (Express + sqlite3 + JWT) so it
-slots into the same PM2 / `deploy/` workflow.
+Standalone service. Located at `Tonel/analytics-service/` (root, NOT under
+`Git/`). Mirrors `Git/user-service`'s code style (Express + sqlite3 + JWT)
+so it slots into the same PM2 / `Git/deploy/` workflow on the production
+server.
 
 ## What it gives you
 
@@ -19,7 +21,7 @@ slots into the same PM2 / `deploy/` workflow.
 ## Quick start
 
 ```bash
-cd Git/analytics-service
+cd analytics-service
 rm -rf node_modules           # remove sandbox-test symlinks (if present)
 cp .env.example .env          # edit ADMIN_PASSWORD before exposing publicly
 npm install                   # ~30s, downloads geoip-lite DB (~30 MB)
@@ -42,7 +44,7 @@ node --experimental-sqlite test-smoke.js
 
 ## Embed the tracker on the public site
 
-Add to `Git/web/index.html` (or any page that should report visits):
+Add to `Tonel/Git/web/index.html` (or any page that should report visits):
 
 ```html
 <script src="https://analytics.tonel.io/tracker.js"

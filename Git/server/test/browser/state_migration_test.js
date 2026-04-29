@@ -120,7 +120,19 @@ async function runInPage(page) {
     const Cls = mod.AudioService;
     const loadFn = Cls.prototype.loadRoomTuningIntoState;
 
+    // Snapshot CURRENT defaults so the assertions below stay correct
+    // across future Phase bumps (each Phase that touches DEFAULT_PB
+    // will change these numbers, but the test logic stays the same:
+    // post-discard state should equal whatever DEFAULT_PB currently is).
+    const CURRENT_V = mod.AudioService.TUNING_SCHEMA_VERSION;
+    const CUR_PT    = mod.AudioService.DEFAULT_PB.primeTarget;
+    const CUR_MIN   = mod.AudioService.DEFAULT_PB.primeMin;
+    const CUR_MAX   = mod.AudioService.DEFAULT_PB.maxScale;
+
     // ── Scenario 1: stale (no `v`) → discard + apply CURRENT defaults ──
+    // Catches the v4.1.2 regression class: schema check passes but the
+    // reset path applies stale constants. Asserts against live DEFAULT_PB
+    // so this test self-updates as defaults move.
     {
       const ROOM = 'MIGTEST_S1', USER = 'TestUser';
       const KEY  = `tonel.tuning.${ROOM}:${USER}`;
@@ -135,28 +147,61 @@ async function runInPage(page) {
       const slotAfter = localStorage.getItem(KEY);
 
       const pass = (slotAfter === null
-                 && after.maxScale === 1.025
-                 && after.minScale === 0.975
-                 && after.primeTarget === 1440);
+                 && after.maxScale === CUR_MAX
+                 && after.primeTarget === CUR_PT
+                 && after.primeMin === CUR_MIN);
       out.push({
-        name: 'stale slot → discarded + current defaults applied',
+        name: 'stale (no-v) slot → discarded + current defaults applied',
         pass,
-        message: pass ? 'OK' : `slotAfter=${slotAfter} after.maxScale=${after.maxScale} after.primeTarget=${after.primeTarget}`,
+        message: pass ? `OK (defaults: pt=${CUR_PT} pm=${CUR_MIN} max=${CUR_MAX})`
+                      : `slotAfter=${slotAfter} after=${JSON.stringify(after)}`,
       });
       localStorage.removeItem(KEY);
     }
 
-    // ── Scenario 2: current (v:N) → preserved with user's custom values ──
-    {
-      const ROOM = 'MIGTEST_S2', USER = 'TestUser';
+    // ── Scenario 2: PREVIOUS-version (v:CURRENT-1) → also discarded ──
+    // Each phase bumps TUNING_SCHEMA_VERSION; this scenario asserts the
+    // discard logic catches the version directly below current. Without
+    // this, a future bump that breaks the `v < CURRENT` comparison (e.g.
+    // typo'd to `<=` or wrong CURRENT_VERSION constant) would silently
+    // preserve stale blobs.
+    if (CURRENT_V > 1) {
+      const ROOM = 'MIGTEST_S2_PREV', USER = 'TestUser';
       const KEY  = `tonel.tuning.${ROOM}:${USER}`;
-      // Read the schema version the code currently uses by inspecting
-      // a freshly-saved blob (we can't directly read the private static).
-      // Plant a blob at exactly that version with user-customised values.
-      const CURRENT_V = mod.AudioService.TUNING_SCHEMA_VERSION;
+      localStorage.setItem(KEY, JSON.stringify({
+        v: CURRENT_V - 1,
+        client: { primeTarget: 1440, primeMin: 128, maxScale: 1.025, minScale: 0.975, rateStep: 0.00002 },
+        server: { jitterTarget: 1, jitterMaxDepth: 8 },
+      }));
+      svc.userId = USER; svc.roomId = ROOM;
+      loadFn.call(svc);
+      const after = { ...svc.tuning };
+      const slotAfter = localStorage.getItem(KEY);
+
+      const pass = (slotAfter === null
+                 && after.primeTarget === CUR_PT
+                 && after.primeMin === CUR_MIN);
+      out.push({
+        name: `prev-schema (v:${CURRENT_V - 1}) slot → discarded + current defaults applied`,
+        pass,
+        message: pass ? 'OK' : `slotAfter=${slotAfter} primeTarget=${after.primeTarget} primeMin=${after.primeMin}`,
+      });
+      localStorage.removeItem(KEY);
+    }
+
+    // ── Scenario 3: CURRENT (v:CURRENT) → preserved with user values ──
+    // Catches "schema check too aggressive, eats valid current-schema
+    // slots" regression. User values must overlay the defaults.
+    {
+      const ROOM = 'MIGTEST_S3_CUR', USER = 'TestUser';
+      const KEY  = `tonel.tuning.${ROOM}:${USER}`;
+      // Plant CURRENT-schema blob with user-customised values that
+      // intentionally differ from the live DEFAULT_PB so we can tell
+      // which one took effect.
+      const customPT = CUR_PT === 72 ? 96 : 72;  // anything != current default
       localStorage.setItem(KEY, JSON.stringify({
         v: CURRENT_V,
-        client: { primeTarget: 144, primeMin: 16, maxScale: 1.025, minScale: 0.975, rateStep: 0.00002 },
+        client: { primeTarget: customPT, primeMin: 16, maxScale: 1.025, minScale: 0.975, rateStep: 0.00002 },
         server: { jitterTarget: 1, jitterMaxDepth: 8 },
       }));
       svc.userId = USER; svc.roomId = ROOM;
@@ -165,23 +210,24 @@ async function runInPage(page) {
       const slotAfter = localStorage.getItem(KEY);
 
       const pass = (slotAfter !== null
-                 && after.primeTarget === 144
+                 && after.primeTarget === customPT
                  && after.primeMin === 16);
       out.push({
-        name: 'current-schema slot → preserved + user values applied',
+        name: `current-schema (v:${CURRENT_V}) slot → preserved + user values applied`,
         pass,
-        message: pass ? `OK (v=${CURRENT_V} preserved)` : `slotKept=${slotAfter !== null} primeTarget=${after.primeTarget} primeMin=${after.primeMin}`,
+        message: pass ? `OK (custom pt=${customPT} preserved)`
+                      : `slotKept=${slotAfter !== null} primeTarget=${after.primeTarget} primeMin=${after.primeMin}`,
       });
       localStorage.removeItem(KEY);
     }
 
-    // ── Scenario 3: empty / no slot → defaults applied (basic sanity) ──
+    // ── Scenario 4: empty / no slot → defaults applied (basic sanity) ──
     {
-      const ROOM = 'MIGTEST_S3', USER = 'TestUser';
+      const ROOM = 'MIGTEST_S4_NONE', USER = 'TestUser';
       svc.userId = USER; svc.roomId = ROOM;
       loadFn.call(svc);
       const after = { ...svc.tuning };
-      const pass = (after.maxScale === 1.025 && after.primeTarget === 1440);
+      const pass = (after.maxScale === CUR_MAX && after.primeTarget === CUR_PT);
       out.push({
         name: 'no-slot → defaults applied',
         pass,

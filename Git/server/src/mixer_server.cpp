@@ -252,14 +252,16 @@ void MixerServer::start() {
                   << udp_port_ << std::endl;
     }
 
-    // ── Timer: 5ms periodic mixing, absolute-deadline anchored ────
-    // First fire 5 ms from now; thereafter handle_mix_timer re-arms with
-    // a one-shot delay that's computed against the absolute deadline,
-    // not against "now after the previous fire".
+    // ── Timer: 2.5ms periodic mixing, absolute-deadline anchored ────
+    // First fire ~2.5 ms from now (libuv granularity is 1 ms so we use
+    // 2 — close enough for the first tick); thereafter handle_mix_timer
+    // re-arms with a one-shot delay computed against the absolute
+    // deadline, not against "now after the previous fire". The
+    // alternating 2/3-ms rounding averages exactly 2.5 ms.
     mix_next_deadline_us_ = uv_hrtime() / 1000ULL + MIX_INTERVAL_US;
-    uv_timer_start(&mix_timer_, &MixerServer::on_mix_timer, 5, 0);
-    std::cout << "[MixerServer] Timed mixing enabled (5ms interval, "
-              << audio_frames_ << " frames/packet, absolute-deadline scheduled)" << std::endl;
+    uv_timer_start(&mix_timer_, &MixerServer::on_mix_timer, 2, 0);
+    std::cout << "[MixerServer] Timed mixing enabled (2.5ms interval, "
+              << audio_frames_ << " samples/packet, absolute-deadline scheduled)" << std::endl;
 }
 
 // ============================================================
@@ -991,7 +993,7 @@ void MixerServer::broadcast_levels(Room* room) {
 }
 
 // ============================================================
-// Timed mixing — 5ms periodic mixer to unify frame boundaries
+// Timed mixing — 2.5ms periodic mixer to unify frame boundaries
 // ============================================================
 
 void MixerServer::on_mix_timer(uv_timer_t* handle) {
@@ -1020,7 +1022,7 @@ void MixerServer::handle_mix_timer() {
     while (now_us >= mix_next_deadline_us_) {
         bool send_levels = false;
         level_tick_counter_++;
-        if (level_tick_counter_ >= 10) {  // every 10 ticks (50 ms) ≈ 20 Hz
+        if (level_tick_counter_ >= 20) {  // every 20 ticks @ 2.5ms = 50 ms ≈ 20 Hz
             level_tick_counter_ = 0;
             send_levels = true;
         }
@@ -1054,11 +1056,11 @@ void MixerServer::handle_mix_timer() {
                 // with the previous frame at fade(decayCount).
             }
 
-            // Broadcast unconditionally per 5 ms tick — clients depend on a
-            // continuous 200 Hz packet stream to keep their playback ring
+            // Broadcast unconditionally per 2.5 ms tick — clients depend on a
+            // continuous 400 Hz packet stream to keep their playback ring
             // primed. With consume-style mix, an empty mix is exactly
-            // silence (480 zero bytes), so the cost of broadcasting on
-            // idle ticks is bandwidth, not audio glitches.
+            // silence (240 zero bytes @ 120 samples × PCM16), so the cost
+            // of broadcasting on idle ticks is bandwidth, not audio glitches.
             room->pending_mix = false;
             mix_sequence_++;
             broadcast_mixed_audio(room, mix_sequence_, room->latest_timestamp);

@@ -225,7 +225,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
         `ws=${audioService.audioWsState} cap=${cap} ` +
         `tx=${audioService.txCount} rx=${audioService.rxCount} play=${audioService.playCount} ` +
         `rxPeak=${audioService.rxLevelPeak.toFixed(3)} micClip=${audioService.captureClipCountValue} ` +
-        `repri=${audioService.playReprimeCount} gap=${audioService.rxSeqGapCount} ` +
+        `repri=${audioService.playReprimeCount} plc=${audioService.playPlcCount} gap=${audioService.rxSeqGapCount} ` +
         `ring=${audioService.playRingFill} rate=${rateStr}ppm${muteFlag}`
       )
     }, 500)   // 2 Hz → enough to see roomUsers transitions when peer joins/leaves
