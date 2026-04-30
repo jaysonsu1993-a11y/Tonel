@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.4] - 2026-04-30
+
+### Reverted — Phase C adaptive jitter target (acoustic regression)
+
+User reported v4.3.3 sounding "significantly worse" than v4.2.3 in
+real-session validation. Live data confirmed:
+
+```
+v4.2.3 (good):    ring=429  rate=-1599  reprime=3   plc=911
+v4.3.3 (bad):     ring=840  rate=+5219  reprime=18  plc=755
+```
+
+`reprime` 6× and `ring` 2× is a real regression, not network
+noise. The user never got to validate v4.3.0 (Phase C alone)
+before D.0/audit work piled on top.
+
+#### Diagnosis
+
+Phase C v4.3.0 introduced adaptive `jitter_target` server-side.
+The mix tick reads `jitter_estimator.target()` and trims the
+queue when target shrinks. Combined with the audit's P0-1
+(hysteresis fix made adaptive *more* responsive) and P0-2
+(tightened user-floor → adaptive can't go to 0), `eff_target`
+likely oscillates frequently under realistic network noise. Each
+oscillation triggers a queue trim — drops the oldest frame — and
+each trim is an audible discontinuity. Multiple per second → the
+buzzy distortion the user heard.
+
+The Layer 1.5 jitter sweep in pretest doesn't catch this because
+it injects synthetic noise patterns that the test framework
+correlates with click events at the broadcast boundary, not at
+the queue-trim boundary inside the mix tick.
+
+#### Fix
+
+`mixer_server.cpp` `handle_mix_timer`: `eff_target` now reads
+`uep.jitter_target` directly (the static / MIXER_TUNE value,
+default 1) instead of the estimator's adaptive output.
+Effectively restores v4.2.3's mix tick behaviour.
+
+The `JitterEstimator` itself is left in place — it still records
+IATs on every UDP receive, so the data is there for a future
+re-enablement once we figure out a control law that doesn't
+oscillate under realistic conditions. To re-enable, change one
+line back to:
+```cpp
+const int eff_target = std::max(uep.jitter_target, uep.jitter_estimator.target());
+```
+
+#### Lessons recorded
+
+This is the second time in v4.x that an "obvious correctness fix"
+turned out to make audio worse:
+- v4.1.x: tighter primeMin made PLC fire more often → buzz
+- v4.3.x: adaptive jitter trim → discontinuity buzz
+
+The Layer 1.5 jitter sweep test passes for both regressions
+because the test grades on click rate at packet-boundaries, not
+on subtle queue-state discontinuities. **Real-user testing
+remains the only way to catch acoustic regressions in this code
+path.** Future Phase C re-enablement attempts must be A/B'd
+against v4.2.3 baseline by an actual ear before shipping.
+
+#### Validation
+
+- Server build clean
+- pretest 6/6 PASS
+- Phase C estimator code path remains exercised (Layer 1.5 still
+  feeds IATs to the estimator), only the consumer is bypassed
+
 ## [4.3.3] - 2026-04-30
 
 ### Fixed — wt-mixer-proxy Go binary leaking into release commits

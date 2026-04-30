@@ -1154,22 +1154,27 @@ void MixerServer::handle_mix_timer() {
             // empty due to a delayed packet).
             for (auto& user_kv : room->users) {
                 UserEndpoint& uep = user_kv.second;
-                // Phase C v4.3.0 — read the adaptive target from the
-                // estimator instead of the static uep.jitter_target.
-                // The user-saved jitter_target acts as a FLOOR (min
-                // value the adaptive computation can pick). Power
-                // users who explicitly set jitter_target=4 because of
-                // known network conditions still get at least 4 frames
-                // of buffer; default users (jitter_target=1) let
-                // adaptive go as low as 1, never to 0 — keeps a
-                // minimum cushion for the natural tick jitter that
-                // even good networks have.
+                // Phase C v4.3.0 introduced an adaptive jitter target
+                // (estimator chooses target from observed IAT). v4.3.4
+                // BYPASSES that — falls back to the user's static
+                // jitter_target (default 1, configurable via MIXER_TUNE).
                 //
-                // v4.3.2 fix: previously did std::max(0, ...) which
-                // contradicted the comment claim of a user floor and
-                // allowed adaptive=0 to drop the prime gate to a
-                // never-trips check (queue.size() >= 0 is always true).
-                const int eff_target = std::max(uep.jitter_target, uep.jitter_estimator.target());
+                // Why: v4.3.3 real-session validation showed reprime
+                // count 6× v4.2.3 (3 → 18) and ring depth 2× (429 →
+                // 840) on the same audio path. Suspect interaction
+                // between adaptive's trim-on-shrink (drops oldest
+                // frames each time target shrinks → audible
+                // discontinuity) and the audit-tightened hysteresis
+                // (P0-1 in v4.3.2 made adaptive react faster, so
+                // target oscillates more under noise). Net acoustic
+                // regression for users on stable networks.
+                //
+                // The estimator still runs (recording IATs), so when
+                // we re-enable adaptive in a future release the data
+                // is there. Just the read path is bypassed for now.
+                // To re-enable: change `eff_target` back to
+                // `std::max(uep.jitter_target, uep.jitter_estimator.target())`.
+                const int eff_target = uep.jitter_target;
                 if (!uep.jitter_primed) {
                     if (static_cast<int>(uep.jitter_queue.size()) >= eff_target) {
                         uep.jitter_primed = true;
