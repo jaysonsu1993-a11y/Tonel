@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0] - 2026-04-30
+
+### Changed — production server migration: Aliyun → 酷番云广州
+
+`tonel.io/` now talks to the Guangzhou server (42.240.163.172) instead
+of the Aliyun ECS in eastern China. Reason: Aliyun bandwidth tier
+became the bottleneck (mixer's broadcast scales linearly with
+concurrent users; ~100 Mbps cap on the Aliyun plan was insufficient
+for current growth). 酷番云 plan is ~100 Mbps up/down, sufficient
+headroom.
+
+`tonel.io/new` is now the **Aliyun fallback path**: the URL is
+preserved (so old links / bookmarks don't break), but DNS for the
+hostnames behind /new (`srv-new.tonel.io`, `api-new.tonel.io`) is
+swapped to point at the old Aliyun box. This is the inverse of v4.3.x
+where /new was the test deployment on the new server.
+
+### Implementation
+
+DNS-A swap (manual via CF dashboard at cutover):
+
+| Hostname | v4.3.11 → | v5.0.0 → |
+|---|---|---|
+| `srv.tonel.io` (DNS-only) | 8.163.21.207 (Aliyun) | **42.240.163.172** (酷番云) |
+| `srv-new.tonel.io` (DNS-only) | 42.240.163.172 (酷番云) | **8.163.21.207** (Aliyun) |
+| `api.tonel.io` (CNAME) | old tunnel `339745d7-...` | **new tunnel** `6fb5a319-...` |
+| `api-new.tonel.io` (CNAME) | new tunnel | **old tunnel** |
+
+Both servers' nginx now serve both hostnames; both servers'
+cloudflared route both api hostnames. Whichever server gets traffic is
+determined entirely by DNS, so the swap is the only "moment" of
+cutover. Pre-staged config means a single DNS edit promotes the new
+production with ~2 min for HTTP-01 cert issuance window.
+
+### Web transport-selection inversion
+
+`audioService.chooseAudioTransport()` flipped: `/` now force-selects
+WSS (because the 酷番云 UDP path bursts datagrams — see
+[project_kufan_udp_burst memory] / v4.3.11 entry), and `/new` now
+gets the WT default (because Aliyun's UDP path is clean — that's
+where WT used to live in production).
+
+Trade-off: `/` users now pay TCP HOL blocking penalty during loss
+events (~50–200 ms latency spike, drained over 2 s by rate adjuster).
+This violates the literal letter of the latency-first principle, but
+on the new server's UDP path the alternative is persistent 破音, which
+is worse for the rehearsal use case. If the cloud provider eventually
+offers SR-IOV / clean UDP egress, this flips back to WT default for
+/.
+
+### AppKit unchanged
+
+`MixerBridge.mm` still hardcodes `kMixerHost = "8.163.21.207"`. AppKit
+users keep talking to the Aliyun box (which stays running as the /new
+fallback). AppKit refactor (host configurability, frame-size 240 →
+120 alignment with v4.2.0+ server tick, optional WSS transport) is a
+separate roadmap item — a v5.x.x minor version, not in 5.0.0.
+
+### Breaking changes
+
+- `srv-new.tonel.io` and `api-new.tonel.io` DNS targets swap. Anything
+  outside this repo that depended on those names pointing at 酷番云
+  will silently start hitting Aliyun.
+- WT path on `/` is no longer available (force-WSS). External tooling
+  that relied on WT to `/` (e.g., browser tests pinned to WT against
+  the production hostname) will need `?transport=wt` override OR a
+  switch to `/new`.
+
+### Files changed
+
+- `Git/web/src/services/audioService.ts` — chooseAudioTransport inversion
+- `Git/CHANGELOG.md` — this entry
+
+Server-side configs (nginx server blocks on each box, cloudflared
+ingress on each box) were updated out-of-band as pre-staging — they
+are not in `Git/ops/` because the dual-hostname setup is transitional;
+once the migration stabilizes (~2 weeks of observation), one of the
+hostnames will be retired and the canonical config will collapse back
+to a single hostname per server. `Git/ops/` will be updated to match
+at that point.
+
 ## [4.3.11] - 2026-04-30
 
 ### Fixed — `/new` users hearing 破音 over WebTransport on Guangzhou test mixer

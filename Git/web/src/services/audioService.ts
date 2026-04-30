@@ -2473,18 +2473,21 @@ export class AudioService {
     const forced = new URLSearchParams(location.search).get('transport')
     if (forced === 'wss') return 'wss'
     if (forced === 'wt')  return 'wt'   // user explicitly asked for WT — let connect fail loudly if unsupported
-    // /new test deployment: WT path on the Guangzhou test mixer shows
-    // 4-15× higher click_rate / norm_energy than WSS in automated A/B
-    // (audio_quality_e2e.js --mode wt vs --mode wss against
-    // srv-new.tonel.io). Suspected root cause is the cloud
-    // provider's hypervisor egress: TCP gets hardware offload, UDP
-    // 4433 walks a bursty software path → QUIC datagrams arrive
-    // unevenly → audible 破音. Until the new server's UDP path is
-    // fixed (or it moves to a provider with TCP-class UDP egress),
-    // /new force-selects WSS to give /new users an experience
-    // comparable to / production. See CHANGELOG v4.3.11.
-    if (location.pathname.startsWith('/new')) return 'wss'
-    return (typeof WebTransport !== 'undefined') ? 'wt' : 'wss'
+    // v5.0.0: production migrated to 酷番云广州 (srv.tonel.io DNS-A
+    // points there). The new provider's hypervisor egress bursts UDP
+    // datagrams enough to produce 破音 on the WT path
+    // (project_kufan_udp_burst memory; audio_quality_e2e.js --mode wt
+    // shows 4-15× click_rate vs WSS). All / users force WSS.
+    //
+    // /new is the Aliyun fallback path (DNS-A points to old server)
+    // — the Aliyun route has clean UDP, so /new keeps WT default
+    // and gets the latency benefit. AppKit users still hardcoded to
+    // Aliyun also use the same UDP path; if WT works for /new, it
+    // works for them.
+    if (location.pathname.startsWith('/new')) {
+      return (typeof WebTransport !== 'undefined') ? 'wt' : 'wss'
+    }
+    return 'wss'
   }
 
   /**
