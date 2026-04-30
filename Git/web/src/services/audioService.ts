@@ -351,17 +351,25 @@ export class AudioService {
   //     aggressive for the actual server tick burst pattern — even
   //     with PLC working (v4.2.1), PLC fired 6+ times/sec sustained
   //     in real sessions, producing audible distortion (1.8% of audio
-  //     was PLC-filled). 6 ms is the sweet spot: still 5× smaller
-  //     than v4.1.x's 30 ms, but big enough that PLC stays an
-  //     emergency mechanism rather than common-path. Saves ~3 ms less
-  //     than v3, but actually-clean audio matters more than the
-  //     theoretical floor.
+  //     was PLC-filled).
+  //   v5 (v4.2.3) — Phase B tuning refinement (user-validated empirical
+  //     sweet spot): primeTarget 288 → 672 (6 ms → 14 ms), primeMin
+  //     64 → 16 (1.3 ms → 0.3 ms), jitterMaxDepth 8 → 13. Counter-
+  //     intuitive on the surface (bigger primeTarget = more latency)
+  //     but produces markedly cleaner audio than the theoretical-floor
+  //     v4 values. The mechanism: a bigger ring + much smaller
+  //     primeMin means PLC only fires at the absolute tail of a
+  //     drain cycle, when the natural audio is already near-silent —
+  //     so PLC's lastBlock-with-decay output is also near-silent,
+  //     inaudible. v4's larger primeMin (64) caused PLC to fire mid-
+  //     drain when audio was still loud, producing audible buzz.
+  //     Trade: +8 ms client buffer for noticeably cleaner sound.
   //
   // Schema mismatch on load → discard the stale blob, apply current
   // defaults. Memory rule (`feedback_state_migration_test`) requires
   // any future bump here to also add a Layer-6 scenario asserting the
   // discard happens correctly.
-  private static readonly TUNING_SCHEMA_VERSION = 4
+  private static readonly TUNING_SCHEMA_VERSION = 5
   private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
@@ -387,15 +395,23 @@ export class AudioService {
    *      → 64. v4.2.0's 3 ms target was too aggressive — even
    *      with PLC working correctly (v4.2.1), real sessions saw
    *      PLC firing 6+ times/sec sustained, producing audible
-   *      distortion (1.8% of audio was PLC-filled). 6 ms target
-   *      keeps PLC an emergency mechanism, not common-path. */
+   *      distortion (1.8% of audio was PLC-filled).
+   *    Phase B tuning v4.2.3: primeTarget 288 → 672, primeMin 64
+   *      → 16. User-validated empirical sweet spot. The bigger
+   *      ring + much-smaller primeMin combination keeps PLC firing
+   *      only at the absolute tail of drain cycles (where audio is
+   *      already near-silent), so PLC's lastBlock-with-decay
+   *      output stays inaudible. +8 ms latency vs v4.2.2 for
+   *      markedly cleaner sound. DEFAULT_SRV.jitterMaxDepth bumped
+   *      8 → 13 in the same release to give the server-side
+   *      buffer matching headroom for burst absorption. */
   private static readonly DEFAULT_PB = Object.freeze({
-    primeTarget: 288, primeMin: 64,
+    primeTarget: 672, primeMin: 16,
     maxScale: 1.025,  minScale: 0.975,
     rateStep: 0.00002,
   })
   private static readonly DEFAULT_SRV = Object.freeze({
-    jitterTarget: 1, jitterMaxDepth: 8,
+    jitterTarget: 1, jitterMaxDepth: 13,
   })
 
   // ── Live tuning knobs ────────────────────────────────────────────────────

@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.3] - 2026-04-30
+
+### Tuning — adopt user-validated empirical sweet spot (primeTarget 6→14 ms, primeMin 1.3→0.3 ms)
+
+User reported v4.2.2's `primeTarget=288` (6 ms) still produced
+some PLC artifacts on continuous voice. After manual sweeping in
+the debug panel they landed on a counter-intuitive but
+significantly cleaner combination:
+
+```
+primeTarget    288 → 672  (6 ms → 14 ms)     ← BIGGER ring
+primeMin        64 →  16  (1.3 ms → 0.3 ms)  ← MUCH SMALLER trigger
+jitterMaxDepth   8 →  13  (20 ms → 32.5 ms cap)
+```
+
+Verified live data (v4.2.3-equivalent on user's session):
+```
+ring=429       (under target — controller has slack, not pegged)
+rate=-1599 ppm (NOT at rail — clock drift fully absorbable)
+reprime=3      (essentially zero hard glitches)
+plc=911        (still many PLC events, but inaudible — see below)
+seqGap=0
+```
+
+#### Why this configuration sounds clean despite still-frequent PLC
+
+PLC events haven't disappeared (911 vs 2012 in v4.2.1), but the
+**audible character** has. The mechanism is the small primeMin:
+
+- v4.2.0/v4.2.1 (primeMin=32, primeTarget=144): PLC fires when
+  ring drops below 32. Ring spends most of its time around the
+  small 144 target, so PLC kicks in *during* a drain cycle —
+  while the natural audio is still loud. The lastBlock-with-decay
+  output sounds like a buzzing repeat at that energy level.
+- v4.2.3 (primeMin=16, primeTarget=672): PLC only fires when ring
+  is **almost completely empty** (16 samples = 0.3 ms left).
+  By that point the natural drain has run far enough that any
+  audio just before underrun was already trailing off. The
+  lastBlock-with-decay output is correspondingly low-energy →
+  imperceptibly merges into the natural fadeout.
+
+In other words: the bigger primeTarget "buys altitude" so the
+controller has more headroom to coast through bursts; the tiny
+primeMin "shifts PLC to the natural quiet zone" where its
+artifacts stop being audible.
+
+#### Trade
+
+- **+8 ms client buffer** vs v4.2.2 (3 ms more vs Phase B's
+  theoretical floor)
+- **e2e**: ~28-35 ms (v4.2.2) → ~36-43 ms — still ~10 ms below
+  v4.1.x's ~40-50 ms range, so we keep most of the Phase B win
+- **Audio**: markedly cleaner (per user empirical validation)
+
+For low-latency users who want to push back toward 3-6 ms target,
+the debug panel's tuning sliders + per-room save still work — they
+just stop being the system default.
+
+#### Layer 6 self-update
+
+The state-migration test reads `TUNING_SCHEMA_VERSION` at runtime
+and tests "v=CURRENT-1 → discarded". Bumping 4 → 5 auto-extends
+coverage to v4 → v5 migration without changing test code.
+Confirmed all 4 scenarios PASS post-bump (including Preview MCP
+spot-checks of v4 saved-tuning discard + v5 saved-tuning preserve).
+
+### Validation done
+
+- typecheck — clean
+- Preview MCP — 3 scripted scenarios PASS
+- pretest 6/6 PASS (Layer 2 first-run clean, no retry needed)
+
 ## [4.2.2] - 2026-04-30
 
 ### Tuning — primeTarget 3 ms → 6 ms (v4.2.0's target was too aggressive)
