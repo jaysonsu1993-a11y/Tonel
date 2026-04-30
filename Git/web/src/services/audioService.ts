@@ -2567,8 +2567,12 @@ export class AudioService {
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // Direct connection to Alibaba Cloud server (bypasses Cloudflare Tunnel)
-    const host = 'srv.tonel.io'
+    // Direct connection to Alibaba Cloud server (bypasses Cloudflare Tunnel).
+    // /new path routes to the Guangzhou test mixer; root path stays on production.
+    // This pairing must stay in sync with App.tsx pathPrefix() and
+    // signalService.ts apiHost selection. (Originally added in v4.3.2,
+    // dropped during a v4.3.5 refactor — re-added in v4.3.10.)
+    const host = location.pathname.startsWith('/new') ? 'srv-new.tonel.io' : 'srv.tonel.io'
     const controlUrl = `${protocol}//${host}/mixer-tcp`
     const audioUrl   = `${protocol}//${host}/mixer-udp`
     // WebTransport listens on UDP 4433 with the same TLS cert as

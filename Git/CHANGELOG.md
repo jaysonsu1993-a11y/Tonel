@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.10] - 2026-04-30
+
+### Fixed — `/new` audio path was silently routing to production again
+
+v4.3.2 added `audioService.ts` host selection so the `/new` test path
+would talk to `srv-new.tonel.io`. A v4.3.5 audio refactor reverted
+that line to `const host = 'srv.tonel.io'` — the hardcoded production
+host — without the test infra noticing (no test exercises the host
+selection, only the wire format). signalService.ts kept its
+equivalent conditional, so /new users were getting:
+
+  signaling → api-new.tonel.io  (Guangzhou test signal server)
+  audio     → srv.tonel.io      (Aliyun production mixer)
+
+Net effect: /new could not actually exercise the new mixer at all
+for audio. Confirmed by inspecting the published v4.3.9 bundle —
+`srv-new.tonel.io` was absent.
+
+Re-applied the conditional, with an in-source note pointing at
+App.tsx pathPrefix() / signalService apiHost so the next refactor
+notices the three call sites belong together.
+
+This is a web-only fix; server binaries are unchanged in 4.3.10.
+
 ## [4.3.9] - 2026-04-30
 
 ### Fixed — `/new` test-deployment URL was clobbered to `/` on first paint
