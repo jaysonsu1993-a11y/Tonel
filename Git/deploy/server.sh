@@ -171,12 +171,14 @@ deploy_ops() {
     ssh_exec "chmod +x '$TONEL_DEPLOY_DIR/scripts/'*.sh"
 
     log "[ops] apply nginx site configs"
-    rsync_to_remote "$GIT_DIR/ops/nginx/srv.tonel.io.conf" "/etc/nginx/sites-available/srv.tonel.io"
-    rsync_to_remote "$GIT_DIR/ops/nginx/tonel.io.conf"     "/etc/nginx/sites-available/tonel.io"
+    rsync_to_remote "$GIT_DIR/ops/nginx/srv.tonel.io.conf"     "/etc/nginx/sites-available/srv.tonel.io"
+    rsync_to_remote "$GIT_DIR/ops/nginx/srv-new.tonel.io.conf" "/etc/nginx/sites-available/srv-new.tonel.io"
+    rsync_to_remote "$GIT_DIR/ops/nginx/tonel.io.conf"         "/etc/nginx/sites-available/tonel.io"
     ssh_exec "
         set -e
-        ln -sf /etc/nginx/sites-available/srv.tonel.io /etc/nginx/sites-enabled/srv.tonel.io
-        ln -sf /etc/nginx/sites-available/tonel.io     /etc/nginx/sites-enabled/tonel.io
+        ln -sf /etc/nginx/sites-available/srv.tonel.io     /etc/nginx/sites-enabled/srv.tonel.io
+        ln -sf /etc/nginx/sites-available/srv-new.tonel.io /etc/nginx/sites-enabled/srv-new.tonel.io
+        ln -sf /etc/nginx/sites-available/tonel.io         /etc/nginx/sites-enabled/tonel.io
         nginx -t
         systemctl reload nginx
     "

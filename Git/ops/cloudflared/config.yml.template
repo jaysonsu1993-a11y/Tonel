@@ -1,15 +1,31 @@
 # Cloudflare Tunnel config template — applied to /root/.cloudflared/config.yml.
-# Substitute ${TUNNEL_ID} from .env.deploy at apply time (deploy/server-ops.sh).
+# Substitute ${TUNNEL_ID} from .env.deploy at apply time (deploy/server.sh
+# --component=ops).
 #
-# Tunnel currently routes only api.tonel.io (signaling). The previous mixer.tonel.io
-# entry was removed in v1.0.3 — mixer audio now goes via srv.tonel.io (DNS-only,
-# direct to nginx, bypassing Cloudflare entirely).
+# v5.0.0+: this same config deploys to BOTH the primary (酷番云) and the
+# Aliyun fallback box. Each box has its own tunnel ID (TONEL_CF_TUNNEL_ID
+# in its .env.deploy gets substituted in). Both tunnels route both
+# api.tonel.io AND api-new.tonel.io to localhost:9004 — DNS CNAMEs in
+# Cloudflare decide which tunnel actually receives traffic for which
+# hostname:
+#   api.tonel.io     CNAME → tonel-koufan tunnel (酷番云, primary)
+#   api-new.tonel.io CNAME → tonel-tunnel  tunnel (Aliyun, fallback)
+# Symmetric ingress means we can flip the CNAME in CF dashboard to swap
+# primary/fallback without touching server config.
+#
+# Earlier `mixer.tonel.io` ingress was removed in v1.0.3 — mixer audio
+# goes via srv*.tonel.io (DNS-only, direct to nginx, bypasses CF).
 
 tunnel: ${TUNNEL_ID}
 credentials-file: /root/.cloudflared/${TUNNEL_ID}.json
 
 ingress:
   - hostname: api.tonel.io
+    service: http://localhost:9004
+    originRequest:
+      noTLSVerify: true
+
+  - hostname: api-new.tonel.io
     service: http://localhost:9004
     originRequest:
       noTLSVerify: true

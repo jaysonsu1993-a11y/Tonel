@@ -6,14 +6,16 @@ server. Counterpart to `Git/ops/`, which holds **declarative** configuration.
 ## First-time setup
 
 ```bash
-# 1. Copy env file and fill in real values (SSH host, CF token, tunnel ID).
+# 1. Copy env file and fill in real values (SSH host, port, CF token, tunnel ID).
 cp Git/deploy/.env.deploy.example Git/deploy/.env.deploy
 $EDITOR Git/deploy/.env.deploy
 
 # 2. Make sure SSH passwordless login works.
-ssh "$TONEL_SSH_HOST" 'whoami'
+#    v5.0.0+: production is 酷番云广州, SSH port 26806 (non-standard).
+ssh -p "$TONEL_SSH_PORT" "$TONEL_SSH_HOST" 'whoami'
 
 # 3. Run bootstrap once to migrate /opt/tonel-server/ → /opt/tonel/.
+#    (No-op on a server already at the new layout — bootstrap is idempotent.)
 Git/deploy/bootstrap.sh
 ```
 
@@ -33,6 +35,52 @@ Git/deploy/bootstrap.sh
 
 All scripts accept `--dry-run`. All scripts require a clean working tree
 (no uncommitted changes) — exception: `health.sh` and `rollback.sh`.
+
+## v5.0.0+ architecture (post-migration)
+
+`tonel.io/` traffic now hits **酷番云广州 (42.240.163.172)** — that is
+the deploy target of these scripts. The Aliyun box (8.163.21.207) is
+the **`/new` fallback** path on the web client and the **AppKit
+hardcoded** mixer; it stays alive but is **not** part of the standard
+deploy flow.
+
+```
+            ┌── srv.tonel.io       (DNS-A → 42.240.163.172, 酷番云) ─── nginx → ws-mixer-proxy
+tonel.io/ ──┤
+            └── api.tonel.io       (CNAME → tonel-koufan tunnel) ────── cloudflared → ws-proxy
+
+                ┌── srv-new.tonel.io   (DNS-A → 8.163.21.207, Aliyun) ── nginx → ws-mixer-proxy
+tonel.io/new ───┤
+                └── api-new.tonel.io   (CNAME → tonel-tunnel tunnel) ─── cloudflared → ws-proxy
+
+AppKit (kMixerHost hardcoded) ───────► 8.163.21.207:9002/9003 (raw TCP+UDP, Aliyun)
+```
+
+To touch the Aliyun box from these scripts, override env inline:
+
+```bash
+TONEL_SSH_HOST=root@8.163.21.207 TONEL_SSH_PORT=22 \
+TONEL_CF_TUNNEL_ID=339745d7-cb58-4e1d-acf4-e6b7198a2b8c \
+  Git/deploy/health.sh
+```
+
+## Cert renewal
+
+LE certs auto-renew via the `certbot.timer` systemd unit on each box.
+
+| Cert | Server | Authenticator | Notes |
+|---|---|---|---|
+| `srv.tonel.io` | 酷番云 (primary) | `nginx` (HTTP-01) | Standard, no manual setup. |
+| `srv-new.tonel.io` | Aliyun (fallback) | `dns-cloudflare` (DNS-01) | **MUST stay DNS-01.** Aliyun's cloud WAF (`Server: Beaver`) blocks HTTP-01 challenges for new hostnames. Token credentials at `/root/.secrets/cf-dns-token.ini` (perms 600). |
+| `tonel.io` | 酷番云 (primary) | `nginx` | Used by the legacy origin-direct fallback paths. |
+| `api*.tonel.io` | n/a | (Cloudflare-managed edge cert) | No origin cert needed; CF terminates TLS. |
+
+To dry-run a renewal manually:
+
+```bash
+ssh -p 26806 root@42.240.163.172 'certbot renew --dry-run'
+ssh root@8.163.21.207        'certbot renew --cert-name srv-new.tonel.io --dry-run'
+```
 
 ## Conventions
 
@@ -80,6 +128,13 @@ Each one was confusing in its first encounter and is worth recognizing instantly
   abroad are unaffected. This is *not* a deploy regression — it is the
   reason `health.sh` probes from the production server, not from the
   operator's laptop (R1 in [DEPLOY_SCRIPTING_STANDARDS.md](../docs/DEPLOY_SCRIPTING_STANDARDS.md)).
+  The same quirk applies to `srv-new.tonel.io` post-v5.0 (Aliyun box).
+
+- **Aliyun cloud WAF rejects HTTP-01 ACME for new hostnames** with
+  `Server: Beaver` 403 responses, *before* the request reaches nginx.
+  This is why `srv-new.tonel.io`'s renewal config on the Aliyun box
+  uses `dns-cloudflare` instead of the default `nginx` authenticator.
+  Don't try to switch it back. (See "Cert renewal" section above.)
 
 ## Emergency recovery
 

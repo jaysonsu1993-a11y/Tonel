@@ -18,7 +18,7 @@ check_remote_port() {
         dim "  [dry-run] would check $label  $proto/$port"
         return
     fi
-    if ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" "ss -${proto}lnp 2>/dev/null | awk '{print \$4}' | grep -qE ':$port\$'" >/dev/null 2>&1; then
+    if ssh -p "$TONEL_SSH_PORT" -o ConnectTimeout=10 "$TONEL_SSH_HOST" "ss -${proto}lnp 2>/dev/null | awk '{print \$4}' | grep -qE ':$port\$'" >/dev/null 2>&1; then
         ok "  $label  $proto/$port  listening"
     else
         err "  $label  $proto/$port  NOT listening"
@@ -32,7 +32,7 @@ check_pm2_online() {
         dim "  [dry-run] would check pm2  $name"
         return
     fi
-    if ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" "pm2 jlist | grep -q '\"name\":\"$name\".*\"status\":\"online\"'" >/dev/null 2>&1; then
+    if ssh -p "$TONEL_SSH_PORT" -o ConnectTimeout=10 "$TONEL_SSH_HOST" "pm2 jlist | grep -q '\"name\":\"$name\".*\"status\":\"online\"'" >/dev/null 2>&1; then
         ok "  pm2  $name  online"
     else
         err "  pm2  $name  NOT online"
@@ -75,7 +75,7 @@ check_wss_handshake() {
         # curl returns 28 on max-time even after writing %{http_code} (the server
         # holds the WS connection open after the 101). Force trailing "; true" so
         # ssh exits 0 with curl's stdout (just the http code) intact.
-        code=$(ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" \
+        code=$(ssh -p "$TONEL_SSH_PORT" -o ConnectTimeout=10 "$TONEL_SSH_HOST" \
             "curl -sk -o /dev/null -w '%{http_code}' \
                 --max-time ${TONEL_HEALTH_TIMEOUT:-10} \
                 -H 'Connection: Upgrade' \

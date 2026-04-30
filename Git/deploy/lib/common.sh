@@ -58,6 +58,10 @@ load_env() {
     : "${TONEL_RUNTIME_DIR:?TONEL_RUNTIME_DIR not set in .env.deploy (e.g. /var/lib/tonel)}"
     : "${TONEL_LOG_DIR:?TONEL_LOG_DIR not set in .env.deploy (e.g. /var/log/tonel)}"
     : "${TONEL_ARCHIVE_DIR:?TONEL_ARCHIVE_DIR not set in .env.deploy (e.g. /opt/_archive)}"
+
+    # SSH port — default 22; v5.0+ production (酷番云) is 26806. Exported
+    # so child scripts that source common.sh see it without re-loading.
+    export TONEL_SSH_PORT="${TONEL_SSH_PORT:-22}"
 }
 
 # ─── Git state ───────────────────────────────────────────────────────────────
@@ -86,7 +90,7 @@ ssh_exec() {
     if [ "$DRY_RUN" = "1" ]; then
         printf '%s[dry-run ssh]%s %s\n' "$C_DIM" "$C_RST" "$1" >&2
     else
-        ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" "$1"
+        ssh -p "$TONEL_SSH_PORT" -o ConnectTimeout=10 "$TONEL_SSH_HOST" "$1"
     fi
 }
 
@@ -95,7 +99,7 @@ ssh_quiet() {
     if [ "$DRY_RUN" = "1" ]; then
         return 0
     else
-        ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" "$1" >/dev/null 2>&1
+        ssh -p "$TONEL_SSH_PORT" -o ConnectTimeout=10 "$TONEL_SSH_HOST" "$1" >/dev/null 2>&1
     fi
 }
 
@@ -110,7 +114,7 @@ rsync_to_remote() {
             "$C_DIM" "$C_RST" "$src" "$TONEL_SSH_HOST" "$dst" "$flags" >&2
     else
         # shellcheck disable=SC2086
-        rsync -avz $flags "$src" "$TONEL_SSH_HOST:$dst"
+        rsync -avz -e "ssh -p $TONEL_SSH_PORT -o ConnectTimeout=10" $flags "$src" "$TONEL_SSH_HOST:$dst"
     fi
 }
 
@@ -129,7 +133,7 @@ check_remote_drift() {
     fi
 
     local remote_md5 local_md5
-    remote_md5=$(ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" "md5sum '$remote_path' 2>/dev/null | awk '{print \$1}'") || remote_md5=""
+    remote_md5=$(ssh -p "$TONEL_SSH_PORT" -o ConnectTimeout=10 "$TONEL_SSH_HOST" "md5sum '$remote_path' 2>/dev/null | awk '{print \$1}'") || remote_md5=""
     local_md5=$(md5 -q "$local_path" 2>/dev/null || md5sum "$local_path" 2>/dev/null | awk '{print $1}')
 
     if [ -z "$remote_md5" ]; then

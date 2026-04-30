@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.1] - 2026-05-01
+
+### Fixed — three v5.0.0 followups, all infra hygiene
+
+#### `Git/ops/` ↔ live drift resolved (dual-hostname symmetric configs)
+
+`Git/ops/nginx/srv-new.tonel.io.conf` added (mirror of `srv.tonel.io.conf`),
+`Git/ops/cloudflared/config.yml.template` extended with a second
+`api-new.tonel.io` ingress block. `deploy/server.sh deploy_ops()` syncs
+the new file and creates the sites-enabled symlink. The same `Git/ops/`
+deploys to either production server now; whichever machine actually
+handles each hostname is decided entirely by DNS in Cloudflare.
+
+This means Aliyun is no longer "managed manually" — to re-align it to
+the canonical configs in `Git/ops/`, override env inline:
+
+```bash
+TONEL_SSH_HOST=root@8.163.21.207 TONEL_SSH_PORT=22 \
+TONEL_CF_TUNNEL_ID=339745d7-cb58-4e1d-acf4-e6b7198a2b8c \
+  Git/deploy/server.sh --component=ops
+```
+
+#### `.env.deploy` switched to 酷番云 + new `TONEL_SSH_PORT` variable
+
+After v5.0.0 cutover, `.env.deploy` still pointed `TONEL_SSH_HOST` at
+the old Aliyun box — which would have silently sent the next server
+deploy to the wrong machine. Updated to:
+
+```
+TONEL_SSH_HOST=root@42.240.163.172
+TONEL_SSH_PORT=26806    # new var, defaults to 22
+TONEL_CF_TUNNEL_ID=6fb5a319-7aaa-4f77-9e12-214eb4bfb1d8
+```
+
+`deploy/lib/common.sh` (`ssh_exec`, `ssh_quiet`, `rsync_to_remote`,
+`check_remote_drift`) and `deploy/health.sh` all now thread the port
+through every ssh / rsync invocation. Existing setups that never set
+`TONEL_SSH_PORT` keep working — it defaults to 22.
+
+#### Aliyun's `srv-new.tonel.io` cert renewal switched to DNS-01
+
+The cert was tar-piped from the new server during v5.0.0 cutover
+because Aliyun's cloud WAF (`Server: Beaver`) blocks HTTP-01
+challenges for any new hostname before nginx ever sees the request.
+Renewal therefore must use DNS-01:
+
+- `python3-certbot-dns-cloudflare` installed on Aliyun
+- `/root/.secrets/cf-dns-token.ini` stores the same Cloudflare API
+  token already used for Pages deploys (verified to have
+  Zone:DNS:Edit on the tonel.io zone)
+- `/etc/letsencrypt/renewal/srv-new.tonel.io.conf` flipped from
+  `authenticator = nginx` → `authenticator = dns-cloudflare`
+- `certbot renew --cert-name srv-new.tonel.io --dry-run` passes
+- `certbot.timer` systemd unit handles auto-renewal 30 days before
+  expiry — no operator action required
+
+Documented in `Git/deploy/README.md` "Cert renewal" section + a new
+quirks-list entry explaining the Beaver WAF behaviour.
+
+### Files changed
+
+- `Git/deploy/.env.deploy` — TONEL_SSH_HOST + TONEL_SSH_PORT + TUNNEL_ID
+- `Git/deploy/.env.deploy.example` — same, with v5 commentary
+- `Git/deploy/lib/common.sh` — TONEL_SSH_PORT support
+- `Git/deploy/health.sh` — ssh -p threading
+- `Git/deploy/server.sh` — deploy_ops() pushes srv-new.tonel.io.conf
+- `Git/deploy/README.md` — v5 architecture section, cert renewal table, Beaver quirk
+- `Git/ops/README.md` — dual-hostname architecture explainer
+- `Git/ops/nginx/srv.tonel.io.conf` — header comment v5
+- `Git/ops/nginx/srv-new.tonel.io.conf` — new file
+- `Git/ops/cloudflared/config.yml.template` — second ingress for api-new
+
+Server-side, Aliyun also got the certbot-dns-cloudflare install and
+renewal config rewrite (out-of-band — Aliyun isn't on the standard
+deploy flow). Documented in the migration memory.
+
+This is an infra/docs-only release; no server binaries or web bundle
+behavior change in 5.0.1.
+
 ## [5.0.0] - 2026-04-30
 
 ### Changed — production server migration: Aliyun → 酷番云广州
