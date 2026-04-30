@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] - 2026-04-30
+
+### Phase C — 自适应 jitter buffer (NetEQ-style adaptive target)
+
+Third MINOR of the v4.x latency-optimisation roadmap. Server-side
+change: replaces the static `jitter_target=1` with a per-user
+adaptive target that tracks observed inter-arrival-time (IAT)
+jitter over a rolling 500 ms window. Good network → target
+auto-shrinks toward 0 (saves up to 2.5 ms e2e). Burst-y network
+→ target grows up to `jitter_max_depth` (avoids reprime/PLC
+escalation that the static cap would otherwise hit).
+
+#### Algorithm — `MixerServer::JitterEstimator` (in mixer_server.h)
+
+Per-user state, ~1.6 KB (200 × uint64 ring + scalars).
+
+```
+on UDP recv:
+    iat = now − last_arrival
+    push iat into ring[200]
+    every 20 packets (≈50 ms @ 400 fps), once we have ≥20 samples:
+        sort copy
+        p95 = sorted[len * 0.95]
+        excess = max(0, p95 − 2500us)
+        proposed = ceil(excess / 2500us)         # frames of buffer needed
+        clamp proposed to [0, jitter_max_depth]
+        if proposed == current_target: hold
+        else if proposed == previous_proposed: agree_count++
+                                                (commit if agree_count ≥ 3)
+        else: reset hysteresis with new proposed
+```
+
+Hysteresis (3 consecutive agreeing recomputes ≈ 150 ms of
+consistent jitter measurement) prevents single bursts from
+bouncing the target.
+
+#### Mix tick changes (mixer_server.cpp `handle_mix_timer`)
+
+Before:
+```cpp
+if (queue.size() >= uep.jitter_target) primed = true;
+```
+
+After:
+```cpp
+const int eff_target = uep.jitter_estimator.target();
+if (queue.size() >= eff_target) primed = true;
+// Trim queue if adaptive target SHRANK while we were primed.
+while (queue.size() > eff_target + 1) queue.pop_front();
+```
+
+The trim-on-shrink is one-time discontinuity (samples lost) when
+the network suddenly improves, accepted because the alternative
+is multi-second drain that the listener would perceive as latency
+regressing.
+
+#### Per-user, not global
+
+Each `UserEndpoint` owns its own estimator. In a multi-user room
+(C user A on great wifi + B on flaky 4G), they get independent
+targets — A drops to 0, B holds at 3, neither pays for the other's
+network. Mirrors the existing per-user `jitter_target` /
+`jitter_max_depth` knobs.
+
+#### MIXER_TUNE / debug panel slider
+
+The legacy `jitter_target` field on `UserEndpoint` is still
+accepted via MIXER_TUNE for backward compat, but the mix tick now
+ignores it — the estimator's adaptive value wins. Power users who
+want manual control would need a separate "disable adaptive" flag,
+which we're not adding in v4.3.0 (no demonstrated need; debug
+panel remains useful for `jitter_max_depth` which still binds the
+adaptive estimator's upper end).
+
+#### Validation
+
+- Server build: clean
+- Layer 1.5 jitter sweep (12 scenarios from clean to jitterSd=20):
+  ALL PASS. Sweep injects synthetic IAT noise spanning 4 orders of
+  magnitude; the estimator scaled target appropriately for each
+  scenario without test failures.
+- pretest 6/6 PASS, no retries needed
+- Layer 6 state migration: 4/4 PASS (no client-schema change in
+  this release; ran for regression coverage)
+
+#### Expected real-world effect
+
+- Clean wired LAN sessions: target settles to 0 → save ~2.5 ms
+  e2e vs the v4.2.x default of 1
+- Wifi / 4G with burst patterns: target floats 1-3 dynamically,
+  reprime/PLC counts should drop further
+- Stress events (sudden congestion): target spikes up within
+  ~150 ms hysteresis window, absorbing the burst before it reaches
+  the cap-drop ceiling
+
+#### Roadmap status
+
+[`local_docs/ROADMAP_V4_LATENCY.md`](local_docs/ROADMAP_V4_LATENCY.md)
+Phase C marked done. Phase D (native client / edge nodes) remains
+the only pending work — both gated on demonstrated need (native
+audio stack required for sub-25 ms; edge nodes only if user
+distribution warrants it). Phase A+B+C delivered the bulk of the
+browser-floor latency reduction.
+
 ## [4.2.3] - 2026-04-30
 
 ### Tuning — adopt user-validated empirical sweet spot (primeTarget 6→14 ms, primeMin 1.3→0.3 ms)
