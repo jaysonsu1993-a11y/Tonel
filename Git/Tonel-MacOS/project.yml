@@ -1,0 +1,40 @@
+name: TonelMacOS
+options:
+  bundleIdPrefix: io.tonel
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    PRODUCT_BUNDLE_IDENTIFIER: io.tonel.macos
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  TonelMacOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: TonelMacOS
+        excludes:
+          - "Resources/Info.plist"
+    resources:
+      - TonelMacOS/Resources
+    info:
+      path: TonelMacOS/Resources/Info.plist
+    entitlements:
+      path: TonelMacOS/Resources/TonelMacOS.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Tonel needs microphone access to send your audio to the rehearsal room."
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Tonel"
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.music"

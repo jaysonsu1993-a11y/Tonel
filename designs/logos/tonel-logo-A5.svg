@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#131212"/>
+  <!-- T using diagonal lines and geometric shapes -->
+  <!-- Top horizontal bar - stepped -->
+  <rect x="96" y="100" width="320" height="24" fill="#E8E8E8"/>
+  <rect x="116" y="124" width="280" height="16" fill="#E8E8E8"/>
+  <rect x="136" y="140" width="240" height="12" fill="#888"/>
+  <!-- Vertical stem with geometric notches -->
+  <rect x="236" y="152" width="40" height="40" fill="#E8E8E8"/>
+  <rect x="236" y="192" width="40" height="40" fill="#E8E8E8"/>
+  <rect x="236" y="232" width="40" height="40" fill="#E8E8E8"/>
+  <rect x="236" y="272" width="40" height="40" fill="#E8E8E8"/>
+  <rect x="236" y="312" width="40" height="40" fill="#E8E8E8"/>
+  <rect x="236" y="352" width="40" height="40" fill="#E8E8E8"/>
+  <!-- Diamond at bottom -->
+  <polygon points="256,400 216,440 256,480 296,440" fill="none" stroke="#E8E8E8" stroke-width="4"/>
+  <!-- Corner accents -->
+  <rect x="80" y="80" width="16" height="16" fill="#E8E8E8"/>
+  <rect x="416" y="80" width="16" height="16" fill="#E8E8E8"/>
+  <rect x="80" y="416" width="16" height="16" fill="#E8E8E8"/>
+  <rect x="416" y="416" width="16" height="16" fill="#E8E8E8"/>
+</svg>

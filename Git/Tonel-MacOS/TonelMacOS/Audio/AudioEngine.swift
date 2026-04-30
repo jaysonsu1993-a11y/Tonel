@@ -1,0 +1,622 @@
+import Foundation
+import AVFoundation
+import AudioToolbox
+import Combine
+
+/// Capture + playback engine. Owns the `AVAudioEngine` and bridges to
+/// `MixerClient`. Does not know about networking errors — callers handle those.
+///
+/// Pipeline (matches web `audioService.ts` behaviour):
+///   mic → engine.inputNode (48k float, any block size)
+///       → tap → re-block to 120-sample frames → PCM16 → MixerClient.sendAudio
+///
+///   MixerClient.onPacket(...) → JitterBuffer per peer
+///       → mix all peer frames → AVAudioSourceNode → engine.outputNode
+///
+/// Local input level: peak from the most recent capture block.
+/// Per-peer level: peak from the most recent decoded frame.
+/// Not `@MainActor` — the realtime audio callback runs on a Core Audio
+/// IO thread and reads `peers`/`outputGain` directly. Properties that drive
+/// the UI (`isRunning`, `inputLevel`, `peerLevels`) are mutated via
+/// `Task { @MainActor in ... }` so SwiftUI sees coherent updates on main.
+final class AudioEngine: ObservableObject {
+
+    // ── Public observable state ─────────────────────────────────────────────
+    @Published private(set) var isRunning = false
+    @Published private(set) var inputLevel: Float = 0          // 0…1 peak
+    @Published private(set) var peerLevels: [String: Float] = [:]
+    @Published var inputGain: Float = 1.0                       // user-tunable
+    @Published var outputGain: Float = 1.0
+    /// Self-monitor (hear yourself).
+    /// `monitorGain` is the user-tunable knob (the YOU·Mon fader).
+    /// Effective monitor volume in the playback callback is:
+    ///     (peerLevels.count >= 1 && !monitorMuted) ? monitorGain : 0
+    /// When alone the local monitor is silenced — we let the server's
+    /// solo-loopback path bring our voice back instead, which mirrors the
+    /// web client's `updateMonitorGain` (`engaged = peerLevels.size >= 2`).
+    @Published var monitorGain: Float = 1.0
+    @Published var monitorMuted: Bool = false
+    @Published var isMicMuted: Bool = false                     // master MIC ON/OFF
+    @Published var perPeerGain: [String: Float] = [:]
+    @Published var perPeerMuted: [String: Bool] = [:]
+    @Published private(set) var actualSampleRate: Double = Double(AudioWire.sampleRate)
+    @Published private(set) var outputLatencyMs: Int = 0
+    // Debug counters — surfaced in the room debug bar.
+    @Published private(set) var txCount: Int = 0
+    @Published private(set) var rxCount: Int = 0
+    @Published private(set) var captureClipCount: Int = 0
+    @Published private(set) var seqGapCount: Int = 0
+    @Published private(set) var ringDropCount: Int = 0
+    @Published private(set) var e2eLatencyMs: Int = 0
+
+    // ── Wiring ──────────────────────────────────────────────────────────────
+    private weak var mixer: MixerClient?
+    private let engine = AVAudioEngine()
+    private var sourceNode: AVAudioSourceNode!
+    /// Capture sink — runs per HW IO buffer (5–10 ms granularity), unlike
+    /// `installTap` which aggregates ~100 ms. Replacing the tap drops
+    /// monitor latency from ~100 ms to ~5 ms.
+    private var captureSink: AVAudioSinkNode!
+    /// Self-monitor: sink pushes captured samples here, fillPlayback consumes.
+    /// We can't connect inputNode → mainMixerNode via the graph because that
+    /// connection silently disables the capture tap on the same bus on macOS.
+    /// So monitor is mixed into the playback callback alongside peer audio.
+    private var monitorRing: [Float] = []
+    private let monitorRingLock = NSLock()
+    private static let monitorRingMaxSamples = 9600   // ~200ms at 48k
+    /// Server-side self-loopback queue. Used only when alone in the room
+    /// (web parity: when peers.count == 0 we let the server's fullMix
+    /// route bring our voice back instead of using local monitor — proves
+    /// the round-trip is alive and gives a server-confirmed audio path).
+    private var selfLoopRing: [Float] = []
+    private let selfLoopLock = NSLock()
+    private static let selfLoopMaxSamples = 9600
+    private var captureLogCounter: Int = 0
+
+    // Capture re-blocking — accumulate until we have 120 samples.
+    private var captureAccum: [Float] = []
+    private var captureSeq: UInt32   = 0  // for diagnostics only
+    private var startWallClockMs: UInt64 = 0
+
+    // Per-peer playback state.
+    private struct PeerSink {
+        var jitter = JitterBuffer()
+        var lastFrame: [Float] = []  // for peer level meter
+    }
+    private var peers: [String: PeerSink] = [:]
+    private let peersLock = NSLock()
+    private var packetUnsub: (() -> Void)?
+
+    // ── Setup ──────────────────────────────────────────────────────────────
+
+    func attach(mixer: MixerClient) {
+        self.mixer = mixer
+        self.packetUnsub?()
+        self.packetUnsub = mixer.onPacket { [weak self] pkt in
+            self?.ingestPeerPacket(pkt)
+        }
+    }
+
+    func start() throws {
+        guard !isRunning else { return }
+        try requestMicPermission()    // throws if denied
+
+        let wireFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Double(AudioWire.sampleRate),
+            channels: 1,
+            interleaved: false)!
+        let mic = engine.inputNode
+
+        // 0) Disable Apple's voice processing on the input node.
+        // macOS sometimes auto-promotes input to VoiceProcessingIO, which
+        // applies AGC + echo cancellation — wrong DSP for live band rehearsal.
+        do {
+            try mic.setVoiceProcessingEnabled(false)
+            AppLog.log("[AudioEngine] voice processing disabled on inputNode")
+        } catch {
+            AppLog.log("[AudioEngine] could not disable voice processing: \(error)")
+        }
+
+        // 1) Now read the post-toggle format. Use it for both the tap and the
+        // monitor-lane connection so they line up with what the AU actually
+        // produces.
+        let micFmt = mic.inputFormat(forBus: 0)
+        AppLog.log("[AudioEngine] mic native fmt: \(micFmt.sampleRate)Hz \(micFmt.channelCount)ch interleaved=\(micFmt.isInterleaved)")
+        if micFmt.sampleRate <= 0 || micFmt.channelCount == 0 {
+            throw NSError(domain: "Tonel", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey:
+                              "麦克风未提供有效输入格式 — 检查输入设备 / 麦克风权限"])
+        }
+
+        // 2) Capture lane: AVAudioSinkNode receives one HW IO buffer per
+        // callback (240 frames ≈ 5 ms here), feeds the same handler that
+        // the old `installTap` used. Sink is a *terminal* node — connecting
+        // mic → sink does not loop into output, so it doesn't conflict
+        // with the playback graph the way an inputNode→mainMixerNode
+        // connection did.
+        captureSink = AVAudioSinkNode { [weak self] _, frameCount, abl -> OSStatus in
+            self?.handleCaptureRT(frameCount: Int(frameCount), abl: abl, format: micFmt)
+            return noErr
+        }
+        engine.attach(captureSink)
+        engine.connect(mic, to: captureSink, format: micFmt)
+        AppLog.log("[AudioEngine] capture sink connected to inputNode")
+
+        applyMonitor()                       // initial monitor gain (no-op now)
+
+        // 3) Peer mix lane: sourceNode (peer audio) → mainMixerNode.
+        sourceNode = AVAudioSourceNode(format: wireFormat) {
+            [weak self] _, _, frameCount, audioBufferList -> OSStatus in
+            self?.fillPlayback(frameCount: Int(frameCount), abl: audioBufferList)
+            return noErr
+        }
+        engine.attach(sourceNode)
+        engine.connect(sourceNode, to: engine.mainMixerNode, format: wireFormat)
+
+        // Match HW IO buffer to the wire frame (120 samples / 2.5 ms): every
+        // sinkNode callback produces exactly one SPA1 packet, capture
+        // accumulator stays empty, and monitor latency = 1× HW buffer ≈ 2.5 ms.
+        // macOS clamps to the device's allowed range — SSL 2+ accepts 15.
+        setHardwareBufferFrames(target: UInt32(AudioWire.frameSamples))
+
+        engine.prepare()
+        try engine.start()
+        startWallClockMs = nowMs()
+        captureAccum.removeAll(keepingCapacity: true)
+        isRunning = true
+        let outFmt = engine.outputNode.outputFormat(forBus: 0)
+        AppLog.log("[AudioEngine] started — mic: \(micFmt.sampleRate)Hz \(micFmt.channelCount)ch / out: \(outFmt.sampleRate)Hz \(outFmt.channelCount)ch / monitor=\(monitorGain) muted=\(monitorMuted)")
+    }
+
+    /// No-op now that monitor is mixed in the playback callback. Kept as a
+    /// hook for future device-side gain adjustments.
+    private func applyMonitor() {}
+
+    func stop() {
+        guard isRunning else { return }
+        engine.stop()
+        if let s = sourceNode {
+            engine.disconnectNodeInput(s)
+            engine.detach(s)
+        }
+        if let s = captureSink {
+            engine.disconnectNodeInput(s)
+            engine.detach(s)
+        }
+        sourceNode = nil
+        captureSink = nil
+        monitorRingLock.lock(); monitorRing.removeAll(); monitorRingLock.unlock()
+        selfLoopLock.lock();    selfLoopRing.removeAll(); selfLoopLock.unlock()
+        peersLock.lock(); peers.removeAll(); peersLock.unlock()
+        peerLevels = [:]
+        isRunning = false
+    }
+
+    // ── Capture path ───────────────────────────────────────────────────────
+
+    /// Realtime capture callback (AVAudioSinkNode). Runs on Core Audio IO
+    /// thread, called once per HW IO buffer (~5 ms here). Must not allocate
+    /// in the hot path; `[Float](repeating:count:)` is fine because the
+    /// allocator is fast and Swift typically reuses the slab.
+    private func handleCaptureRT(frameCount: Int,
+                                 abl: UnsafePointer<AudioBufferList>,
+                                 format: AVAudioFormat) {
+        guard let mixer = mixer else { return }
+        let listPtr = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
+        guard let chan0Raw = listPtr.first?.mData else { return }
+        let n = frameCount
+        let channels = Int(format.channelCount)
+        let interleaved = format.isInterleaved
+
+        var frame = [Float](repeating: 0, count: n)
+        var clipped = 0
+        if !interleaved {
+            // One AudioBuffer per channel (deinterleaved Float32).
+            // Mono fold-down (avg of all channels).
+            for i in 0..<n {
+                var s: Float = 0
+                for cIdx in 0..<channels {
+                    let buf = listPtr[cIdx]
+                    let p = buf.mData!.assumingMemoryBound(to: Float.self)
+                    s += p[i]
+                }
+                let v = (s / Float(channels)) * inputGain
+                if abs(v) >= 0.999 { clipped += 1 }
+                frame[i] = v
+            }
+        } else {
+            // Single AudioBuffer with channels interleaved frame-by-frame.
+            let p = chan0Raw.assumingMemoryBound(to: Float.self)
+            for i in 0..<n {
+                var s: Float = 0
+                for cIdx in 0..<channels { s += p[i * channels + cIdx] }
+                let v = (s / Float(channels)) * inputGain
+                if abs(v) >= 0.999 { clipped += 1 }
+                frame[i] = v
+            }
+        }
+
+        // Update level meter (peak).
+        var peak: Float = 0
+        for v in frame { let a = abs(v); if a > peak { peak = a } }
+        let muted = isMicMuted
+        let clipDelta = clipped
+        Task { @MainActor in
+            self.inputLevel = muted ? 0 : peak
+            if clipDelta > 0 { self.captureClipCount &+= clipDelta }
+        }
+        // Log mic peak: first 3 calls + every 100th after, so we can see
+        // whether the input ever fires (vs. firing with silence).
+        captureLogCounter &+= 1
+        if captureLogCounter <= 3 || captureLogCounter % 100 == 0 {
+            AppLog.log("[AudioEngine] capture#\(captureLogCounter) peak=\(String(format: "%.4f", peak)) frames=\(n) ch=\(channels) muted=\(muted)")
+        }
+
+        // Feed the self-monitor ring. We push the unmuted, post-input-gain
+        // samples; the playback callback decides whether/how loud to fold
+        // them in. This way "MIC OFF" stops what peers hear (silence on
+        // the wire) but the user still has the option to hear themselves
+        // on a separate monitor knob, matching web behaviour.
+        monitorRingLock.lock()
+        monitorRing.append(contentsOf: frame)
+        if monitorRing.count > Self.monitorRingMaxSamples {
+            // Drop oldest — we'd rather glitch than drift further behind.
+            monitorRing.removeFirst(monitorRing.count - Self.monitorRingMaxSamples)
+        }
+        monitorRingLock.unlock()
+
+        // If muted: feed silence onto the wire so the mixer still sees a
+        // live sender (matches web behaviour — keeps mixer's room timing).
+        if muted {
+            for i in 0..<frame.count { frame[i] = 0 }
+        }
+
+        // Append and emit fixed-size 120-sample frames.
+        captureAccum.append(contentsOf: frame)
+        let frameSize = AudioWire.frameSamples
+        var sent = 0
+        while captureAccum.count >= frameSize {
+            let chunk = Array(captureAccum.prefix(frameSize))
+            captureAccum.removeFirst(frameSize)
+            let pcm = PCM16.encode(chunk)
+            let ts = UInt16((nowMs() - startWallClockMs) / 100 & 0xFFFF)
+            mixer.sendAudio(pcm: pcm, timestampMs: ts)
+            captureSeq &+= 1
+            sent += 1
+        }
+        if sent > 0 {
+            Task { @MainActor in self.txCount &+= sent }
+        }
+    }
+
+    // ── Playback path ──────────────────────────────────────────────────────
+
+    private func ingestPeerPacket(_ pkt: MixerPacket) {
+        // userId arrives as "room_id:user_id" — strip room prefix for keying.
+        let uid = pkt.userId.split(separator: ":", maxSplits: 1).last.map(String.init) ?? pkt.userId
+        let samples = PCM16.decode(pkt.pcm)
+
+        // Server-side self-loopback. Server runs fullMix mode while we're
+        // alone (gives us our own voice back so the user can hear that the
+        // round-trip is alive) and switches to N-1 once peers join.
+        // We don't add self to peerLevels — that would create a "peer
+        // strip" for ourselves; instead we route into a dedicated ring
+        // and the playback callback only mixes it when we're actually alone.
+        if uid == mixer?.userId {
+            selfLoopLock.lock()
+            selfLoopRing.append(contentsOf: samples)
+            if selfLoopRing.count > Self.selfLoopMaxSamples {
+                selfLoopRing.removeFirst(selfLoopRing.count - Self.selfLoopMaxSamples)
+            }
+            selfLoopLock.unlock()
+            Task { @MainActor in self.rxCount &+= 1 }
+            return
+        }
+
+        peersLock.lock()
+        var sink = peers[uid] ?? PeerSink()
+        sink.jitter.push(samples, sequence: pkt.sequence)
+        sink.lastFrame = samples
+        peers[uid] = sink
+        let gapDelta = sink.jitter.seqGapCount
+        let dropDelta = sink.jitter.dropOldestCount
+        peersLock.unlock()
+
+        // Update meter on main.
+        var peak: Float = 0
+        for v in samples { let a = abs(v); if a > peak { peak = a } }
+        Task { @MainActor in
+            self.peerLevels[uid] = peak
+            self.rxCount &+= 1
+            self.seqGapCount = gapDelta
+            self.ringDropCount = dropDelta
+        }
+    }
+
+    /// Realtime callback: pull mixed audio for `frameCount` frames into buf.
+    /// Runs on Core Audio thread — no locks beyond the cheap NSLock above.
+    private func fillPlayback(frameCount: Int, abl: UnsafePointer<AudioBufferList>) {
+        let listPtr = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
+        guard let chan = listPtr.first?.mData else { return }
+        let out = chan.assumingMemoryBound(to: Float.self)
+        for i in 0..<frameCount { out[i] = 0 }
+
+        // ── Self path: alone → server loopback; with peers → local monitor ─
+        // Web parity (`updateMonitorGain`): engaged = peerLevels.size >= 2,
+        // i.e. there is at least one OTHER peer.
+        let hasOtherPeers: Bool = {
+            peersLock.lock(); defer { peersLock.unlock() }
+            return !peers.isEmpty
+        }()
+        if hasOtherPeers {
+            // ── Local monitor mix-in (low latency, capture-direct) ────────
+            let monGain = monitorMuted ? 0 : monitorGain
+            if monGain > 0 {
+                monitorRingLock.lock()
+                let take = min(frameCount, monitorRing.count)
+                if take > 0 {
+                    for i in 0..<take {
+                        out[i] += monitorRing[i] * monGain
+                    }
+                    monitorRing.removeFirst(take)
+                }
+                monitorRingLock.unlock()
+            }
+            // Drain server self-loopback so it doesn't pile up while unused.
+            // (When peers join we still receive a couple of self-loop frames
+            // before the server flips to N-1; tossing them avoids a slug
+            // of doubled audio when the mode actually does change.)
+            selfLoopLock.lock()
+            if !selfLoopRing.isEmpty { selfLoopRing.removeAll(keepingCapacity: true) }
+            selfLoopLock.unlock()
+        } else {
+            // ── Server self-loopback mix-in (alone → server fullMix) ──────
+            // Volume here is the same monitor knob — the user thinks "this
+            // is my self-hear", regardless of which path delivers it.
+            let monGain = monitorMuted ? 0 : monitorGain
+            if monGain > 0 {
+                selfLoopLock.lock()
+                let take = min(frameCount, selfLoopRing.count)
+                if take > 0 {
+                    for i in 0..<take {
+                        out[i] += selfLoopRing[i] * monGain
+                    }
+                    selfLoopRing.removeFirst(take)
+                }
+                selfLoopLock.unlock()
+            }
+            // Drain local monitor while alone — avoids a backlog explosion
+            // before peers arrive. (Otherwise switching to with-peers mode
+            // would suddenly play 1+ seconds of stale local monitor.)
+            monitorRingLock.lock()
+            if !monitorRing.isEmpty { monitorRing.removeAll(keepingCapacity: true) }
+            monitorRingLock.unlock()
+        }
+
+        // ── Peer mix ──────────────────────────────────────────────────────
+        // Pull a full frame from each peer; mix in. We pop at most one frame
+        // per playback callback from each peer, sized to AudioWire.frameSamples.
+        // If frameCount > 120, we run the loop multiple times.
+        var written = 0
+        let frameSize = AudioWire.frameSamples
+        while written < frameCount {
+            let take = min(frameSize, frameCount - written)
+
+            // Snapshot keys under lock — tiny window.
+            peersLock.lock()
+            let keys = Array(peers.keys)
+            peersLock.unlock()
+
+            for k in keys {
+                peersLock.lock()
+                var sink = peers[k]
+                let frame = sink?.jitter.pop()
+                if let f = frame { sink?.lastFrame = f }
+                if let s = sink { peers[k] = s }
+                peersLock.unlock()
+                guard let f = frame else { continue }
+                if perPeerMuted[k] == true { continue }
+                let g = perPeerGain[k] ?? 1.0
+                let n = min(take, f.count)
+                for i in 0..<n {
+                    out[written + i] += f[i] * g
+                }
+            }
+            written += take
+        }
+
+        // Output gain + soft clip.
+        let g = outputGain
+        for i in 0..<frameCount {
+            var v = out[i] * g
+            if v >  1.0 { v =  1.0 }
+            if v < -1.0 { v = -1.0 }
+            out[i] = v
+        }
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+
+    private func requestMicPermission() throws {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized: return
+        case .notDetermined:
+            let sem = DispatchSemaphore(value: 0)
+            var ok = false
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                ok = granted; sem.signal()
+            }
+            sem.wait()
+            if !ok { throw NSError(domain: "Tonel", code: 1,
+                                   userInfo: [NSLocalizedDescriptionKey: "需要麦克风权限"]) }
+        case .denied, .restricted:
+            throw NSError(domain: "Tonel", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "麦克风权限被拒绝，请在系统设置中开启"])
+        @unknown default: return
+        }
+    }
+
+    /// Drive the actual Core Audio device's IO buffer frame size as low as
+    /// the device will permit — macOS will silently clamp if our target is
+    /// outside the device's range. 256 frames ≈ 5.3 ms @ 48 kHz, suitable
+    /// for live monitoring on USB pro interfaces (SSL 2+, RME, etc.).
+    /// AVAudioEngine on its own often leaves this at 4096+ for power.
+    private func setHardwareBufferFrames(target: UInt32) {
+        for which in [
+            (engine.inputNode.audioUnit,  "input"),
+            (engine.outputNode.audioUnit, "output"),
+        ] {
+            guard let au = which.0 else { continue }
+            var deviceID: AudioDeviceID = 0
+            var devSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+            let getDevStatus = AudioUnitGetProperty(au,
+                                                    kAudioOutputUnitProperty_CurrentDevice,
+                                                    kAudioUnitScope_Global,
+                                                    0, &deviceID, &devSize)
+            guard getDevStatus == noErr, deviceID != 0 else { continue }
+
+            // Clamp request to device's allowed range.
+            var range = AudioValueRange()
+            var rangeSize = UInt32(MemoryLayout<AudioValueRange>.size)
+            var rangeAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyBufferFrameSizeRange,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            AudioObjectGetPropertyData(deviceID, &rangeAddr, 0, nil, &rangeSize, &range)
+            var size = UInt32(max(range.mMinimum, min(range.mMaximum, Double(target))))
+
+            var sizeAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyBufferFrameSize,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            let status = AudioObjectSetPropertyData(deviceID, &sizeAddr, 0, nil,
+                                                    UInt32(MemoryLayout<UInt32>.size), &size)
+            AppLog.log("[AudioEngine] \(which.1) device=\(deviceID) set bufferFrames=\(size) (range=\(Int(range.mMinimum))…\(Int(range.mMaximum))) status=\(status)")
+        }
+    }
+
+    private func nowMs() -> UInt64 {
+        UInt64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    // MARK: - Per-peer controls (UI helpers)
+
+    func setPeerGain(_ uid: String, gain: Float) {
+        perPeerGain[uid] = gain
+        mixer?.sendPeerGain(targetUserId: uid, gain: gain)
+    }
+
+    func setPeerMuted(_ uid: String, muted: Bool) {
+        perPeerMuted[uid] = muted
+    }
+
+    // MARK: - Devices
+
+    /// Available audio output devices on macOS, via Core Audio HAL.
+    static func listOutputDevices() -> [AudioDeviceInfo] {
+        return enumerateDevices(scope: kAudioDevicePropertyScopeOutput)
+    }
+
+    /// Available audio input devices.
+    static func listInputDevices() -> [AudioDeviceInfo] {
+        return enumerateDevices(scope: kAudioDevicePropertyScopeInput)
+    }
+
+    private static func enumerateDevices(scope: AudioObjectPropertyScope) -> [AudioDeviceInfo] {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size)
+        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
+        var ids = [AudioDeviceID](repeating: 0, count: count)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids)
+
+        var result: [AudioDeviceInfo] = []
+        for id in ids {
+            // Skip devices that have no streams in the requested scope.
+            var streamsAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreams,
+                mScope: scope,
+                mElement: kAudioObjectPropertyElementMain)
+            var streamsSize: UInt32 = 0
+            AudioObjectGetPropertyDataSize(id, &streamsAddr, 0, nil, &streamsSize)
+            if streamsSize == 0 { continue }
+
+            // Name. CFString is an object reference — get it via Unmanaged
+            // to avoid forming an UnsafeMutableRawPointer to a refcounted slot.
+            var nameAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioObjectPropertyName,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var nameRef: Unmanaged<CFString>?
+            var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            let status = withUnsafeMutablePointer(to: &nameRef) { ptr -> OSStatus in
+                AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nameSize, ptr)
+            }
+            let name: String = (status == noErr)
+                ? (nameRef?.takeRetainedValue() as String? ?? "Unknown")
+                : "Unknown"
+
+            result.append(AudioDeviceInfo(id: id, name: name))
+        }
+        return result
+    }
+
+    /// Switch the engine's playback device.
+    /// AVAudioEngine on macOS allows hot-swapping the AUHAL's CurrentDevice
+    /// while running; the engine re-negotiates formats on the fly.
+    func setOutputDevice(_ deviceID: AudioDeviceID) throws {
+        try setAUDevice(unit: engine.outputNode.audioUnit, deviceID: deviceID,
+                        label: "output")
+    }
+
+    /// Switch the engine's input device (the mic feeding inputNode).
+    /// Caller must restart the engine if it's currently running — we tear
+    /// the tap down + restart so the inputFormat is renegotiated.
+    func setInputDevice(_ deviceID: AudioDeviceID) throws {
+        let wasRunning = isRunning
+        if wasRunning { stop() }
+        try setAUDevice(unit: engine.inputNode.audioUnit, deviceID: deviceID,
+                        label: "input")
+        if wasRunning { try start() }
+    }
+
+    private func setAUDevice(unit: AudioUnit?, deviceID: AudioDeviceID,
+                             label: String) throws {
+        guard let au = unit else {
+            throw NSError(domain: "Tonel", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "\(label) AudioUnit 不可用"])
+        }
+        var did = deviceID
+        let status = AudioUnitSetProperty(au,
+                                          kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global,
+                                          0, &did,
+                                          UInt32(MemoryLayout<AudioDeviceID>.size))
+        if status != noErr {
+            throw NSError(domain: "Tonel", code: Int(status),
+                          userInfo: [NSLocalizedDescriptionKey:
+                              "切换 \(label) 设备失败 (status=\(status))"])
+        }
+        AppLog.log("[AudioEngine] switched \(label) device → id=\(deviceID)")
+    }
+
+    /// Force a different device sample-rate (Core Audio device-side; the
+    /// engine's wire format stays at 48 kHz). 0 / nil means restore default.
+    func setInputDeviceSampleRate(_ rate: Double?) {
+        // Setting per-device sample rate via HAL is intricate and platform
+        // version-sensitive; for now this is a hook the UI can flip but the
+        // actual Core Audio call is a TODO. The wire frame size never changes.
+        actualSampleRate = rate ?? Double(AudioWire.sampleRate)
+    }
+}
+
+/// Simple value type for output device picker.
+struct AudioDeviceInfo: Hashable, Identifiable {
+    let id: AudioDeviceID
+    let name: String
+}

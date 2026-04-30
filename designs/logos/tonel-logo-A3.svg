@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#131212"/>
+  <!-- TONEL abstract using stacked geometric blocks -->
+  <!-- T block -->
+  <rect x="76" y="96" width="80" height="80" fill="#E8E8E8"/>
+  <rect x="76" y="96" width="80" height="20" fill="#888"/>
+  <!-- O block -->
+  <rect x="166" y="96" width="80" height="80" fill="none" stroke="#E8E8E8" stroke-width="8"/>
+  <!-- N block -->
+  <polygon points="256,176 296,96 296,176" fill="#E8E8E8"/>
+  <rect x="296" y="156" width="20" height="20" fill="#E8E8E8"/>
+  <!-- E block -->
+  <rect x="316" y="96" width="20" height="80" fill="#E8E8E8"/>
+  <rect x="316" y="96" width="60" height="16" fill="#E8E8E8"/>
+  <rect x="316" y="136" width="40" height="4" fill="#E8E8E8"/>
+  <rect x="316" y="160" width="60" height="16" fill="#E8E8E8"/>
+  <!-- L block -->
+  <rect x="386" y="96" width="20" height="80" fill="#E8E8E8"/>
+  <rect x="386" y="160" width="50" height="16" fill="#E8E8E8"/>
+  <!-- Connecting line -->
+  <rect x="76" y="196" width="360" height="4" fill="#E8E8E8"/>
+  <!-- Circle bottom accent -->
+  <circle cx="256" cy="380" r="60" fill="none" stroke="#E8E8E8" stroke-width="4"/>
+  <circle cx="256" cy="380" r="40" fill="none" stroke="#555" stroke-width="2"/>
+</svg>

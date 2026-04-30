@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.3] - 2026-05-01
+
+### Changed — homepage live latency now reflects mixer-server RTT
+
+The hero/axis/stats latency figure on `tonel.io` previously came from
+`signalService` PING/PONG (api.tonel.io control WS). That number was
+honest for the signaling path but not the figure users care about —
+the audio mixer round-trip is what they hear in a room, and is what
+the in-room debug panel surfaces as "RTT".
+
+Added a small [mixerRttProbe](web/src/services/mixerRttProbe.ts)
+service that opens a WebSocket to `wss://srv.tonel.io/mixer-tcp`
+(or `srv-new.tonel.io` under `/new`) and runs the same
+`{"type":"PING"}` / `PONG` cadence as `audioService`. The mixer's
+PING handler does not require `MIXER_JOIN`, so the probe is
+read-only — it does not register a UDP endpoint, take a slot, or
+broadcast LEVELS. `LiveLatency` in `HomePage.tsx` swapped its
+subscription from `signalService.onLatency` to
+`mixerRttProbe.onLatency`; the giant hero number, the axis row, and
+the bottom stats cell all share the same value.
+
+Behaviour preserved: 200 ms UI throttle, < 50 ms green / 50–99 ms
+yellow / ≥ 100 ms red, animated 12 ± jitter placeholder until the
+first PONG arrives.
+
 ## [5.0.2] - 2026-05-01
 
 ### Fixed — `/new` was silently falling back from WT to WSS
