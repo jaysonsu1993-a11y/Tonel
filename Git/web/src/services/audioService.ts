@@ -345,16 +345,23 @@ export class AudioService {
   //     fast-adjust. Discarding v1 was needed so users got the new
   //     headroom (otherwise rateScale stayed pinned at the old rail).
   //   v3 (v4.2.0) — Phase B: primeTarget 1440 → 144 (30 ms → 3 ms),
-  //     primeMin 128 → 32. Enabled by client PCM PLC (B.2): now the
-  //     ring can run nearly empty without reprime, so we shrink it by
-  //     10× for matching latency reduction. v2 blobs would carry
-  //     primeTarget=1440 and miss the entire latency win.
+  //     primeMin 128 → 32. Enabled by client PCM PLC.
+  //   v4 (v4.2.2) — Phase B tuning correction: primeTarget 144 → 288
+  //     (3 ms → 6 ms), primeMin 32 → 64. v3's 3 ms target was too
+  //     aggressive for the actual server tick burst pattern — even
+  //     with PLC working (v4.2.1), PLC fired 6+ times/sec sustained
+  //     in real sessions, producing audible distortion (1.8% of audio
+  //     was PLC-filled). 6 ms is the sweet spot: still 5× smaller
+  //     than v4.1.x's 30 ms, but big enough that PLC stays an
+  //     emergency mechanism rather than common-path. Saves ~3 ms less
+  //     than v3, but actually-clean audio matters more than the
+  //     theoretical floor.
   //
   // Schema mismatch on load → discard the stale blob, apply current
   // defaults. Memory rule (`feedback_state_migration_test`) requires
   // any future bump here to also add a Layer-6 scenario asserting the
   // discard happens correctly.
-  private static readonly TUNING_SCHEMA_VERSION = 3
+  private static readonly TUNING_SCHEMA_VERSION = 4
   private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
@@ -375,9 +382,15 @@ export class AudioService {
    *    Phase B v4.2.0: primeTarget 1440 → 144, primeMin 128 → 32.
    *      Enabled by the new PCM PLC (worklet now rides ~10 ms
    *      underruns smoothly instead of reprime → click). Schema
-   *      bumped v2 → v3 for the discard. */
+   *      bumped v2 → v3 for the discard.
+   *    Phase B tuning v4.2.2: primeTarget 144 → 288, primeMin 32
+   *      → 64. v4.2.0's 3 ms target was too aggressive — even
+   *      with PLC working correctly (v4.2.1), real sessions saw
+   *      PLC firing 6+ times/sec sustained, producing audible
+   *      distortion (1.8% of audio was PLC-filled). 6 ms target
+   *      keeps PLC an emergency mechanism, not common-path. */
   private static readonly DEFAULT_PB = Object.freeze({
-    primeTarget: 144, primeMin: 32,
+    primeTarget: 288, primeMin: 64,
     maxScale: 1.025,  minScale: 0.975,
     rateStep: 0.00002,
   })

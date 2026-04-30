@@ -250,8 +250,8 @@ tr:last-child td { border-bottom: none; }
         <h2>实时访客 <span class="hint">最近 50 条</span></h2>
         <div class="feed">
           <table>
-            <thead><tr><th>时间</th><th>位置</th><th>路径</th><th>设备</th></tr></thead>
-            <tbody id="recentFeed"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+            <thead><tr><th>时间</th><th>IP</th><th>位置</th><th>路径</th><th>设备</th></tr></thead>
+            <tbody id="recentFeed"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -616,16 +616,17 @@ function renderRecent(rows) {
     const t = new Date(r.ts * 1000);
     const ago = humanAgo(t);
     const dev = `<span class="tag">${r.device || '?'}</span>`;
-    const loc = [r.city, r.country].filter(Boolean).join(', ') || r.ip;
+    const loc = [r.country, r.city].filter(Boolean).join(' · ') || '—';
     return `<tr>
       <td class="muted" title="${t.toISOString()}">${ago}</td>
+      <td class="muted">${r.ip || '—'}</td>
       <td>${loc}</td>
       <td class="muted">${(r.path || '/').slice(0, 32)}</td>
       <td>${dev}</td>
     </tr>`;
   }).join('');
   document.getElementById('recentFeed').innerHTML = html ||
-    '<tr><td colspan="4" class="muted">暂无访问记录</td></tr>';
+    '<tr><td colspan="5" class="muted">暂无访问记录</td></tr>';
 }
 
 function humanAgo(date) {

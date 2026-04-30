@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.2] - 2026-04-30
+
+### Tuning — primeTarget 3 ms → 6 ms (v4.2.0's target was too aggressive)
+
+User reported audible distortion ("破音失真") on v4.2.1. Debug
+data:
+
+```
+v4.2.1 (5-min session):  reprime=8  plc=2012  ring=457  rate=+24999ppm
+```
+
+PLC working correctly (8 reprime is great vs v4.2.0's 2020), but
+firing **2012 times in ~5 min = 6+/sec sustained** = 1.8% of audio
+is PLC-filled lastBlock content. Each PLC quantum is a held-then-
+decayed snippet of prior audio — at >5/sec on continuous voice
+that produces a buzzing / robotic artifact. PLC was designed as an
+**emergency** mechanism (ride out a brief loss without click), not
+a continuous-mode synthesiser.
+
+Root cause: control-loop oscillation. The v4.2.0 `primeTarget=144`
+(3 ms) buffer is just barely above Web Audio's 128-sample (~2.7 ms)
+output quantum. The cycle:
+1. Server bursts → ring spikes to ~3× target
+2. rate controller pegs at MAX (+25000 ppm = 2.5%)
+3. Drains in ~0.4 s
+4. Ring underruns → PLC fires
+5. PLC ends, ring fills back to 3× target from server bursts
+6. Repeat at ~2.5 Hz
+
+`rate=+24999ppm` sustained at the rail also tells us the controller
+**can't actually settle** — there's no equilibrium where production
+matches consumption inside the band, so we live at the rail and
+oscillate.
+
+#### Fix
+
+`DEFAULT_PB.primeTarget` 144 → 288 (3 ms → 6 ms), `primeMin`
+32 → 64 (proportional). Schema bumped 3 → 4 so existing v3 saved
+slots (carrying primeTarget=144) get discarded on next room join.
+6 ms is the sweet spot:
+- Still 5× smaller than v4.1.x's 30 ms (so we keep most of the
+  Phase B latency win)
+- Big enough to absorb server tick burst pattern without daily
+  PLC firing
+- PLC stays available as actual emergency
+
+Trade-off vs v4.2.1: **+3 ms e2e latency** (back to ~28-35 ms
+range) for clean audio. Worth it.
+
+#### Layer 6 auto-updates with the bump
+
+The state-migration test (added v4.1.3) was deliberately written
+to read `mod.AudioService.TUNING_SCHEMA_VERSION` at runtime and
+test "v=CURRENT-1 → discarded". So it self-updates to test
+v3→v4 migration without code changes — confirmed all 4 scenarios
+PASS post-bump.
+
+### Validation done
+
+- typecheck — clean
+- Preview MCP scripted test — 3 scenarios PASS:
+  - v4.2.2 defaults match expectation (schemaVer=4, pt=288, pm=64)
+  - v3 saved slot → discarded + v4 defaults applied
+  - v4 saved slot with custom values → preserved + custom applied
+- pretest 6/6 PASS (Layer 2 needed one auto-retry on 44.1k playback,
+  second pass clean)
+
+#### What to look for in next real session
+
+- `plc=N` should drop dramatically (target: < 30/min, was 6+/sec)
+- `reprime=N` should stay near zero (PLC still catches occasional
+  underruns)
+- `ring=N` should sit close to 288 (target), not 3× it
+- `rate=N ppm` should leave the rail and float in ±5000 ppm
+- Audible distortion should be gone
+
+If `plc` is still in the hundreds-per-minute range, we're
+fundamentally bandwidth-mismatched (server producing > client can
+drain) and need server-side investigation, not more buffer.
+
 ## [4.2.1] - 2026-04-30
 
 ### Fixed — v4.2.0 PLC only covered top-of-callback; mid-callback bypassed it

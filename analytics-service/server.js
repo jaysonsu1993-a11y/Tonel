@@ -30,6 +30,12 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
+// Offline IP→city lookup. Soft-require so the service still boots if the
+// optional native data files aren't installed.
+let geoip;
+try { geoip = require('geoip-lite'); }
+catch (_) { geoip = { lookup: () => null }; }
+
 // Lightweight UA parser (soft-require so the service still boots without it).
 let UAParser;
 try { UAParser = require('ua-parser-js'); }
@@ -526,26 +532,49 @@ app.get('/api/dashboard/paths', async (req, res) => {
 // "Recent" — Cloudflare doesn't store individual request rows, so we
 // approximate with per-minute aggregates over the last hour, broken
 // down by country + path + device. Each row is activity in a 1-min window.
+// Mask the last octet of an IPv4 (192.0.2.45 → 192.0.2.x) or last hextet
+// of an IPv6 to avoid surfacing full visitor IPs in the admin UI.
+function maskIp(ip) {
+    if (!ip) return '—';
+    if (ip.includes('.')) {
+        const parts = ip.split('.');
+        if (parts.length === 4) return parts.slice(0, 3).join('.') + '.x';
+    }
+    if (ip.includes(':')) {
+        const parts = ip.split(':');
+        return parts.slice(0, -1).join(':') + ':x';
+    }
+    return ip;
+}
+
 app.get('/api/dashboard/recent', async (req, res) => {
     try {
+        // Look back 24h, not 1h: low-traffic sites may have no visits in the
+        // most recent hour, leaving "最近 50 条" empty. Cloudflare adaptive
+        // groups still cap each query at 24h, but cfAdaptive chunks longer
+        // ranges automatically — 24h fits in a single chunk anyway.
         const until = new Date();
-        const since = new Date(until.getTime() - 60 * 60 * 1000);
+        const since = new Date(until.getTime() - 24 * 60 * 60 * 1000);
         const groups = await cfAdaptive(
             since.toISOString(), until.toISOString(),
-            ['datetimeMinute', 'clientCountryName', 'clientRequestPath', 'clientDeviceType'],
-            { limit: 200, order: 'datetimeMinute_DESC' }
+            ['datetimeMinute', 'clientIP', 'clientCountryName', 'clientRequestPath', 'clientDeviceType'],
+            { limit: 500, order: 'datetimeMinute_DESC' }
         );
 
-        const recent = groups.slice(0, 50).map(g => ({
-            ts: Math.floor(new Date(g.dimensions.datetimeMinute).getTime() / 1000),
-            ip: '—',
-            country: ISO_TO_NAME[g.dimensions.clientCountryName] || g.dimensions.clientCountryName || '',
-            city: '',
-            path: g.dimensions.clientRequestPath || '/',
-            browser: null, os: null,
-            device: g.dimensions.clientDeviceType || 'unknown',
-            count: g.count,
-        }));
+        const recent = groups.slice(0, 50).map(g => {
+            const rawIp = g.dimensions.clientIP || '';
+            const lookup = rawIp ? geoip.lookup(rawIp) : null;
+            return {
+                ts: Math.floor(new Date(g.dimensions.datetimeMinute).getTime() / 1000),
+                ip: maskIp(rawIp),
+                country: ISO_TO_NAME[g.dimensions.clientCountryName] || g.dimensions.clientCountryName || '',
+                city: (lookup && lookup.city) ? lookup.city : '',
+                path: g.dimensions.clientRequestPath || '/',
+                browser: null, os: null,
+                device: g.dimensions.clientDeviceType || 'unknown',
+                count: g.count,
+            };
+        });
 
         res.json({ recent });
     } catch (e) { console.error(`[dash] ${req.path}:`, e.message); res.status(500).json({ error: e.message }); }
