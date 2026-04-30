@@ -93,7 +93,6 @@ export function AudioDebugPanel() {
     seqGap:     0,
     rxPeak:     0,
     serverUsers: 0,
-    liveJitterTarget: -1,    // Phase D v4.3.1: live adaptive value from server
   })
 
   useEffect(() => {
@@ -113,7 +112,6 @@ export function AudioDebugPanel() {
         seqGap:      audioService.rxSeqGapCount,
         rxPeak:      audioService.rxLevelPeak,
         serverUsers: audioService.serverPeerCount,
-        liveJitterTarget: audioService.liveJitterTarget,
       })
     }, 200)
     return () => clearInterval(tick)
@@ -216,24 +214,13 @@ export function AudioDebugPanel() {
           />
           <hr style={hrStyle} />
           <div style={sectionTitle}>SERVER — per-user jitter buffer</div>
-          {/* jitterTarget slider stays for legacy compat — Phase C v4.3.0
-              made the server-side target adaptive, so this slider's
-              value is now ignored by the mix tick. The "live" line below
-              shows what the server is actually using right now. */}
           <Slider
-            label="jitterTarget (saved, ignored by mix)" value={s.jitterTarget} min={1} max={16} step={1}
+            label="jitterTarget" value={s.jitterTarget} min={1} max={16} step={1}
             display={`${s.jitterTarget} fr · ${jitterTargetMs} ms`}
             onChange={v => setSrv('jitterTarget', v)}
           />
-          <div style={{ fontSize: 10, marginLeft: 4, marginBottom: 4, color: '#9f9' }}>
-            live adaptive: <b style={{ color: '#ff0' }}>
-              {stats.liveJitterTarget < 0
-                ? '— (no LEVELS yet)'
-                : `${stats.liveJitterTarget} fr · ${(stats.liveJitterTarget * 2.5).toFixed(1)} ms`}
-            </b>
-          </div>
           <Slider
-            label="jitterMaxDepth (adaptive cap)" value={s.jitterMaxDepth} min={1} max={64} step={1}
+            label="jitterMaxDepth" value={s.jitterMaxDepth} min={1} max={64} step={1}
             display={`${s.jitterMaxDepth} fr · ${jitterCapMs} ms cap`}
             onChange={v => setSrv('jitterMaxDepth', v)}
           />

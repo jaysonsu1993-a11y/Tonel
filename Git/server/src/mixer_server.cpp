@@ -51,19 +51,13 @@ void MixerServer::JitterEstimator::on_packet_arrived(uint64_t now_us, int max_ta
     if (new_proposed > max_target) new_proposed = max_target;
 
     // Hysteresis. Require HYSTERESIS_AGREE consecutive recomputes to
-    // propose the SAME (non-current) value before committing. Stops a
-    // single burst from bumping target up and back.
-    //
-    // v4.3.2 fix: when new_proposed == adaptive_target, EARLY-RETURN
-    // without disturbing proposed_target / agree_count. Previously we
-    // reset agree_count to 0 here, which meant a single recompute that
-    // happened to land on the current value (always possible under
-    // P95 noise) would wipe a hysteresis count that was 2/3 of the way
-    // toward a real change. The intended semantic in the comment ("the
-    // current committed target is exempt — proposing == current always
-    // trivially passes") only works if we leave the in-progress
-    // counter alone.
+    // propose the SAME value before committing. Stops a single burst
+    // from bumping target up and back. The current committed target
+    // is exempt — proposing == current always trivially passes.
     if (new_proposed == adaptive_target) {
+        // Already where we want to be — reset the disagreement counter.
+        proposed_target = new_proposed;
+        agree_count = 0;
         return;
     }
     if (new_proposed == proposed_target) {
@@ -1048,17 +1042,7 @@ void MixerServer::broadcast_mixed_audio(Room* room,
 // ============================================================
 
 void MixerServer::broadcast_levels(Room* room) {
-    // Build JSON:
-    //   {"type":"LEVELS",
-    //    "levels":{"user1":0.42,"user2":0.15,...},
-    //    "jitter":{"user1":2,"user2":1,...}}        ← Phase D v4.3.1
-    //
-    // The `jitter` block carries each user's current adaptive jitter
-    // target (Phase C v4.3.0). Clients pick out their own user-id and
-    // surface it in the debug panel as the live target. Without this
-    // the panel still shows the static MIXER_TUNE_ACK value, which is
-    // now ignored by the mix tick — so users couldn't see what was
-    // actually happening.
+    // Build JSON: {"type":"LEVELS","levels":{"user1":0.42,"user2":0.15,...}}
     std::string json = "{\"type\":\"LEVELS\",\"levels\":{";
     bool first = true;
     for (const auto& kv : room->users) {
@@ -1068,13 +1052,6 @@ void MixerServer::broadcast_levels(Room* room) {
         float level = std::min(1.0f, rms * 2.5f);
         if (!first) json += ",";
         json += "\"" + kv.first + "\":" + std::to_string(level);
-        first = false;
-    }
-    json += "},\"jitter\":{";
-    first = true;
-    for (const auto& kv : room->users) {
-        if (!first) json += ",";
-        json += "\"" + kv.first + "\":" + std::to_string(kv.second.jitter_estimator.target());
         first = false;
     }
     json += "}}";
@@ -1102,38 +1079,17 @@ void MixerServer::handle_mix_timer() {
     // Absolute-deadline scheduling: process every deadline that has already
     // passed. In normal operation this loop runs once (we're roughly on
     // schedule). Under load — main thread blocked, GC pause, etc. — we
-    // catch up by firing all overdue broadcasts in a burst (capped — see
-    // "catch-up cap" below), then re-anchor to the next-up deadline. Net
-    // effect: average broadcast rate stays *exactly* 400/s (post-Phase-B,
-    // 2.5 ms tick) anchored to the start time, no compounding drift.
+    // catch up by firing all overdue broadcasts in a burst, then re-anchor
+    // to the next-up deadline. Net effect: average broadcast rate stays
+    // *exactly* 200/s anchored to the start time, no compounding drift.
     //
-    // The previous `uv_timer_start(..., 2, 2)` approach (and pre-Phase-B's
-    // 5/5) scheduled each fire as `now + N ms` after the previous fire, so
-    // libuv timer slop (typical ~0.2 ms, plus event-loop overhead)
-    // compounded indefinitely. On the production server that compounded to
-    // ~0.8 % rate offset (398/s instead of 400/s), which the client had to
-    // compensate by pitch-shifting playback — at 2.5 ms tick the relative
-    // jitter is double what it was at 5 ms, so the absolute-deadline
-    // anchor matters even more after Phase B.
+    // The previous `uv_timer_start(..., 5, 5)` approach scheduled each
+    // fire as `now + 5 ms` after the previous fire, so libuv timer slop
+    // (typical ~0.2 ms, plus event-loop overhead) compounded indefinitely.
+    // On the production server that compounded to ~0.8 % rate offset
+    // (198.4/s instead of 200/s), which the client had to compensate by
+    // pitch-shifting playback ≥ 1.2 % — outside the cap, causing reprime.
     uint64_t now_us = uv_hrtime() / 1000ULL;
-
-    // v4.3.2 catch-up cap. If we're more than 100 ms behind the next
-    // deadline (event-loop stall, GC pause, OS pre-emption, etc.),
-    // snap forward to "now + one tick" instead of firing 40+
-    // back-to-back broadcasts in a single timer callback. The burst
-    // would flood every connected client's UDP recv queue with stale
-    // packets, defeat client-side jitter buffers, and trigger a
-    // reprime cascade. Better to drop the missed audio and resume
-    // cleanly than to deliver it all at once.
-    static constexpr uint64_t MAX_LAG_US = 100000;   // 100 ms
-    if (now_us > mix_next_deadline_us_ &&
-        now_us - mix_next_deadline_us_ > MAX_LAG_US) {
-        const uint64_t lag = now_us - mix_next_deadline_us_;
-        std::cout << "[MixerServer] catch-up cap engaged: lag=" << (lag / 1000)
-                  << " ms; snapping forward (dropping " << (lag / MIX_INTERVAL_US)
-                  << " missed ticks)" << std::endl;
-        mix_next_deadline_us_ = now_us + MIX_INTERVAL_US;
-    }
 
     while (now_us >= mix_next_deadline_us_) {
         bool send_levels = false;
@@ -1154,27 +1110,16 @@ void MixerServer::handle_mix_timer() {
             // empty due to a delayed packet).
             for (auto& user_kv : room->users) {
                 UserEndpoint& uep = user_kv.second;
-                // Phase C v4.3.0 introduced an adaptive jitter target
-                // (estimator chooses target from observed IAT). v4.3.4
-                // BYPASSES that — falls back to the user's static
-                // jitter_target (default 1, configurable via MIXER_TUNE).
-                //
-                // Why: v4.3.3 real-session validation showed reprime
-                // count 6× v4.2.3 (3 → 18) and ring depth 2× (429 →
-                // 840) on the same audio path. Suspect interaction
-                // between adaptive's trim-on-shrink (drops oldest
-                // frames each time target shrinks → audible
-                // discontinuity) and the audit-tightened hysteresis
-                // (P0-1 in v4.3.2 made adaptive react faster, so
-                // target oscillates more under noise). Net acoustic
-                // regression for users on stable networks.
-                //
-                // The estimator still runs (recording IATs), so when
-                // we re-enable adaptive in a future release the data
-                // is there. Just the read path is bypassed for now.
-                // To re-enable: change `eff_target` back to
-                // `std::max(uep.jitter_target, uep.jitter_estimator.target())`.
-                const int eff_target = uep.jitter_target;
+                // Phase C v4.3.0 — read the adaptive target from the
+                // estimator instead of the static uep.jitter_target.
+                // Falls back to a sane minimum (the user's saved
+                // jitter_target floor) when the estimator hasn't yet
+                // collected enough samples (its initial value is 1,
+                // matching the legacy default). When the queue is
+                // already long enough to cover the new target, we
+                // re-prime immediately rather than waiting for the
+                // queue to organically refill.
+                const int eff_target = std::max(0, uep.jitter_estimator.target());
                 if (!uep.jitter_primed) {
                     if (static_cast<int>(uep.jitter_queue.size()) >= eff_target) {
                         uep.jitter_primed = true;

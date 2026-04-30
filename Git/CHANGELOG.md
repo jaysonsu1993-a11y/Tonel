@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.5] - 2026-04-30
+
+### Reverted — full rollback of audio path to v4.3.0 source
+
+User requested rollback to v4.3.0 after reporting v4.3.3 acoustic
+regression and v4.3.4's surgical bypass not addressing the
+underlying confidence gap. Per-Phase validation was supposed to be
+the rule (per `feedback_jitter_test_blind_spot`); v4.3.0 (Phase C
+shipping) → D.0 → audit got piled in too quickly without a baseline
+listening pass on Phase C alone. This rollback gives that pass.
+
+#### What got reverted (4 files, content checked out from `v4.3.0`)
+
+- `Git/server/src/mixer_server.cpp` — un-does:
+  - v4.3.1's LEVELS broadcast `jitter` map field
+  - v4.3.2's P0-1 hysteresis fix
+  - v4.3.2's P0-2 user-floor on eff_target
+  - v4.3.2's P0-5 catch-up cap
+  - v4.3.4's bypass (eff_target = uep.jitter_target)
+  → mix tick reads `std::max(0, uep.jitter_estimator.target())` again
+- `Git/server/wt-mixer-proxy/main.go` — un-does v4.3.2's P0-6
+  WT session takeover (sessionMap.set no longer closes displaced
+  sessions)
+- `Git/web/src/components/AudioDebugPanel.tsx` — un-does v4.3.1's
+  liveJitterTarget display + new "live adaptive" line
+- `Git/web/src/services/audioService.ts` — un-does:
+  - v4.3.1's LEVELS jitter map parsing + liveJitterTarget field
+  - v4.3.2's P0-3 PLC xfLen=0 guard
+  - v4.3.2's P0-4 lastBlock save during PLC quantum
+  - v4.3.2's RING_SIZE_HALF refactor
+  - v4.3.2's peerLevelCallback try/catch
+
+#### What stayed forward (kept post-v4.3.0 changes)
+
+- `Git/CHANGELOG.md` — full version history retained (additive)
+- `Git/.gitignore` — D.0 hygiene (clangd `.cache/` + Go binary
+  paths)
+- `Git/deploy/health.sh` — D.0.1 retry on transient WSS
+  handshake failures (purely an ops bugfix, unrelated to audio)
+- `Git/web/src/services/signalService.ts` — user's `/new` URL
+  routing branch (added independently of any v4.x phase)
+- Version files (CMakeLists / package.json) — re-bumped to 4.3.5
+  by bump-version.sh; not "kept", just normal release flow
+
+#### Why this isn't a force-push
+
+`v4.3.5` is a normal forward release: new commit on top of
+HEAD with new tag. Git history shows every step of v4.3.1–4.3.4
+that we then rolled back. Anyone reviewing the log can see the
+sequence and the reasoning in this entry. v4.3.0's effective
+audio path is restored without rewriting any prior commits.
+
+#### Next steps (deliberate, no piling)
+
+1. User validates v4.3.5 listening — should match the v4.3.0
+   audio behaviour they wanted to validate originally.
+2. If clean: that's the new baseline. Phase C is "shipped but
+   needs improvements before adding to it".
+3. If still bad: Phase C itself (adaptive jitter) is the
+   regression and we revert to v4.2.3 audio path next.
+
+### Validation
+
+- typecheck — clean
+- server build (cmake) — clean
+- pretest 6/6 PASS, no retries needed (Layer 6 self-updates to
+  test current schema; no schema bump in this release)
+
 ## [4.3.4] - 2026-04-30
 
 ### Reverted — Phase C adaptive jitter target (acoustic regression)

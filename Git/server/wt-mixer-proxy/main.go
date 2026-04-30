@@ -93,26 +93,10 @@ func newSessionMap() *sessionMap {
 func (sm *sessionMap) set(uid string, s *webtransport.Session) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	// v4.3.2 fix: if a session was already registered for this uid
-	// (e.g. a tab reconnected without the previous one fully closing,
-	// or a second device joined as the same user), CLOSE the displaced
-	// session. Pre-fix, we just dropped the map reference but the
-	// session's read goroutine kept running and forwarding datagrams
-	// to the mixer — both sessions streamed to the same userId,
-	// confusing the per-recipient mix-minus path on the mixer side.
-	// The mixer's session-takeover logic only handled the TCP control
-	// channel (`displaced_tcp` in mixer_server.cpp); the UDP audio leg
-	// had no equivalent until this fix.
-	//
-	// Close on a goroutine because CloseWithError can briefly block on
-	// QUIC frame send; we don't want to hold the sessionMap lock for
-	// that. The displaced session's handleSession will see its
-	// ReceiveDatagram error out and self-clean the deferred path.
-	if cur, ok := sm.m[uid]; ok && cur != s {
-		go func(prev *webtransport.Session) {
-			_ = prev.CloseWithError(0, "replaced by new session for same uid")
-		}(cur)
-	}
+	// If a session was already registered for this uid (e.g. a tab
+	// reconnected without the previous one fully closing), drop the
+	// old reference. The mixer side handles user re-registration via
+	// the SPA1 handshake; we just need the routing to follow.
 	sm.m[uid] = s
 }
 
