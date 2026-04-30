@@ -59,10 +59,21 @@ function makeLoggedInUserId(base: string): string {
 const USER_API_BASE = import.meta.env.VITE_USER_API_URL || 'https://api.tonel.io'
 
 // Deep-link parsing — `/room/<id>` is the canonical room URL.
+// `/new` is a parallel namespace pointing the audio + signaling at the
+// Guangzhou test mixer (see audioService.ts / signalService.ts);
+// `/new/room/<id>` is its room form. Both produce the same room id.
 // Returns the room id if the path matches, else null.
 function parseRoomPath(pathname: string): string | null {
-  const m = pathname.match(/^\/room\/([A-Za-z0-9_-]+)\/?$/)
+  const m = pathname.match(/^(?:\/new)?\/room\/([A-Za-z0-9_-]+)\/?$/)
   return m ? m[1] : null
+}
+
+// `/new` test-deployment prefix. Audio + signaling services route to
+// new-server hosts when this prefix is present (see audioService.ts).
+// Centralized here so URL-rewrite logic (room transitions, deep-link
+// cancel) preserves the prefix instead of clobbering it back to `/`.
+function pathPrefix(): '/new' | '' {
+  return window.location.pathname.startsWith('/new') ? '/new' : ''
 }
 
 export default function App() {
@@ -167,7 +178,10 @@ export default function App() {
   // the URL out from under the password prompt.
   useEffect(() => {
     if (deepLinkRoomId) return
-    const targetPath = roomId ? `/room/${roomId}` : '/'
+    // Preserve the `/new` test prefix across room enter/leave so URL
+    // sync doesn't trip the test deployment back to production.
+    const prefix = pathPrefix()
+    const targetPath = roomId ? `${prefix}/room/${roomId}` : (prefix || '/')
     if (window.location.pathname !== targetPath) {
       // Preserve the query string across the join transition so debug
       // flags like `?debug=1` survive into the room. Without this, the
@@ -298,8 +312,10 @@ export default function App() {
     setDeepLinkPassword('')
     setDeepLinkError(null)
     // Strip /room/<id> from URL so a refresh doesn't re-prompt.
-    if (window.location.pathname !== '/') {
-      window.history.replaceState({}, '', '/')
+    // Preserve `/new` test prefix if present (see pathPrefix).
+    const home = pathPrefix() || '/'
+    if (window.location.pathname !== home) {
+      window.history.replaceState({}, '', home)
     }
   }, [])
 

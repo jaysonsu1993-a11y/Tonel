@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.9] - 2026-04-30
+
+### Fixed — `/new` test-deployment URL was clobbered to `/` on first paint
+
+`tonel.io/new` is the path used to route audio + signaling at the
+Guangzhou test mixer (audioService.ts / signalService.ts read
+`location.pathname.startsWith('/new')` to pick `srv-new.tonel.io` /
+`api-new.tonel.io`). v4.3.2 wired the host selection but missed the
+URL-sync layer — App.tsx's room-state→URL effect ran on first paint
+with `roomId === ''`, computed `targetPath = '/'`, and `pushState`'d
+`/new` away to `/` *before* any service had a chance to read pathname.
+Net effect: `/new` always resolved to the production hosts.
+
+Three changes in App.tsx, all additive:
+
+- `parseRoomPath` regex now accepts an optional `/new` prefix, so
+  `/new/room/<id>` parses to the same room id as `/room/<id>`.
+- A new `pathPrefix()` helper centralizes the `/new`-vs-`''`
+  decision. The URL-sync effect uses it to compute `targetPath`
+  (`${prefix}/room/<id>` or `${prefix || '/'}`) instead of hard-
+  coding `/`.
+- `cancelDeepLink` uses `pathPrefix() || '/'` for the post-cancel
+  home URL so the test prefix survives a cancelled deep link.
+
+When pathname doesn't start with `/new`, `pathPrefix()` returns `''`
+and every `targetPath` formula is byte-identical to v4.3.8 — the
+production code path has no behavior change.
+
+This is a web-only fix; server binaries are unchanged in 4.3.9.
+
 ## [4.3.8] - 2026-04-30
 
 ### Fixed — debug panel slider drag no longer "听觉上的叠加"
