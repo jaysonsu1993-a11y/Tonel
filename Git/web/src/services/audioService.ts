@@ -2473,6 +2473,17 @@ export class AudioService {
     const forced = new URLSearchParams(location.search).get('transport')
     if (forced === 'wss') return 'wss'
     if (forced === 'wt')  return 'wt'   // user explicitly asked for WT — let connect fail loudly if unsupported
+    // /new test deployment: WT path on the Guangzhou test mixer shows
+    // 4-15× higher click_rate / norm_energy than WSS in automated A/B
+    // (audio_quality_e2e.js --mode wt vs --mode wss against
+    // srv-new.tonel.io). Suspected root cause is the cloud
+    // provider's hypervisor egress: TCP gets hardware offload, UDP
+    // 4433 walks a bursty software path → QUIC datagrams arrive
+    // unevenly → audible 破音. Until the new server's UDP path is
+    // fixed (or it moves to a provider with TCP-class UDP egress),
+    // /new force-selects WSS to give /new users an experience
+    // comparable to / production. See CHANGELOG v4.3.11.
+    if (location.pathname.startsWith('/new')) return 'wss'
     return (typeof WebTransport !== 'undefined') ? 'wt' : 'wss'
   }
 

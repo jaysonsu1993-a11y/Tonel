@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.11] - 2026-04-30
+
+### Fixed — `/new` users hearing 破音 over WebTransport on Guangzhou test mixer
+
+User reported persistent audible 破音 on `tonel.io/new` that no
+AudioDebugPanel slider combination could mitigate, while
+`tonel.io/new?transport=wss` was clean. Investigation:
+
+- **Server-side ruled out**: loopback A/B (`audio_quality_remote_ab.sh`,
+  127.0.0.1 → 127.0.0.1) on prod and new produced bit-near-identical
+  metrics. mixer/ws-mixer-proxy code paths are clean on both.
+- **WSS A/B ruled out**: from-Mac WSS A/B was within run-to-run noise.
+- **WT A/B reproduced the symptom**: built a Node WebTransport test
+  client (`spa1_wt_client.js`, `audio_quality_e2e.js --mode wt`) and
+  ran the same scenario suite over WT against both servers. New
+  server showed **4–15× higher click_rate / norm_energy on sine
+  signals** vs production, while WSS A/B was within noise.
+- **Network path probes don't differ**: ping RTT and stddev to both
+  servers are within 5%.
+- **Server kernel/UDP config identical** (MTU 1500, rmem/wmem
+  212992, qdisc fq_codel, congestion cubic — verified via sysctl/tc).
+
+Suspected root cause is the new cloud provider's hypervisor egress
+behavior: TCP gets virtual-switch hardware offload, UDP 4433 walks a
+software path that bursts datagrams unevenly. QUIC datagrams arrive
+clustered → audible discontinuity at frame boundaries → 破音. The WSS
+path on the same server is unaffected because TCP retransmit + reorder
+reconstructs an even byte stream.
+
+This is not a tonel-side bug — same `wt-mixer-proxy` binary, kernel
+config, room state on both servers. Cannot be fixed from the tonel
+codebase. The workaround until the new server's UDP egress is
+addressed (or it moves to a provider with TCP-class UDP path):
+
+`audioService.chooseAudioTransport()` now force-selects WSS when
+`location.pathname.startsWith('/new')`, regardless of WebTransport
+availability. Production users on `/` are unaffected — they keep
+the WT default and its lower-latency benefits.
+
+#### New automation in this release
+
+- `Git/server/test/spa1_wss_client.js` — WSS-mode SPA1 client (used
+  for the WSS A/B that ran earlier this session).
+- `Git/server/test/spa1_wt_client.js` — WebTransport-mode SPA1 client
+  via `@fails-components/webtransport`. Caveat: WT control still flows
+  over the WSS `/mixer-tcp` channel (mirrors the browser architecture
+  — WT is audio-only, JOIN/ACK is over the WSS control side).
+- `audio_quality_e2e.js --mode wss --wssHost X` (added v4.3.something)
+  and `--mode wt --wtHost X` (new in v4.3.11). The raw TCP/UDP mode
+  remains the default for the local-mixer test path.
+- `Git/server/test/remote_ab.sh --mode wss|wt --hostA --hostB` runs
+  the scenario sweep against two production-style servers and prints
+  side-by-side metrics. Used here to reproduce the symptom; future
+  "is server X regressing?" investigations can re-use it.
+
+This is a web-only fix; server binaries are unchanged in 4.3.11.
+
 ## [4.3.10] - 2026-04-30
 
 ### Fixed — `/new` audio path was silently routing to production again

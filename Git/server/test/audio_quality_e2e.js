@@ -64,6 +64,13 @@ function parseArgs() {
     burstHoldMs:  20,          // when burstEvery > 0, this is the suspend duration in ms
     summary:      'human',     // 'human' | 'csv' (csv prints one line for sweep aggregation)
     signal:       'sine',      // 'sine' | 'noise' | 'voice'
+    mode:         'raw',       // 'raw' (TCP+UDP, default) | 'wss' | 'wt'
+    wssHost:      '',          // hostname for wss:// URLs when mode=wss
+    tcpPath:      '/mixer-tcp',
+    udpPath:      '/mixer-udp',
+    wtHost:       '',          // hostname for https:// (WT) URLs when mode=wt
+    wtPath:       '/mixer-wt',
+    wtPort:       4433,
   };
   for (let i = 0; i < args.length; i += 2) {
     const k = args[i].replace(/^--/, '');
@@ -426,13 +433,32 @@ function analyse(samples, fundamental) {
 async function main() {
   const opts = parseArgs();
   if (opts.summary !== 'csv') {
-    console.log(`[test] mixer @ ${opts.host}:${opts.tcp}/${opts.udp}, room=${opts.room}`);
+    if (opts.mode === 'wss') {
+      console.log(`[test] WSS mixer @ ${opts.wssHost}${opts.tcpPath} + ${opts.udpPath}, room=${opts.room}`);
+    } else if (opts.mode === 'wt') {
+      console.log(`[test] WT mixer @ ${opts.wtHost}:${opts.wtPort}${opts.wtPath}, room=${opts.room}`);
+    } else {
+      console.log(`[test] mixer @ ${opts.host}:${opts.tcp}/${opts.udp}, room=${opts.room}`);
+    }
     console.log(`[test] signal: ${opts.signal === 'sine' ? `${opts.freq} Hz sine` : opts.signal}, amp=${opts.amp}, ${opts.seconds}s` +
                 (opts.sigma ? `, +N(0,${opts.sigma}) noise` : ''));
   }
 
-  const sender   = new Spa1Client(opts.host, opts.tcp, opts.udp, opts.room, 'sender');
-  const receiver = new Spa1Client(opts.host, opts.tcp, opts.udp, opts.room, 'receiver');
+  let sender, receiver;
+  if (opts.mode === 'wss') {
+    if (!opts.wssHost) throw new Error('--mode wss requires --wssHost <hostname>');
+    const { Spa1WssClient } = require('./spa1_wss_client.js');
+    sender   = new Spa1WssClient(opts.wssHost, opts.tcpPath, opts.udpPath, opts.room, 'sender');
+    receiver = new Spa1WssClient(opts.wssHost, opts.tcpPath, opts.udpPath, opts.room, 'receiver');
+  } else if (opts.mode === 'wt') {
+    if (!opts.wtHost) throw new Error('--mode wt requires --wtHost <hostname>');
+    const { Spa1WtClient } = require('./spa1_wt_client.js');
+    sender   = new Spa1WtClient(opts.wtHost, opts.wtPath, opts.wtPort, opts.room, 'sender');
+    receiver = new Spa1WtClient(opts.wtHost, opts.wtPath, opts.wtPort, opts.room, 'receiver');
+  } else {
+    sender   = new Spa1Client(opts.host, opts.tcp, opts.udp, opts.room, 'sender');
+    receiver = new Spa1Client(opts.host, opts.tcp, opts.udp, opts.room, 'receiver');
+  }
 
   // Capture buffer: enough samples for the full test plus a safety margin.
   const totalFrames = Math.ceil(opts.seconds * (1000 / FRAME_INTERVAL_MS));
