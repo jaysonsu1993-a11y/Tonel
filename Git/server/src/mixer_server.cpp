@@ -1042,7 +1042,17 @@ void MixerServer::broadcast_mixed_audio(Room* room,
 // ============================================================
 
 void MixerServer::broadcast_levels(Room* room) {
-    // Build JSON: {"type":"LEVELS","levels":{"user1":0.42,"user2":0.15,...}}
+    // Build JSON:
+    //   {"type":"LEVELS",
+    //    "levels":{"user1":0.42,"user2":0.15,...},
+    //    "jitter":{"user1":2,"user2":1,...}}        ← Phase D v4.3.1
+    //
+    // The `jitter` block carries each user's current adaptive jitter
+    // target (Phase C v4.3.0). Clients pick out their own user-id and
+    // surface it in the debug panel as the live target. Without this
+    // the panel still shows the static MIXER_TUNE_ACK value, which is
+    // now ignored by the mix tick — so users couldn't see what was
+    // actually happening.
     std::string json = "{\"type\":\"LEVELS\",\"levels\":{";
     bool first = true;
     for (const auto& kv : room->users) {
@@ -1052,6 +1062,13 @@ void MixerServer::broadcast_levels(Room* room) {
         float level = std::min(1.0f, rms * 2.5f);
         if (!first) json += ",";
         json += "\"" + kv.first + "\":" + std::to_string(level);
+        first = false;
+    }
+    json += "},\"jitter\":{";
+    first = true;
+    for (const auto& kv : room->users) {
+        if (!first) json += ",";
+        json += "\"" + kv.first + "\":" + std::to_string(kv.second.jitter_estimator.target());
         first = false;
     }
     json += "}}";

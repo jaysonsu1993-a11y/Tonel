@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.1] - 2026-04-30
+
+### Phase D.0 — release-flow cleanup (3 small fixes accumulated across v4.x)
+
+Cleanup pass of issues that surfaced during the Phase A-C release
+sequence and were noted as "fix later". None individually warrant
+a MINOR; bundled here to clear the backlog before Phase D's
+larger architectural questions.
+
+#### D.0.1 — `health.sh` retry on transient WSS handshake failures
+
+`Git/deploy/server.sh --component=binary` sequentially restarts
+`tonel-mixer` and `tonel-signaling` via pm2 stop+start. There's a
+~0.5–1.5s window between the mixer's stop and start where
+`tonel-ws-mixer-proxy` can't reach upstream `127.0.0.1:9002`,
+returning HTTP 000 to a WSS handshake probe. Health check fired
+inside that window 3 of the last 7 deploys (false-positive rate
+> 40%) — visible as `wss srv.tonel.io/mixer-tcp HTTP 000` in
+release.sh's tail before re-running health manually.
+
+Fix: `check_wss_handshake` now retries up to 3× with 1.5s spacing
+(total ~4.5s probe window, comfortably covering the race).
+Configurable via `TONEL_HEALTH_ATTEMPTS` env. Successful retries
+log `(after N attempts)` so a real underlying flake doesn't get
+hidden — we still see when retries were needed.
+
+#### D.0.2 — untrack `Git/server/.cache/clangd/`
+
+clangd's local index files (`.cache/clangd/index/*.idx`) were
+slipping into release commits because they had been committed
+once long ago. v4.1.0 added `.cache/` to `Git/.gitignore` (so new
+ones don't get tracked), but the existing tracked files kept
+showing up as "modified" on every local build → kept entering
+release commits as binary diffs.
+
+`git rm -r --cached Git/server/.cache` untracks the existing
+files; combined with the v4.1.0 .gitignore entry, the dir is now
+fully invisible to git. Saves ~50 KB of binary diff per release.
+
+#### D.0.3 — surface adaptive jitter target in debug panel
+
+Phase C v4.3.0 made `jitter_target` adaptive server-side, but the
+client's debug panel still displayed the static configured value
+(`serverTuning.jitterTarget` from MIXER_TUNE_ACK). The slider was
+silently a no-op and the displayed number could be stale by 8x
+under bursty network.
+
+Server (`broadcast_levels`): LEVELS broadcast extended with a
+`jitter` block — `{user_id: adaptive_target}`. Carries each user's
+current estimator output, sent at the existing 20 Hz cadence.
+
+Client (`audioService.ts`): `liveJitterTarget` field; LEVELS
+handler picks out our own `userId` from the `jitter` map.
+Initial value −1 means "no LEVELS received yet"; first one
+typically arrives within ~50 ms of MIXER_JOIN.
+
+Panel (`AudioDebugPanel.tsx`): legacy slider relabelled
+"jitterTarget (saved, ignored by mix)" with a new "live adaptive"
+line beneath showing `N fr · M ms` from the live value (or
+`— (no LEVELS yet)` before first message).
+
+#### Validation
+
+- typecheck — clean
+- Preview MCP smoke: `liveJitterTarget` field exists on
+  `audioService` with initial value −1 (correct: no LEVELS yet
+  on a fresh page that hasn't joined a room)
+- Server build — clean
+- pretest 6/6 PASS, no retries needed
+
 ## [4.3.0] - 2026-04-30
 
 ### Phase C — 自适应 jitter buffer (NetEQ-style adaptive target)

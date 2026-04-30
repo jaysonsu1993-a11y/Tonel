@@ -53,39 +53,65 @@ check_wss_handshake() {
     #   endpoints (e.g. api.tonel.io) where cloudflared edge may use HTTP/2 and
     #   curl-style upgrade is unreliable; we only care that cloudflared is
     #   reaching the backend at all. Real WS handshake is browser-tested.
+    #
+    # Phase D v4.3.1 — retry up to 3 times with 1.5s spacing. Phases A-C
+    # release.sh runs deploy_binary which sequentially restarts pm2-managed
+    # processes; the WSS proxy briefly can't reach the mixer during the
+    # ~0.5-1.5s window between mixer's pm2 stop and start. Pre-retry, the
+    # health check fired in that window 3 of 7 times (false positive rate
+    # > 40%). With 3 × 1.5s = 4.5s of accumulated probe time, the race
+    # window is reliably covered.
     local url="$1" label="$2" mode="${3:-strict}"
     if [ "$DRY_RUN" = "1" ]; then
         dim "  [dry-run] would probe $label  $url (from server, mode=$mode)"
         return
     fi
-    # curl returns 28 on max-time even after writing %{http_code} (the server
-    # holds the WS connection open after the 101). Force trailing "; true" so
-    # ssh exits 0 with curl's stdout (just the http code) intact.
-    local code
-    code=$(ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" \
-        "curl -sk -o /dev/null -w '%{http_code}' \
-            --max-time ${TONEL_HEALTH_TIMEOUT:-10} \
-            -H 'Connection: Upgrade' \
-            -H 'Upgrade: websocket' \
-            -H 'Sec-WebSocket-Version: 13' \
-            -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-            '$url' 2>/dev/null; true" 2>/dev/null)
-    [ -z "$code" ] && code=000
+
+    local attempts="${TONEL_HEALTH_ATTEMPTS:-3}"
+    local code=000
+    local attempt=0
+    while [ $attempt -lt $attempts ]; do
+        attempt=$((attempt + 1))
+        # curl returns 28 on max-time even after writing %{http_code} (the server
+        # holds the WS connection open after the 101). Force trailing "; true" so
+        # ssh exits 0 with curl's stdout (just the http code) intact.
+        code=$(ssh -o ConnectTimeout=10 "$TONEL_SSH_HOST" \
+            "curl -sk -o /dev/null -w '%{http_code}' \
+                --max-time ${TONEL_HEALTH_TIMEOUT:-10} \
+                -H 'Connection: Upgrade' \
+                -H 'Upgrade: websocket' \
+                -H 'Sec-WebSocket-Version: 13' \
+                -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                '$url' 2>/dev/null; true" 2>/dev/null)
+        [ -z "$code" ] && code=000
+
+        case "$mode" in
+            strict)   [ "$code" = "101" ] && break ;;
+            reachable) [ "$code" != "000" ] && break ;;
+        esac
+
+        # Don't sleep after the last attempt.
+        [ $attempt -lt $attempts ] && sleep 1.5
+    done
 
     case "$mode" in
         strict)
             if [ "$code" = "101" ]; then
-                ok "  wss  $label  101 Switching Protocols"
+                local note=""
+                [ $attempt -gt 1 ] && note=" (after $attempt attempts)"
+                ok "  wss  $label  101 Switching Protocols$note"
             else
-                err "  wss  $label  HTTP $code (expected 101)"
+                err "  wss  $label  HTTP $code (expected 101) — failed all $attempts attempts"
                 FAIL=1
             fi
             ;;
         reachable)
             if [ "$code" != "000" ]; then
-                ok "  wss  $label  reachable (HTTP $code, real handshake browser-tested)"
+                local note=""
+                [ $attempt -gt 1 ] && note=" (after $attempt attempts)"
+                ok "  wss  $label  reachable (HTTP $code, real handshake browser-tested)$note"
             else
-                err "  wss  $label  unreachable (HTTP 000)"
+                err "  wss  $label  unreachable (HTTP 000) — failed all $attempts attempts"
                 FAIL=1
             fi
             ;;

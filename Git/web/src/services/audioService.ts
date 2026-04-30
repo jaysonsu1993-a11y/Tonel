@@ -316,6 +316,14 @@ export class AudioService {
                                 // with low reprime = controller doing its job; high
                                 // reprime relative to plc = sustained drops PLC couldn't
                                 // mask (network or server died for >10ms).
+  // Server's CURRENT adaptive jitter target for this user (Phase C
+  // v4.3.0 made the server target dynamic; v4.3.1 plumbs it back to
+  // the client through the LEVELS broadcast). −1 = haven't received a
+  // LEVELS message with the new field yet. Distinct from
+  // `serverTuning.jitterTarget`, which is the saved/static value the
+  // user / debug panel may have written via MIXER_TUNE; the server
+  // ignores that in favour of its own adaptive computation.
+  public liveJitterTarget = -1
   public rxSeqGapCount    = 0   // received SPA1 packets out-of-order or missing
   public playRateScale    = 1.0 // playback worklet's adaptive rate (1.0 = nominal; ±0.5%)
   public playRingFill     = 0   // current ring fill in samples (target ~1440)
@@ -2709,6 +2717,16 @@ export class AudioService {
           }
           // Engage / disengage local monitor at the population boundary.
           this.updateMonitorGain()
+          // Phase D v4.3.1 — server now ships an adaptive jitter target
+          // per user in the LEVELS broadcast (Phase C made the target
+          // dynamic; without this the debug panel still showed the
+          // static MIXER_TUNE_ACK value). Pluck out our own uid; the
+          // panel reads `liveJitterTarget` if non-null in preference
+          // to the saved `serverTuning.jitterTarget`.
+          if (msg.jitter && this.userId in msg.jitter) {
+            const t = msg.jitter[this.userId]
+            if (typeof t === 'number') this.liveJitterTarget = t
+          }
         } else if (msg.type === 'PONG') {
           // PONG received — RTT = now − pingSentAt. The control WS goes
           // through the same TCP path as MIXER_JOIN, so this is the
