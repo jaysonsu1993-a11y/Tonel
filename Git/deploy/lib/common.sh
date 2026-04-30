@@ -51,7 +51,31 @@ dry_run_flag() {
 
 load_env() {
     [ -f "$ENV_FILE" ] || die "missing $ENV_FILE — copy from .env.deploy.example and fill in"
+
+    # Preserve inline overrides — `source` would otherwise overwrite any
+    # var we set on the command line (e.g.
+    # `TONEL_SSH_HOST=... Git/deploy/server.sh ...` to target the Aliyun
+    # fallback box without editing .env.deploy). Snapshot the pre-source
+    # state, source the file, then restore any var that was already set.
+    # README documents this as the canonical way to address Aliyun in the
+    # post-v5 dual-server setup.
+    local _pre_ssh_host="${TONEL_SSH_HOST:-}"
+    local _pre_ssh_port="${TONEL_SSH_PORT:-}"
+    local _pre_tunnel="${TONEL_CF_TUNNEL_ID:-}"
+    local _pre_deploy_dir="${TONEL_DEPLOY_DIR:-}"
+    local _pre_runtime_dir="${TONEL_RUNTIME_DIR:-}"
+    local _pre_log_dir="${TONEL_LOG_DIR:-}"
+    local _pre_archive_dir="${TONEL_ARCHIVE_DIR:-}"
+
     set -a; source "$ENV_FILE"; set +a
+
+    [ -n "$_pre_ssh_host" ]    && TONEL_SSH_HOST="$_pre_ssh_host"
+    [ -n "$_pre_ssh_port" ]    && TONEL_SSH_PORT="$_pre_ssh_port"
+    [ -n "$_pre_tunnel" ]      && TONEL_CF_TUNNEL_ID="$_pre_tunnel"
+    [ -n "$_pre_deploy_dir" ]  && TONEL_DEPLOY_DIR="$_pre_deploy_dir"
+    [ -n "$_pre_runtime_dir" ] && TONEL_RUNTIME_DIR="$_pre_runtime_dir"
+    [ -n "$_pre_log_dir" ]     && TONEL_LOG_DIR="$_pre_log_dir"
+    [ -n "$_pre_archive_dir" ] && TONEL_ARCHIVE_DIR="$_pre_archive_dir"
 
     : "${TONEL_SSH_HOST:?TONEL_SSH_HOST not set in .env.deploy}"
     : "${TONEL_DEPLOY_DIR:?TONEL_DEPLOY_DIR not set in .env.deploy (e.g. /opt/tonel)}"
@@ -62,6 +86,8 @@ load_env() {
     # SSH port — default 22; v5.0+ production (酷番云) is 26806. Exported
     # so child scripts that source common.sh see it without re-loading.
     export TONEL_SSH_PORT="${TONEL_SSH_PORT:-22}"
+    export TONEL_SSH_HOST TONEL_CF_TUNNEL_ID TONEL_DEPLOY_DIR \
+           TONEL_RUNTIME_DIR TONEL_LOG_DIR TONEL_ARCHIVE_DIR
 }
 
 # ─── Git state ───────────────────────────────────────────────────────────────

@@ -75,7 +75,7 @@
         },
         "version": {
           "type": "string",
-          "default": "5.0.1",
+          "default": "5.0.2",
           "description": "Application version"
         }
       }

@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.2] - 2026-05-01
+
+### Fixed — `/new` was silently falling back from WT to WSS
+
+After v5.0.0/v5.0.1 cutover, the browser on `tonel.io/new` was
+choosing **WT** per `chooseAudioTransport()` but `audioWS` ended up
+populated and `audioWT` remained null in the debug snapshot. Root
+cause:
+
+`wt-mixer-proxy` (Go binary) loads exactly one TLS cert at startup
+via `tls.LoadX509KeyPair`. On Aliyun the cert was
+`/etc/letsencrypt/live/srv.tonel.io/fullchain.pem` — single-name,
+CN=srv.tonel.io. But /new browsers connect to UDP 4433 with
+`SNI=srv-new.tonel.io`, so the QUIC TLS handshake gets a cert that
+doesn't match the SNI, fails verification, and the client's
+`tryWebTransport()` returns false → `audioService` falls back to
+WSS. The fallback masked the underlying SNI mismatch.
+
+**Fix on each production server**: re-issue the cert as a SAN cert
+covering both `srv.tonel.io` AND `srv-new.tonel.io` via DNS-01:
+
+```
+certbot certonly --dns-cloudflare \
+    --dns-cloudflare-credentials /root/.secrets/cf-dns-token.ini \
+    --domain srv.tonel.io --domain srv-new.tonel.io \
+    --cert-name srv.tonel.io --expand
+```
+
+Path (`/etc/letsencrypt/live/srv.tonel.io/`) doesn't change, so the
+ecosystem's cert path stays `srv.tonel.io` — no `Git/ops/` change
+needed. SAN validates against either SNI.
+
+**Renewal post_hook** updated on both boxes to also reload the
+WT proxy (the Go binary loads cert once at startup):
+
+```
+post_hook = systemctl reload nginx && pm2 reload tonel-wt-mixer-proxy
+```
+
+Standalone `srv-new.tonel.io` renewal config removed on both boxes
+(the SAN cert in `srv.tonel.io` lineage now covers it). Verified
+end-to-end: `audio_quality_e2e.js --mode wt --wtHost srv-new.tonel.io`
+returns SNR 71 dB / click 0.59/s / 400 fps.
+
+### Fixed — `deploy/lib/common.sh load_env` clobbered inline env overrides
+
+`README.md` documents `TONEL_SSH_HOST=root@8.163.21.207 ... server.sh`
+as the way to address the Aliyun fallback box without editing
+`.env.deploy`. But `load_env`'s `source "$ENV_FILE"` line ran
+unconditionally after env vars were already set on the command line,
+overwriting them with the .env.deploy values. Net effect: every
+"override" attempt silently went to whatever was in `.env.deploy`
+(now 酷番云). Caught when an "ops deploy to Aliyun" actually
+deployed to 酷番云 a second time.
+
+`load_env` now snapshots `TONEL_SSH_HOST`, `TONEL_SSH_PORT`,
+`TONEL_CF_TUNNEL_ID`, and the four directory vars before sourcing,
+then restores any var that was already set. Inline override now
+works as documented; `.env.deploy` defaults still apply when nothing
+is overridden.
+
+### Files changed
+
+- `Git/deploy/lib/common.sh` — load_env preserves inline overrides
+- `Git/CHANGELOG.md` — this entry
+
+Server-side changes (out-of-band, no repo touch):
+
+- Both servers: SAN cert issued for `srv.tonel.io` + `srv-new.tonel.io`
+- Both servers: renewal post_hook updated to reload wt-mixer-proxy
+- Both servers: standalone `srv-new.tonel.io.conf` renewal removed
+- New server: also added DNS-01 renewal for `tonel.io` cert (failover)
+
+This is an infra/docs-only release; no server binaries or web bundle
+behavior change in 5.0.2.
+
 ## [5.0.1] - 2026-05-01
 
 ### Fixed — three v5.0.0 followups, all infra hygiene
