@@ -343,6 +343,11 @@ export class AudioService {
   // slider, save fires (debounced); when RESET fires, we wipe the slot
   // and re-apply defaults.
   private static readonly TUNING_KEY_PREFIX = 'tonel.tuning.'
+  // Worklet ring buffer is 48000 samples (= 1 s @ 48 kHz wire rate).
+  // primeTarget is clamped to RING_SIZE / 2 to leave drain headroom.
+  // Kept in sync with the literal `48000` in initPlaybackWorklet's
+  // worklet template literal — if the ring is resized, update both.
+  static readonly RING_SIZE_HALF = 24000
   // Bumped whenever we change a default in `tuning` / `serverTuning` that
   // would silently regress users with saved per-room overrides.
   //
@@ -1663,11 +1668,18 @@ export class AudioService {
               // either continue PLC (if ring still empty) or resume
               // normal output with the existing wasConcealing ramp-in.
               const decay = this.concealDecay[this.concealQuanta] ?? 0
-              if (decay > 0) {
+              if (decay > 0 && i + 1 < out0.length) {
                 // Crossfade region: hold the last real sample (out0[i],
                 // already valid) decaying linearly to 0, while ramping
                 // in the PLC tail from lastBlock. Sum is a smooth bridge
                 // — no sample-step at the splice point.
+                //
+                // v4.3.2 guard: the i+1 < out0.length check above
+                // prevents an off-by-one when underrun fires on the
+                // VERY LAST sample of a quantum (xfLen would be 0,
+                // crossfade and PLC-tail loops both no-op, but
+                // concealQuanta would still increment — desyncing the
+                // decay schedule for the next quantum).
                 const lastReal = out0[i]
                 const xfLen = Math.min(16, out0.length - i - 1)
                 for (let j = 1; j <= xfLen; j++) {
@@ -1718,11 +1730,22 @@ export class AudioService {
               out0[i] *= i / rampLen
             }
           }
-          // Save this quantum's output for potential PLC use next time.
-          // We snapshot AFTER any ramp-in so the PLC source itself doesn't
-          // contain the previous concealment's tail (would compound
-          // artifacts on back-to-back underruns).
-          this.lastBlock.set(out0.subarray(0, 128))
+          // Save this quantum's output for potential PLC use next time
+          // — but ONLY if this quantum was real audio. v4.3.2 fix: the
+          // mid-callback PLC path (line ~1665) breaks out of the render
+          // loop after writing PLC content into out0 and falls through
+          // here. If we saved that, the next PLC quantum would read
+          // lastBlock containing already-decayed content and decay it
+          // AGAIN, compounding non-linearly. The top-of-callback PLC
+          // path doesn't have this issue because it returns early, but
+          // mid-callback uses break to fall through.
+          //
+          // concealQuanta > 0 at this point means the most recent
+          // render exited via the PLC branch. Skip the save — keep
+          // the previously-saved (real) lastBlock for the next PLC.
+          if (this.concealQuanta === 0) {
+            this.lastBlock.set(out0.subarray(0, 128))
+          }
           for (let c = 1; c < channels.length; c++) channels[c].set(out0)
           return true
         }
@@ -1786,9 +1809,13 @@ export class AudioService {
    */
   setPlaybackTuning(t: Partial<AudioService['tuning']>, opts?: { persist?: boolean }): void {
     const next = { ...this.tuning, ...t }
-    // Clamp into safe ranges — sliders may land just outside.
+    // Clamp into safe ranges — sliders may land just outside. The
+    // upper bound is RING_SIZE / 2 from the worklet template literal
+    // (initPlaybackWorklet); kept in sync as a separate symbol here
+    // to avoid magic-number drift if the worklet ring is resized.
+    const PRIMETARGET_MAX = AudioService.RING_SIZE_HALF
     next.primeMin    = Math.max(0,    Math.min(next.primeTarget, next.primeMin))
-    next.primeTarget = Math.max(next.primeMin, Math.min(24000, next.primeTarget))
+    next.primeTarget = Math.max(next.primeMin, Math.min(PRIMETARGET_MAX, next.primeTarget))
     next.minScale    = Math.max(0.95, Math.min(0.9999, next.minScale))
     next.maxScale    = Math.min(1.05, Math.max(1.0001, next.maxScale))
     next.rateStep    = Math.max(0, Math.min(0.001, next.rateStep))
@@ -2502,8 +2529,9 @@ export class AudioService {
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // Direct connection to Alibaba Cloud server (bypasses Cloudflare Tunnel)
-    const host = 'srv.tonel.io'
+    // Direct connection to Alibaba Cloud server (bypasses Cloudflare Tunnel).
+    // /new path routes to the Guangzhou test mixer; root path stays on production.
+    const host = location.pathname.startsWith('/new') ? 'srv-new.tonel.io' : 'srv.tonel.io'
     const controlUrl = `${protocol}//${host}/mixer-tcp`
     const audioUrl   = `${protocol}//${host}/mixer-udp`
     // WebTransport listens on UDP 4433 with the same TLS cert as
@@ -2713,7 +2741,14 @@ export class AudioService {
           }
           for (const [uid, level] of Object.entries(msg.levels)) {
             this.peerLevels.set(uid, level as number)
-            if (this.peerLevelCallback) this.peerLevelCallback(uid, level as number)
+            // v4.3.2: guard the callback per-uid. A throwing
+            // peerLevelCallback would otherwise abort the rest of the
+            // LEVELS update mid-iteration, leaving peerLevels in a
+            // partially-stale state. Same pattern as
+            // fireTuningChanged() and the latency callbacks list.
+            if (this.peerLevelCallback) {
+              try { this.peerLevelCallback(uid, level as number) } catch (_) {}
+            }
           }
           // Engage / disengage local monitor at the population boundary.
           this.updateMonitorGain()

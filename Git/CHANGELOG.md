@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.2] - 2026-04-30
+
+### Fixed — code-review audit findings (6 P0 bugs + 3 P1 polish)
+
+A subagent code-reviewer pass over all v4.0–v4.3.1 changes flagged
+6 real bugs and a handful of code-quality items. None were
+visible in pretest because the existing layers don't exercise the
+specific edge cases these touch — they're surfaced only by code
+inspection. All P0s fixed; P1 polish bundled in.
+
+#### P0 — correctness bugs
+
+**P0-1** `JitterEstimator` hysteresis reset bug
+(`mixer_server.cpp` `on_packet_arrived`). When a recompute landed
+on the current `adaptive_target`, the old code reset `agree_count`
+to 0 — defeating in-progress hysteresis toward a different target.
+A noisy sequence like `propose=2, propose=2, propose=1 (=current),
+propose=2, propose=2, propose=2` would require 3 *fresh* agreements
+after the noise. Fix: early-return on `new_proposed == adaptive_target`
+without disturbing the in-progress counter. Now the same noisy
+sequence commits to 2 after 4 recomputes (correct) instead of 6
+(stale behaviour).
+
+**P0-2** `eff_target` floor in mix tick (`mixer_server.cpp`
+`handle_mix_timer`). The comment promised the user-saved
+`jitter_target` would be the floor of the adaptive computation,
+but the code did `std::max(0, estimator.target())` — a `>= 0`
+clamp, not a user-floor. Two consequences:
+- Power users who set `jitter_target=4` could be silently dropped
+  back to estimator's adaptive value of 1.
+- Adaptive target=0 made `queue.size() >= 0` trivially true, priming
+  the gate even when the queue was empty.
+Fix: `std::max(uep.jitter_target, estimator.target())`. Code now
+matches the comment and the user-floor semantic.
+
+**P0-3** Mid-callback PLC `xfLen=0` edge (`audioService.ts` worklet
+template literal). When ring underrun fired on the very last
+sample of a quantum (`i == out0.length - 1`), `xfLen = Math.min(16,
+out0.length - i - 1) = 0`. Crossfade and PLC-tail loops both
+no-op'd, but `concealQuanta` still incremented — desyncing the
+decay schedule for the next quantum (next PLC would use `decay[1]`
+instead of `decay[0]`). Fix: `decay > 0 && i + 1 < out0.length`
+guard around the PLC branch; falls through to cosine fade when
+no room for crossfade.
+
+**P0-4** PLC `lastBlock` compounding via mid-callback save
+(`audioService.ts` worklet). Top-of-callback PLC `return`s
+without saving lastBlock; mid-callback PLC `break`s and falls
+through to `lastBlock.set(out0.subarray(0, 128))`. Net effect:
+during a sustained underrun episode, mid-callback PLC's lastBlock
+was being overwritten with already-decayed PLC content, and the
+next PLC quantum would decay it AGAIN. After 4 quanta the energy
+schedule was nonlinear (1.0 × 0.7 × 0.4 × 0.15 ≈ 0.04) instead
+of the intended `[1.0, 0.7, 0.4, 0.15]` per-quantum. Fix: only
+save lastBlock when `concealQuanta === 0` (this quantum was real
+audio, not PLC fill).
+
+**P0-5** Mix-timer catch-up runaway (`mixer_server.cpp`
+`handle_mix_timer`). After a long event-loop stall (GC pause, OS
+pre-emption, debugger), `now_us >> mix_next_deadline_us_` could
+trigger 40+ broadcasts in a single timer callback, flooding every
+client's UDP recv queue with stale audio in milliseconds. Defeats
+client-side jitter buffers and triggers reprime cascade.
+Fix: catch-up cap at 100 ms — if `now - deadline > 100ms`, snap
+forward to `now + MIX_INTERVAL_US` and log how many ticks were
+dropped. Trade: ≤100 ms of audio loss after a stall, vs. an
+audible 100 ms burst that breaks every client.
+
+**P0-6** WebTransport session takeover leak
+(`wt-mixer-proxy/main.go` `sessionMap.set`). When a user joined
+twice as the same uid (tab reload, second device), the new
+session replaced the map entry but the old session's read goroutine
+kept running and forwarding datagrams to the mixer. Both sessions
+streamed simultaneously until the displaced one TCP-disconnected,
+confusing the mixer's per-recipient mix-minus path. Fix: on
+`sm.set` with a different existing session, spawn a goroutine to
+`prev.CloseWithError(0, "replaced...")`. Goroutine because
+`CloseWithError` can briefly block on QUIC frame send and we
+don't want to hold the sessionMap lock during it.
+
+#### P1 — polish
+
+- Stale "200/s broadcast rate" comment in mixer_server.cpp →
+  updated to "400/s (post-Phase-B 2.5 ms tick)" with the doubled
+  relative jitter rationale.
+- `peerLevelCallback` invocation in LEVELS handler now wrapped in
+  per-uid try/catch — same pattern as `fireTuningChanged()` and
+  the latency callbacks list. A throwing callback no longer aborts
+  the rest of the LEVELS update.
+- Magic number `24000` (= RING_SIZE / 2) in `setPlaybackTuning`
+  promoted to a class static `RING_SIZE_HALF` with a comment
+  explicitly tying it to the worklet ring constant — kept as a
+  separate symbol because the ring is local to the worklet
+  template literal.
+
+#### Validation
+
+- Full server build (cmake) — clean
+- Cross-compile of WT proxy (Go) — clean
+- typecheck — clean (caught one more backtick-in-template-literal
+  comment, fixed)
+- pretest 6/6 PASS, no retries needed
+- All 4 state-migration scenarios PASS
+
 ## [4.3.1] - 2026-04-30
 
 ### Phase D.0 — release-flow cleanup (3 small fixes accumulated across v4.x)

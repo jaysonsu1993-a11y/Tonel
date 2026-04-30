@@ -38,7 +38,9 @@ class SignalService {
   async connect(): Promise<void> {
     // Use wss if page is https, else ws
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${protocol}//api.tonel.io/signaling`
+    // /new path routes to the Guangzhou test signaling; root path stays on production.
+    const apiHost = window.location.pathname.startsWith('/new') ? 'api-new.tonel.io' : 'api.tonel.io'
+    const url = `${protocol}//${apiHost}/signaling`
 
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(url)
