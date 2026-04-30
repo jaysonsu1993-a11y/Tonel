@@ -157,8 +157,15 @@ private:
     //   v1.0.36: reverted to target=1 cap=4 (= v1.0.34).
     //   v1.0.37: added the Layer 1.5 jitter sweep.
     //   v1.0.38: keep target=1, raise cap=8. plc/s drops 5–7× vs cap=4.
-    static constexpr int JITTER_TARGET_DEFAULT    = 1;
-    static constexpr int JITTER_MAX_DEPTH_DEFAULT = 8;
+    //   v4.3.7  (post-Phase-C-rollback re-tune, user-validated):
+    //           target=2 cap=33. The much bigger cap is the key:
+    //           production WSS-burst pattern occasionally stuffs 8+
+    //           frames at once, and the previous cap=8 dropped them
+    //           audibly. cap=33 (~83 ms) absorbs without drop. A
+    //           target=2 (5 ms) gives the controller a bit more
+    //           cushion than the cap=8/target=1 of v1.0.38 era.
+    static constexpr int JITTER_TARGET_DEFAULT    = 2;
+    static constexpr int JITTER_MAX_DEPTH_DEFAULT = 33;
     // Hard ceilings the server will refuse to exceed (defensive — keeps a
     // tuning slider from running latency up unbounded or driving allocator
     // pressure with a 10000-frame deque).

@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.7] - 2026-04-30
+
+### Tuning — adopt user-validated post-rollback sweet spot as defaults
+
+User iterated on debug-panel sliders against v4.3.6 (= v4.2.3 audio
+code, Phase C removed) and reported these values as the right
+combination of latency AND audio quality:
+
+```
+primeTarget    672 → 576  (14 ms → 12 ms)   [client]
+primeMin        16 →  48  (0.3 ms → 1.0 ms) [client]
+jitterTarget    1  →   2  (2.5 ms → 5 ms)   [server]
+jitterMaxDepth 13  →  33  (32.5 ms → 82.5 ms cap) [server]
+```
+
+Live data from the user's session at these values:
+```
+ring=369 (steady, well below the 576 target — controller has slack)
+rate=+5239 ppm (sub-rail; clock drift fully absorbable)
+reprime=6 (essentially zero hard glitches)
+plc=289
+```
+
+#### What this combination buys
+
+- **Bigger jitterMaxDepth (33 fr ≈ 83 ms cap)** is the most
+  important change. Production WSS-burst-pattern occasionally
+  stuffs 8+ frames at once; the previous cap=8 dropped them
+  audibly. cap=33 gives the server room to absorb without
+  cap-drop clicks.
+- **jitterTarget=2** (vs v1.0.38's =1) gives the controller a
+  slightly larger steady-state cushion, trading 2.5 ms more
+  server-side latency for less marginal-state oscillation.
+- **primeTarget=576 (12 ms)** vs v5's 14 ms — minor latency win
+  while keeping plenty of ring depth.
+- **primeMin=48** vs v5's 16 — slightly more PLC-trigger
+  sensitivity, but trades that for fewer ring excursions to
+  absolute-zero (which previously could audibly snap before
+  PLC took over).
+
+#### Slider ranges in debug panel
+
+User also requested wider/narrower ranges to match the practical
+tuning space:
+
+- `primeTarget` slider: max 4800 → **1600** (was overshoot —
+  no real session needs > 1600 = 33 ms cushion)
+- `primeMin` slider: max 1440 → **512** (similarly narrowed)
+
+Both keep their min and step. Existing saved values outside the
+new ranges still load correctly (the slider just clamps the
+visible position).
+
+#### Schema bumped 5 → 6
+
+Existing v5 saved-tuning slots (carrying primeTarget=672 +
+jitterMaxDepth=13) are discarded on next room join, falling back
+to the new v6 defaults so users don't have to re-tune manually.
+Users who DID re-tune on v4.3.6 to these exact values would get
+no change either way (their saved primeTarget=576 etc. matches
+the new default).
+
+Layer 6 state-migration test self-updates (it reads
+`TUNING_SCHEMA_VERSION` at runtime and tests v=current-1 → v=current
+discard); confirmed v5 → v6 PASS via Preview MCP scripted check.
+
+#### Server defaults synced
+
+`mixer_server.h` `JITTER_TARGET_DEFAULT` 1 → 2 and
+`JITTER_MAX_DEPTH_DEFAULT` 8 → 33. Sent to clients via
+`MIXER_JOIN_ACK` so a fresh client without saved tuning sees the
+same values the server is using.
+
+### Validation done
+
+- typecheck — clean
+- server build (cmake) — clean
+- Preview MCP scripted: 3/3 scenarios PASS (defaults match,
+  v5→v6 discard, v6 preserve)
+- pretest 6/6 PASS
+
 ## [4.3.6] - 2026-04-30
 
 ### Reverted — audio path further rolled back to v4.2.3 (Phase C removed)

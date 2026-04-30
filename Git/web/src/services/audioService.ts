@@ -354,22 +354,26 @@ export class AudioService {
   //     was PLC-filled).
   //   v5 (v4.2.3) — Phase B tuning refinement (user-validated empirical
   //     sweet spot): primeTarget 288 → 672 (6 ms → 14 ms), primeMin
-  //     64 → 16 (1.3 ms → 0.3 ms), jitterMaxDepth 8 → 13. Counter-
-  //     intuitive on the surface (bigger primeTarget = more latency)
-  //     but produces markedly cleaner audio than the theoretical-floor
-  //     v4 values. The mechanism: a bigger ring + much smaller
-  //     primeMin means PLC only fires at the absolute tail of a
-  //     drain cycle, when the natural audio is already near-silent —
-  //     so PLC's lastBlock-with-decay output is also near-silent,
-  //     inaudible. v4's larger primeMin (64) caused PLC to fire mid-
-  //     drain when audio was still loud, producing audible buzz.
-  //     Trade: +8 ms client buffer for noticeably cleaner sound.
+  //     64 → 16 (1.3 ms → 0.3 ms), jitterMaxDepth 8 → 13.
+  //   v6 (v4.3.7) — Post-rollback re-tune (user-validated on v4.3.6
+  //     after the Phase C audio-path rollback): primeTarget 672 →
+  //     576 (14 ms → 12 ms), primeMin 16 → 48 (0.3 ms → 1.0 ms),
+  //     jitterTarget 1 → 2 (server-side, was the v1.0.38 default),
+  //     jitterMaxDepth 13 → 33. The user iterated on debug-panel
+  //     sliders against v4.3.6 (= v4.2.3 audio code, no Phase C)
+  //     and reported these values as both the right latency AND
+  //     the right audio quality. The bigger jitterMaxDepth=33 (~83 ms
+  //     server-side cap) gives the server room to absorb burst
+  //     patterns without cap-drop clicks; the bigger primeMin=48
+  //     trades 1 ms more PLC-trigger sensitivity for fewer
+  //     ring excursions to absolute-zero (which previously could
+  //     audibly snap before PLC took over).
   //
   // Schema mismatch on load → discard the stale blob, apply current
   // defaults. Memory rule (`feedback_state_migration_test`) requires
   // any future bump here to also add a Layer-6 scenario asserting the
   // discard happens correctly.
-  private static readonly TUNING_SCHEMA_VERSION = 5
+  private static readonly TUNING_SCHEMA_VERSION = 6
   private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
@@ -397,21 +401,20 @@ export class AudioService {
    *      PLC firing 6+ times/sec sustained, producing audible
    *      distortion (1.8% of audio was PLC-filled).
    *    Phase B tuning v4.2.3: primeTarget 288 → 672, primeMin 64
-   *      → 16. User-validated empirical sweet spot. The bigger
-   *      ring + much-smaller primeMin combination keeps PLC firing
-   *      only at the absolute tail of drain cycles (where audio is
-   *      already near-silent), so PLC's lastBlock-with-decay
-   *      output stays inaudible. +8 ms latency vs v4.2.2 for
-   *      markedly cleaner sound. DEFAULT_SRV.jitterMaxDepth bumped
-   *      8 → 13 in the same release to give the server-side
-   *      buffer matching headroom for burst absorption. */
+   *      → 16. User-validated empirical sweet spot.
+   *    v4.3.7 post-rollback re-tune: primeTarget 672 → 576,
+   *      primeMin 16 → 48, server defaults to jitterTarget=2 /
+   *      jitterMaxDepth=33. User iterated on debug panel against
+   *      v4.3.6 (= v4.2.3 audio code, Phase C removed) and
+   *      confirmed both latency AND audio quality were right with
+   *      this exact set. */
   private static readonly DEFAULT_PB = Object.freeze({
-    primeTarget: 672, primeMin: 16,
+    primeTarget: 576, primeMin: 48,
     maxScale: 1.025,  minScale: 0.975,
     rateStep: 0.00002,
   })
   private static readonly DEFAULT_SRV = Object.freeze({
-    jitterTarget: 1, jitterMaxDepth: 13,
+    jitterTarget: 2, jitterMaxDepth: 33,
   })
 
   // ── Live tuning knobs ────────────────────────────────────────────────────

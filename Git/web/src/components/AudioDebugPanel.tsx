@@ -188,12 +188,12 @@ export function AudioDebugPanel() {
           <hr style={hrStyle} />
           <div style={sectionTitle}>CLIENT — playback worklet</div>
           <Slider
-            label="primeTarget" value={t.primeTarget} min={48} max={4800} step={48}
+            label="primeTarget" value={t.primeTarget} min={48} max={1600} step={48}
             display={`${t.primeTarget} samp · ${primeTargetMs} ms`}
             onChange={v => setPb('primeTarget', v)}
           />
           <Slider
-            label="primeMin" value={t.primeMin} min={0} max={1440} step={16}
+            label="primeMin" value={t.primeMin} min={0} max={512} step={16}
             display={`${t.primeMin} samp · ${primeMinMs} ms`}
             onChange={v => setPb('primeMin', v)}
           />
