@@ -94,52 +94,6 @@ public:
     int udpPort() const { return udp_port_; }
 
 private:
-    // ── Adaptive jitter estimator (Phase C v4.3.0) ─────────────────
-    //
-    // Tracks per-user inter-arrival times (IAT) over a sliding window
-    // and recommends a jitter_target that absorbs the recent P95
-    // jitter without padding good networks. NetEQ-style approach,
-    // simplified for our case (fixed 2.5 ms expected IAT, scalar
-    // target output).
-    //
-    // How:
-    //   - On every UDP receive, push (now − last_arrival) into a
-    //     ring buffer of WINDOW size (default 200 = ~500 ms @ 400 fps).
-    //   - Every RECOMPUTE_PERIOD packets, sort the window and read
-    //     P95 IAT. Subtract expected IAT (2500 µs) → "excess jitter
-    //     budget needed" → divide by MIX_INTERVAL_US → integer
-    //     target frames.
-    //   - Hysteresis: only commit a new target after HYSTERESIS_AGREE
-    //     consecutive recomputes propose the same value, so a single
-    //     transient burst doesn't bump target up and back.
-    //
-    // Range: [0, jitter_max_depth]. 0 = no buffer (lowest latency,
-    // any jitter → PLC). High end clamped to existing cap so we
-    // don't outgrow the queue.
-    struct JitterEstimator {
-        static constexpr size_t WINDOW = 200;
-        static constexpr int    RECOMPUTE_PERIOD  = 20;   // every ~50 ms @ 400 fps
-        static constexpr int    HYSTERESIS_AGREE  = 3;    // 3 consecutive recomputes
-        static constexpr uint64_t EXPECTED_IAT_US = 2500; // matches MIX_INTERVAL_US
-
-        std::array<uint64_t, WINDOW> recent_iats_us {};
-        size_t cursor = 0;
-        size_t filled = 0;
-        uint64_t last_arrival_us = 0;
-        int recompute_counter = 0;
-        int proposed_target   = 1;
-        int agree_count       = 0;
-        int adaptive_target   = 1;   // current committed target
-
-        // Record a packet arrival; updates adaptive_target if hysteresis
-        // crosses. `max_target` is the cap (jitter_max_depth) — caller
-        // owns the policy of "user-set floor" if any.
-        void on_packet_arrived(uint64_t now_us, int max_target);
-
-        // Read the current committed target. O(1).
-        int target() const { return adaptive_target; }
-    };
-
     // ── Per-user endpoint (stored in Room) ───────────────────
     // Defined before Room so unordered_map can see the complete type.
     struct UserEndpoint {
@@ -165,17 +119,8 @@ private:
         // handle_control_message. Per-user (rather than global) so each
         // session can pick its own latency/quality tradeoff without
         // affecting others sharing the room.
-        //
-        // Phase C v4.3.0: jitter_target is now overridden by
-        // jitter_estimator.target() in the mix tick. The user-facing
-        // jitter_target field is kept for legacy MIXER_TUNE compat
-        // (debug panel sliders still write to it) but it's purely
-        // advisory now — the adaptive estimator picks the real value
-        // based on observed IAT. jitter_max_depth still binds the
-        // adaptive estimator's upper end.
         int jitter_target    = JITTER_TARGET_DEFAULT;
         int jitter_max_depth = JITTER_MAX_DEPTH_DEFAULT;
-        JitterEstimator jitter_estimator;
 
         // Per-recipient peer-gain table: source_uid → gain. Set via the
         // PEER_GAIN control message; consulted by mixExcludingWithGains

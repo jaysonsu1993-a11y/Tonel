@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.6] - 2026-04-30
+
+### Reverted — audio path further rolled back to v4.2.3 (Phase C removed)
+
+User requested rollback to v4.2.3 after v4.3.5 (which restored
+v4.3.0's Phase-C-with-adaptive). Strict v4.2.3 audio behaviour =
+no adaptive jitter at all, server uses static `jitter_target`
+exactly as v4.2.3 shipped.
+
+#### Files restored to v4.2.3 content
+
+Diff between v4.3.5 and v4.2.3 audio code is contained — Phase C
+only ever touched server-side files:
+
+- `Git/server/src/mixer_server.h` — removes `JitterEstimator`
+  struct declaration; `UserEndpoint::jitter_estimator` field gone
+- `Git/server/src/mixer_server.cpp` — removes `JitterEstimator::on_packet_arrived`
+  implementation; mix tick reverts to reading `uep.jitter_target`
+  directly; UDP receive no longer calls `estimator.on_packet_arrived`
+
+Web-side audio code (`audioService.ts`, `AudioDebugPanel.tsx`,
+`wt-mixer-proxy/main.go`) is **already at v4.2.3 content** post-v4.3.5
+rollback — verified by `git diff v4.2.3 HEAD` returning no changes
+for those files. v4.3.5 brought them back via a v4.3.0 checkout,
+and v4.3.0's web == v4.2.3's web (Phase C never touched the
+client).
+
+#### Phase B preserved
+
+Frame size 2.5 ms (`audio_frames=120`, `MIX_INTERVAL_US=2500`)
+stays — v4.2.3 already had it. Only Phase C (adaptive) removed.
+
+#### What stayed forward (same kept set as v4.3.5)
+
+- CHANGELOG full history
+- .gitignore D.0 hygiene
+- health.sh D.0.1 retry
+- signalService.ts `/new` URL routing branch (user-added)
+
+#### Why this rollback might or might not work
+
+If v4.3.6 sounds clean → v4.2.3 was indeed the last good state,
+and Phase C in any form (with or without audit fixes) introduced
+the regression. Phase C goes on the shelf pending a control-law
+redesign; we proceed to Phase D (native client / edge nodes)
+without re-attempting adaptive jitter.
+
+If v4.3.6 still sounds bad → the regression isn't from Phase C
+at all; something else in the v4.3.x lineage (e.g. the LEVELS
+broadcast format extension we kept-then-rolled-back, the WT
+proxy's session-takeover diff that was rolled back, or a build
+environment shift) is responsible. Investigation continues.
+
+### Validation
+
+- typecheck — clean
+- server build (cmake) — clean (now compiles smaller, no JitterEstimator)
+- pretest 6/6 PASS
+
 ## [4.3.5] - 2026-04-30
 
 ### Reverted — full rollback of audio path to v4.3.0 source

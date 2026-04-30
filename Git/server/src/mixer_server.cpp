@@ -1,75 +1,12 @@
 #include "mixer_server.h"
 
-#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <regex>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 #include <arpa/inet.h>
 #include <opus.h>
-
-// ============================================================
-// JitterEstimator (Phase C v4.3.0) — adaptive jitter target from
-// observed IAT. See declaration in mixer_server.h for design notes.
-// ============================================================
-
-void MixerServer::JitterEstimator::on_packet_arrived(uint64_t now_us, int max_target) {
-    if (last_arrival_us != 0) {
-        // Record IAT into the ring buffer.
-        const uint64_t iat = now_us - last_arrival_us;
-        recent_iats_us[cursor] = iat;
-        cursor = (cursor + 1) % WINDOW;
-        if (filled < WINDOW) ++filled;
-    }
-    last_arrival_us = now_us;
-
-    // Recompute every RECOMPUTE_PERIOD packets, but only after the
-    // window has at least 20 samples — early in a session we don't
-    // have enough data to make a confident decision and want to
-    // honour the static default.
-    if (++recompute_counter < RECOMPUTE_PERIOD || filled < 20) return;
-    recompute_counter = 0;
-
-    // P95 over the filled portion of the ring. Sort a copy — O(n log n)
-    // every 50 ms per user is trivial CPU (~75k ops/sec/user, single
-    // threaded in the lock guard, no allocations after first call
-    // because we reuse a static thread_local scratch).
-    thread_local std::vector<uint64_t> scratch;
-    scratch.assign(recent_iats_us.begin(), recent_iats_us.begin() + filled);
-    std::sort(scratch.begin(), scratch.end());
-    const size_t p95_idx = std::min(scratch.size() - 1, scratch.size() * 95 / 100);
-    const uint64_t p95_iat = scratch[p95_idx];
-
-    // Excess over expected → frames of buffer needed to absorb it.
-    // Round up so we always have at least enough headroom; 0 if P95
-    // is at or below expected (clean network).
-    const uint64_t excess_us = (p95_iat > EXPECTED_IAT_US) ? (p95_iat - EXPECTED_IAT_US) : 0;
-    int new_proposed = static_cast<int>((excess_us + EXPECTED_IAT_US - 1) / EXPECTED_IAT_US);
-    if (new_proposed < 0) new_proposed = 0;
-    if (new_proposed > max_target) new_proposed = max_target;
-
-    // Hysteresis. Require HYSTERESIS_AGREE consecutive recomputes to
-    // propose the SAME value before committing. Stops a single burst
-    // from bumping target up and back. The current committed target
-    // is exempt — proposing == current always trivially passes.
-    if (new_proposed == adaptive_target) {
-        // Already where we want to be — reset the disagreement counter.
-        proposed_target = new_proposed;
-        agree_count = 0;
-        return;
-    }
-    if (new_proposed == proposed_target) {
-        if (++agree_count >= HYSTERESIS_AGREE) {
-            adaptive_target = new_proposed;
-            agree_count = 0;
-        }
-    } else {
-        proposed_target = new_proposed;
-        agree_count = 1;
-    }
-}
 
 // ============================================================
 // Forward-declare this before MixerServer member functions that use it
@@ -850,15 +787,6 @@ void MixerServer::handle_udp_audio(const uint8_t* data, size_t len,
                           << " switched to Opus (opus valid=" << uep.opus.valid << ")\n";
             }
 
-            // Phase C v4.3.0: feed the inter-arrival-time estimator
-            // BEFORE enqueueing, so the IAT measured here reflects
-            // the gap between successive UDP arrivals (not the gap
-            // between processing batches). Use uv_hrtime() for a
-            // monotonic high-res clock — same source the mix-timer
-            // uses for its absolute-deadline scheduling.
-            uep.jitter_estimator.on_packet_arrived(
-                uv_hrtime() / 1000ULL, uep.jitter_max_depth);
-
             // Enqueue PCM frame for the next mix tick. Cap to jitter_max_depth
             // (per-user, runtime-tunable via MIXER_TUNE) by dropping the
             // oldest pending frame if the queue grows past it (e.g. client TX
@@ -1110,30 +1038,12 @@ void MixerServer::handle_mix_timer() {
             // empty due to a delayed packet).
             for (auto& user_kv : room->users) {
                 UserEndpoint& uep = user_kv.second;
-                // Phase C v4.3.0 — read the adaptive target from the
-                // estimator instead of the static uep.jitter_target.
-                // Falls back to a sane minimum (the user's saved
-                // jitter_target floor) when the estimator hasn't yet
-                // collected enough samples (its initial value is 1,
-                // matching the legacy default). When the queue is
-                // already long enough to cover the new target, we
-                // re-prime immediately rather than waiting for the
-                // queue to organically refill.
-                const int eff_target = std::max(0, uep.jitter_estimator.target());
                 if (!uep.jitter_primed) {
-                    if (static_cast<int>(uep.jitter_queue.size()) >= eff_target) {
+                    if (static_cast<int>(uep.jitter_queue.size()) >= uep.jitter_target) {
                         uep.jitter_primed = true;
                     } else {
                         continue;   // not primed yet — let PLC fill this tick
                     }
-                }
-                // If adaptive target SHRANK while we're primed, drop the
-                // oldest excess frames immediately so we don't carry a
-                // stale buffer that the user no longer needs. One-time
-                // discontinuity (samples lost) is preferable to a
-                // multi-second slow drain that the user can't observe.
-                while (static_cast<int>(uep.jitter_queue.size()) > eff_target + 1) {
-                    uep.jitter_queue.pop_front();
                 }
                 if (!uep.jitter_queue.empty()) {
                     const std::vector<float>& frame = uep.jitter_queue.front();
