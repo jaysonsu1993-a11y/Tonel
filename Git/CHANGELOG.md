@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.3] - 2026-04-30
+
+### Fixed — wt-mixer-proxy Go binary leaking into release commits
+
+`Git/deploy/server.sh` `--component=wt-proxy` cross-compiles the
+WebTransport proxy at `Git/server/wt-mixer-proxy/wt-mixer-proxy`
+(no extension). That path wasn't gitignored, so every release.sh
+run swept the 10 MB ELF into the v4.x.y commit via `git add -A`.
+v4.3.2 surfaced this as a 10 MB diff which made me audit the
+working tree before commit — confirmed it was a release-flow
+hygiene gap, not anything anyone needs in the tree.
+
+Fix:
+- `.gitignore` adds `server/wt-mixer-proxy/wt-mixer-proxy`
+- `git rm --cached` to drop it from the index (history retains the
+  v4.3.2 blob, but no future release picks it up)
+
+Same class of fix as v4.3.1's `git rm --cached server/.cache`
+clangd-index untracking. Bundle these and review the gitignore
+once we're past Phase D's bigger questions.
+
 ## [4.3.2] - 2026-04-30
 
 ### Fixed — code-review audit findings (6 P0 bugs + 3 P1 polish)

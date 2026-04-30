@@ -15,6 +15,10 @@ _build/
 # Binaries
 bin/
 server/bin/
+# Cross-compiled Go proxy binary (deploy/server.sh wt-proxy step
+# produces this at the source dir; the 10MB ELF was leaking into
+# release commits via `git add -A` until v4.3.3 added it here.)
+server/wt-mixer-proxy/wt-mixer-proxy
 
 # Xcode generated
 build_xcode/
