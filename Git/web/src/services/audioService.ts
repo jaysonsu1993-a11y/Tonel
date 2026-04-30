@@ -373,7 +373,14 @@ export class AudioService {
   // defaults. Memory rule (`feedback_state_migration_test`) requires
   // any future bump here to also add a Layer-6 scenario asserting the
   // discard happens correctly.
-  private static readonly TUNING_SCHEMA_VERSION = 6
+  //   v7 (v4.3.8) — primeTarget effective floor raised from 48 →
+  //     primeMin+192 (one quantum + jitter cushion). Below that, every
+  //     post-trim quantum mid-callback-underruns and triggers PLC
+  //     replay of lastBlock; rapid panel adjustments stack PLC events
+  //     into the audible "听觉上的叠加" the user reported on v4.3.7.
+  //     Discard old slots so anyone who explored down to 144 in the
+  //     panel doesn't carry that into v4.3.8.
+  private static readonly TUNING_SCHEMA_VERSION = 7
   private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
@@ -1476,6 +1483,24 @@ export class AudioService {
           // Decay envelope per consecutive concealment quantum.
           // 4 entries = max 4 × ~2.67 ms = ~10.7 ms of PLC before reprime.
           this.concealDecay  = [1.0, 0.7, 0.4, 0.15]
+          // ── Trim-crossfade state — v4.3.8 ──────────────────────────────
+          // When a 'tune' message shrinks targetCount and we trim the
+          // ring (readPos jumps forward), the next quantum's first sample
+          // is the post-jump audio while lastBlock holds the pre-jump
+          // audio. A direct splice is a step discontinuity (measured up
+          // to 0.58 in panel_tune_offline.js, vs. 0.04 sample-to-sample
+          // for a 0.3-amp 1 kHz sine) — audible as a click.
+          //
+          // Per slider drag the panel emits ~60 tune messages/sec, each
+          // potentially causing a trim. The clicks compound into a "tick
+          // storm" the user reports as "听觉上的叠加".
+          //
+          // Fix: after each trim, mark the next N output samples to be a
+          // linear crossfade from lastBlock (just-played audio held in
+          // the PLC scratch) to the post-jump ring content. 32 samples
+          // = 0.67 ms at 48 kHz, well under perceptual threshold for a
+          // ramp, but long enough to mask the splice step.
+          this.trimFadeRemaining = 0     // samples of crossfade still owed
           this.port.onmessage = (ev) => {
             const m = ev.data
             // Tuning message — runtime knobs from the room debug panel.
@@ -1500,14 +1525,37 @@ export class AudioService {
               // less latency," that delay reads as "knob has no effect"
               // — and worse, a sequence of grow-then-shrink moves can
               // leave the ring above target with each iteration, so
-              // *perceived* latency only ever creeps up. We accept one
-              // audible discontinuity (drop ~target_delta samples) for
-              // an instantaneous, observable latency change. Same trade
-              // as the server-side jitter_queue trim on target shrink.
-              if (this.count > this.targetCount) {
+              // *perceived* latency only ever creeps up.
+              //
+              // v4.3.8: schedule a 32-sample crossfade in the next
+              // process() instead of letting the splice step through
+              // raw. Avoids the click storm a slider drag produces
+              // (~60 tune messages/sec → up to 60 clicks/sec without
+              // crossfade — see panel_tune_offline.js). Same latency
+              // trade-off as before; just the discontinuity is
+              // smoothed instead of bare.
+              // 16-sample deadband (~0.33 ms): tune messages whose only
+              // delta vs. the live ring is sub-quantum jitter (which
+              // happens every time the user holds the slider still while
+              // count fluctuates 1-3 samples around target across tick
+              // boundaries) shouldn't trigger trim+crossfade. Without
+              // this, a stationary slider produces ~60 trim+crossfade
+              // events/sec, each crossfade injecting a 32-sample
+              // lastBlock[127]-DC blend — measurable as a 90 dB SNR
+              // drop on a clean tone (panel_tune_offline.js
+              // spam_no_change). Real slider drag motion always
+              // produces drop >= slider step (48 samples), so this
+              // threshold doesn't dull responsiveness.
+              if (this.count > this.targetCount + 16) {
                 const drop = this.count - this.targetCount
                 this.readPos = (Math.floor(this.readPos) + drop) % ${RING_SIZE}
                 this.count   = this.targetCount
+                // Engage the crossfade. Cap at 32 (one full ramp); if a
+                // second trim fires before the previous ramp finished,
+                // the new trim resets the counter rather than stacking
+                // — the lastBlock the new ramp will fade FROM is the
+                // post-previous-ramp audio, which is already smooth.
+                this.trimFadeRemaining = 32
               }
               return
             }
@@ -1634,7 +1682,19 @@ export class AudioService {
             const frac = idxF - idx
             const a = this.buf[idx]
             const b = this.buf[(idx + 1) % ${RING_SIZE}]
-            out0[i] = a + (b - a) * frac
+            let sample = a + (b - a) * frac
+            // v4.3.8 trim crossfade: when a tune-trim just jumped readPos
+            // forward, the first 32 output samples linearly blend the
+            // pre-trim audio (held DC at lastBlock[127], the last sample
+            // of the previous quantum) toward the post-trim ring content.
+            // Cheap, branch-light, and below the audible click threshold
+            // for a slider drag's worth of trims.
+            if (this.trimFadeRemaining > 0) {
+              const t = (32 - this.trimFadeRemaining) / 32
+              sample = this.lastBlock[127] * (1 - t) + sample * t
+              this.trimFadeRemaining--
+            }
+            out0[i] = sample
             const newReadPos = idxF + effRatio
             const newIdx     = Math.floor(newReadPos)
             this.count -= (newIdx - idx)
@@ -1781,9 +1841,19 @@ export class AudioService {
    */
   setPlaybackTuning(t: Partial<AudioService['tuning']>, opts?: { persist?: boolean }): void {
     const next = { ...this.tuning, ...t }
-    // Clamp into safe ranges — sliders may land just outside.
+    // Clamp into safe ranges — sliders may land just outside, or a
+    // saved value from an older schema may leak through.
     next.primeMin    = Math.max(0,    Math.min(next.primeTarget, next.primeMin))
-    next.primeTarget = Math.max(next.primeMin, Math.min(24000, next.primeTarget))
+    // primeTarget floor = primeMin + 192 (= 128-sample quantum + 64
+    // jitter cushion). Below that, post-trim count is too low to feed
+    // a single quantum without underrunning, and PLC replays
+    // lastBlock — rapid panel changes stack PLC events into the
+    // audible "听觉上的叠加" effect (see panel_tune_offline.js
+    // wiggle_target / drag_target_down scenarios). Schema version 7
+    // discards saved slots that sit below the new floor; this clamp
+    // is the second line of defence for any values that bypass the
+    // schema gate.
+    next.primeTarget = Math.max(next.primeMin + 192, Math.min(24000, next.primeTarget))
     next.minScale    = Math.max(0.95, Math.min(0.9999, next.minScale))
     next.maxScale    = Math.min(1.05, Math.max(1.0001, next.maxScale))
     next.rateStep    = Math.max(0, Math.min(0.001, next.rateStep))

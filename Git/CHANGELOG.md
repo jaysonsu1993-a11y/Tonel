@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.8] - 2026-04-30
+
+### Fixed — debug panel slider drag no longer "听觉上的叠加"
+
+User reported on v4.3.7 that adjusting AudioDebugPanel sliders
+produced an audible stacking / echo build-up in playback. Two
+distinct mechanisms were in play; both are addressed here.
+
+#### Mechanism 1 — trim splice clicks during slider drag
+
+Each `tune` postMessage from the panel triggered a hard splice in
+the playback ring (`readPos` jumped forward by `count - target`
+samples). For a 1 kHz 0.3-amp sine the splice produced a
+sample-to-sample step of up to 0.58 — vs. 0.04 for the natural
+signal derivative, **>10× over click threshold**.
+
+A slider drag emits ~60 mousemove events/sec → up to 60 trims/sec
+→ a "tick storm" perceptually grouped as ratcheting / breaking-up
+audio. The new offline harness `panel_tune_offline.js` measured 6
+clicks per realistic 400↔800 wiggle.
+
+**Fix:** trim now schedules a 32-sample (0.67 ms, sub-perceptual)
+linear crossfade in the next quantum, blending `lastBlock[127]`
+(the just-played sample, held DC) toward post-trim ring content.
+Plus a 16-sample deadband so sub-quantum count drift around target
+no longer triggers spurious trim+crossfade events.
+
+Post-fix offline measurements (1 kHz 0.3-amp, 5 s):
+```
+                       BEFORE              AFTER
+                       clicks  maxJump     clicks  maxJump
+wiggle 400↔800 × 5         6   0.544           0   0.047
+drag down 1000→400        11   0.380           0   0.039
+spam-no-change             1   0.277           0   0.039
+```
+
+#### Mechanism 2 — primeTarget below safety floor → PLC stacking
+
+When the user dragged primeTarget into the [48..208] range, every
+post-trim quantum mid-callback-underran (count = primeTarget,
+process consumes 128, count drops below primeMin). Each underrun
+fired PLC, which replays `lastBlock` decayed up to 4× per
+"episode". Successive panel adjustments stacked these PLC events:
+**169 PLC events in a 1-second drag from 1600 to 144** — the same
+audio fragment audible at multiple decay levels = the "叠加"
+effect.
+
+**Fix:**
+
+1. AudioDebugPanel slider lower bound: `max(240, primeMin + 192)`
+   (= one 128-sample quantum + 64-sample jitter cushion). User
+   physically cannot reach the PLC-stacking zone.
+2. `setPlaybackTuning` enforces the same floor as a runtime clamp,
+   so non-UI paths (saved tunings from older builds, future API
+   surfaces) cannot bypass it either.
+3. `TUNING_SCHEMA_VERSION` 6 → 7 to discard any v4.3.7-era saved
+   slot the user may have explored down to 144 with. New
+   migration scenario asserts sub-floor values get clamped.
+
+#### Latency impact
+
+Zero — the fixes preserve the trim's instant latency-reduction
+behaviour (slider feels equally responsive). The crossfade
+extends into the same quantum that the trim affects, no
+additional buffering. Slider lower bound 240 vs. previous 48
+removes a region of the explore-space the user wasn't using
+productively anyway (PLC stacking made it audibly broken).
+
+#### Test coverage added
+
+- `Git/server/test/panel_tune_offline.js` — extracts the
+  production worklet and drives it with simulated tune-message
+  schedules (drag/wiggle/spam). Permanent regression guard for
+  click-density and PLC-event counts during panel adjustment.
+- New scenario in `state_migration_test.js`: sub-floor primeTarget
+  in a current-schema slot must be clamped, not preserved verbatim.
+
 ## [4.3.7] - 2026-04-30
 
 ### Tuning — adopt user-validated post-rollback sweet spot as defaults

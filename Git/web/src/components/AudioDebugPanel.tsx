@@ -187,8 +187,16 @@ export function AudioDebugPanel() {
           </div>
           <hr style={hrStyle} />
           <div style={sectionTitle}>CLIENT — playback worklet</div>
+          {/* v4.3.8: lower bound = primeMin + 128 (one quantum) + 64
+              (jitter cushion) to prevent the worklet from being driven
+              into a state where every quantum mid-callback-underruns
+              and fires PLC. PLC budget is 4 quanta; sustained
+              underruns stack lastBlock replays into an audible echo
+              "叠加" effect. The bound is dynamic on primeMin so the
+              two sliders compose correctly. */}
           <Slider
-            label="primeTarget" value={t.primeTarget} min={48} max={1600} step={48}
+            label="primeTarget" value={t.primeTarget}
+            min={Math.max(240, t.primeMin + 192)} max={1600} step={48}
             display={`${t.primeTarget} samp · ${primeTargetMs} ms`}
             onChange={v => setPb('primeTarget', v)}
           />

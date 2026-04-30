@@ -198,7 +198,11 @@ async function runInPage(page) {
       // Plant CURRENT-schema blob with user-customised values that
       // intentionally differ from the live DEFAULT_PB so we can tell
       // which one took effect.
-      const customPT = CUR_PT === 72 ? 96 : 72;  // anything != current default
+      // v4.3.8: primeTarget has a runtime floor of primeMin+192. Pick
+      // a custom value that's above the floor (primeMin=16 → floor=208)
+      // AND distinct from the current default so we can tell which
+      // value took effect. 480 satisfies both for any plausible default.
+      const customPT = CUR_PT === 480 ? 528 : 480;
       localStorage.setItem(KEY, JSON.stringify({
         v: CURRENT_V,
         client: { primeTarget: customPT, primeMin: 16, maxScale: 1.025, minScale: 0.975, rateStep: 0.00002 },
@@ -233,6 +237,37 @@ async function runInPage(page) {
         pass,
         message: pass ? 'OK' : `after.maxScale=${after.maxScale} after.primeTarget=${after.primeTarget}`,
       });
+    }
+
+    // ── Scenario 5: current-schema slot with primeTarget below the v4.3.8
+    //    safety floor → preserved BUT clamped up to primeMin+192. A future
+    //    code path (or hand-edited localStorage) could plant a sub-floor
+    //    value; setPlaybackTuning's clamp must hold the runtime invariant
+    //    so the worklet never enters the PLC-stacking zone the user
+    //    reported on v4.3.7.
+    {
+      const ROOM = 'MIGTEST_S5_FLOOR', USER = 'TestUser';
+      const KEY  = `tonel.tuning.${ROOM}:${USER}`;
+      const SAVED_PM = 16;        // user's primeMin
+      const SAVED_PT = 144;       // below floor (primeMin+192 = 208)
+      const EXPECTED_PT = SAVED_PM + 192;   // 208
+      localStorage.setItem(KEY, JSON.stringify({
+        v: CURRENT_V,
+        client: { primeTarget: SAVED_PT, primeMin: SAVED_PM,
+                  maxScale: 1.025, minScale: 0.975, rateStep: 0.00002 },
+        server: { jitterTarget: 1, jitterMaxDepth: 8 },
+      }));
+      svc.userId = USER; svc.roomId = ROOM;
+      loadFn.call(svc);
+      const after = { ...svc.tuning };
+      const pass = (after.primeTarget === EXPECTED_PT
+                 && after.primeMin === SAVED_PM);
+      out.push({
+        name: `sub-floor primeTarget (${SAVED_PT}) → clamped to primeMin+192 (${EXPECTED_PT})`,
+        pass,
+        message: pass ? 'OK' : `primeTarget=${after.primeTarget} primeMin=${after.primeMin}`,
+      });
+      localStorage.removeItem(KEY);
     }
 
     // Reset svc state so we don't pollute future page evals
