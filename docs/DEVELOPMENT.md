@@ -22,15 +22,22 @@ git push origin v0.1.0
 
 ### Current Version
 
-All versions are in sync at `1.0.0`. Update all version numbers together when releasing:
+The single source of truth is [`CMakeLists.txt`](../CMakeLists.txt) at the
+repo root: `project(Tonel VERSION X.Y.Z)`. All other version markers are
+synchronized automatically by [`scripts/bump-version.sh`](../scripts/bump-version.sh)
+during a release. Do not edit them by hand.
 
-| Location | File |
-|---|---|
-| Root project | `CMakeLists.txt` → `project(Tonel VERSION X.Y.Z)` |
-| AppKit client | `Tonel-Desktop-AppKit/CMakeLists.txt` → `MACOSX_BUNDLE_VERSION` |
-| JUCE client | `Tonel-Desktop/CMakeLists.txt` |
-| Server | `server/CMakeLists.txt` |
-| Web | `web/package.json` → `version` |
+| Location | File | Sync method |
+|---|---|---|
+| Root project | `CMakeLists.txt` | (canonical) |
+| AppKit client | `Tonel-Desktop-AppKit/CMakeLists.txt` | bump-version.sh |
+| JUCE client | `Tonel-Desktop/CMakeLists.txt` | bump-version.sh |
+| Server | `server/CMakeLists.txt` | bump-version.sh |
+| Web | `web/package.json` | bump-version.sh |
+| Schema | `config.schema.json` | bump-version.sh |
+
+Tonel-MacOS (Swift package) tracks its own `MARKETING_VERSION` independently;
+see [`Tonel-MacOS/README.md`](../Tonel-MacOS/README.md).
 
 ### Changelog
 
@@ -255,7 +262,8 @@ Deploys go through the scripts in [`deploy/`](../deploy/), orchestrated by
 [`scripts/release.sh`](../scripts/release.sh). See:
 
 - [RELEASE.md](RELEASE.md) — the canonical release flow (`release.sh <version>`)
-- [DEPLOYMENT.md](DEPLOYMENT.md) — production topology, filesystem layout, ports
+- [../deploy/README.md](../deploy/README.md) — production topology, filesystem layout, ports
+- [../deploy/STANDARDS.md](../deploy/STANDARDS.md) — R1-R10 rules for editing anything in `deploy/` or `ops/`
 
 Quick reference:
 

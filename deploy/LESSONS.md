@@ -1,6 +1,6 @@
 # Deploy Script Lessons
 
-A running log of real incidents that shaped `DEPLOY_SCRIPTING_STANDARDS.md` (internal, kept in `local_docs/Git-docs/`).
+A running log of real incidents that shaped [STANDARDS.md](STANDARDS.md).
 Each entry is a case file: what broke, what we thought it was, what it actually
 was, what we changed. Append a new entry whenever a deploy mishap is worth
 preserving — the goal is that future contributors recognize the same
@@ -236,7 +236,7 @@ contract.
 When a deploy mishap turns out to be worth preserving:
 
 1. Decide if the failure mode generalizes. If yes, add a new rule
-   (R-something) to `DEPLOY_SCRIPTING_STANDARDS.md` (internal).
+   (R-something) to [STANDARDS.md](STANDARDS.md).
 2. Append a case file here with sections: **Symptom / What we thought /
    What it actually was / Impact / Fix / Lesson → R#**.
 3. Link both files from each other.

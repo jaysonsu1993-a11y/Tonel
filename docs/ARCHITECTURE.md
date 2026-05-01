@@ -160,20 +160,10 @@ Automatic: P2P is preferred, switches to Mixer when:
 10. **Direct WebSocket for audio** -- srv.tonel.io bypasses Cloudflare, audio goes straight to domestic server
 11. **SPA1 timestamp RTT** -- client embeds ms-low-16 in SPA1 header, server echoes back, client computes RTT with EMA smoothing
 
-## Editions (免费版 vs 付费版)
+## Editions
 
-两个版本的核心区别在于**音质**和**多轨录音**功能。两个版本都追求行业最低延迟。
-
-| 特性 | Tonel-Mini (免费) | Tonel-Pro (付费) |
-|---|---|---|
-| **音频引擎** | miniaudio (单头文件，纯 C) | JUCE C++ 框架 |
-| **许可模式** | 闭源商用 (MIT 许可证 = 零风险) | 开源发布 (GPLv3，兼容 JUCE 条款) |
-| **音质** | 标准 | 高保真 / 无损 |
-| **延迟** | 极低 | 极低 |
-| **录音** | 不支持 | 多轨录音 (规划中) |
-| **服务端处理** | 纯混音 | 混音 + 实时效果处理 (规划中) |
-
-> **许可架构巧妙设计：** Pro 版采用 GPLv3 开源，恰好匹配 JUCE 的免费版 GPL 条款，**完全免去了 JUCE 昂贵的商业授权费**。社区开发者可以参与 Pro 版的迭代，降低开发成本并提升技术壁垒。Mini 版采用 miniaudio (MIT 许可证)，允许**完全闭源的商业分发**，没有传染性风险。
+The Mini (miniaudio, MIT) vs Pro (JUCE, GPLv3) edition matrix and licensing
+rationale live in the project [README.md](../README.md#editions). Not duplicated here.
 
 ## Port Map
 
@@ -228,14 +218,23 @@ Automatic: P2P is preferred, switches to Mixer when:
 | Record | Type | Target | Proxy |
 |---|---|---|---|
 | tonel.io | CNAME | tonel-web.pages.dev | Orange (Proxied by CF Pages) |
-| api.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel) |
-| srv.tonel.io | A | 8.163.21.207 | **Grey (DNS only, direct)** |
+| api.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel, primary tunnel) |
+| api-new.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel, fallback ingress added v5.0.1) |
+| srv.tonel.io | A | 42.240.163.172 (酷番云广州, **primary** since v5.0.0) | **Grey (DNS only, direct)** |
+| srv-new.tonel.io | A | 8.163.21.207 (Aliyun, **fallback** post v5.0.0) | **Grey (DNS only, direct)** |
+
+> **v5.0.0 server migration** (2026-05-01): primary mixer flipped from
+> Aliyun → 酷番云广州. AppKit binaries built before that still hard-code
+> the Aliyun IP and are routed via `srv-new.tonel.io`. Web traffic and
+> new AppKit builds default to `srv.tonel.io` (酷番云). Same `ops/`
+> deploys to either box; DNS picks who is primary.
 
 ### Client Connection Points
 
 | Client | Web URL | Signaling | Audio (Mixer) |
 |---|---|---|---|
-| AppKit (Production) | — | TCP direct 8.163.21.207:9002 | Direct UDP :9003 |
+| AppKit (current) | — | TCP direct 42.240.163.172:9002 (酷番云) | Direct UDP :9003 |
+| AppKit (pre-v5.0) | — | TCP direct 8.163.21.207:9002 (Aliyun) | Direct UDP :9003 |
 | Web (Trial) | https://tonel.io | wss://api.tonel.io/signaling (CF Tunnel) | **wss://srv.tonel.io/mixer-tcp + /mixer-udp (direct)** |
 | JUCE (Legacy) | — | TCP direct to config host | Direct UDP/TCP |
 

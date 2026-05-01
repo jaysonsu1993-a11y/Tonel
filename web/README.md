@@ -1,93 +1,60 @@
-# Tonel-Web
+# Tonel Web
 
-React web client for Tonel -- a low-fidelity trial/demo interface.
+React + TypeScript browser client. Trial / demo interface; full low-latency
+rehearsal lives in the desktop clients ([`../Tonel-Desktop-AppKit/`](../Tonel-Desktop-AppKit/),
+[`../Tonel-MacOS/`](../Tonel-MacOS/)).
 
-## Overview
-
-The web client allows users to try the S1 band rehearsal experience directly in their browser. It connects to the same signaling and mixer servers as the desktop clients, using WebSocket proxies.
-
-**Purpose:** User acquisition and trial. The full low-latency experience is delivered by the desktop clients (AppKit/JUCE).
-
-## Tech Stack
+## Tech stack
 
 | Layer | Technology |
 |---|---|
-| Framework | React 18 |
-| Language | TypeScript |
+| Framework | React 18 + TypeScript |
 | Build | Vite 5 |
-| Audio | Web Audio API + AudioWorklet (fallback: ScriptProcessorNode) |
+| Audio | Web Audio API — `ScriptProcessorNode` for capture (deliberately, not AudioWorklet — see [`Tonel-local/local_docs/STANDARDS_WEB_AUDIO.md`](../../Tonel-local/local_docs/STANDARDS_WEB_AUDIO.md)) |
 | Protocol | SPA1 over WebSocket (proxied to UDP) |
-| Signaling | WebSocket (raw, proxied to TCP signaling server) |
+| Signaling | Raw WebSocket (CF Tunnel → ws-proxy → TCP signaling) |
 
-Dependencies (`package.json`):
-- `@microsoft/signalr` -- included as a dependency but the current implementation uses raw WebSockets
-- `react` / `react-dom`
-
-## Development
+## Develop
 
 ```bash
 cd web
 npm install
-npm run dev
+npm run dev   # → http://localhost:5173
 ```
 
-Dev server: `http://localhost:5173`
-
-## Build
+## Build & deploy
 
 ```bash
-npm run build
-# Output: dist/
-npm run preview   # Preview production build
+npm run build              # → dist/
+# Production deploy goes through the release pipeline:
+../deploy/web.sh           # vite build + wrangler pages deploy
 ```
 
-## Architecture
+## Source layout
 
 ```
 web/src/
-├── main.tsx                 # React entry point
-├── App.tsx                  # Root component, page routing
-├── types/index.ts           # TypeScript interfaces (PeerInfo, RoomMember, etc.)
-├── pages/
-│   ├── HomePage.tsx         # Landing page
-│   ├── LoginPage.tsx        # User login (phone/WeChat)
-│   └── RoomPage.tsx         # Active room session
-├── hooks/
-│   ├── useAudio.ts          # Audio capture + playback hook
-│   └── useSignal.ts         # WebSocket signaling hook
-├── services/
-│   ├── audioService.ts      # SPA1 encode/decode, AudioWorklet, mixer connection
-│   └── signalService.ts     # Signaling WebSocket, room management
-├── components/
-│   ├── ChannelStrip.tsx     # Audio meter UI
-│   └── LedMeter.tsx         # LED level indicator
-├── styles/globals.css       # Global styles
-└── index.css                # App styles
+├── main.tsx                — React entry
+├── App.tsx                 — root + routing
+├── pages/{Home,Login,Room}Page.tsx
+├── hooks/{useAudio,useSignal}.ts
+├── services/{audio,signal,mixerRttProbe}Service.ts
+├── components/...          — ChannelStrip, LedMeter, etc.
+├── types/index.ts
+└── styles/, index.css
 ```
 
-## Connection Flow
+The two server-side proxy scripts live in this dir as a convenience but
+run on the production server, not in the browser:
 
-1. **Signaling**: WebSocket connects to `/signaling` endpoint, proxied by `ws-proxy.js` to TCP port 9001
-2. **Mixer Control**: WebSocket connects to `/mixer-tcp`, sends `MIXER_JOIN`
-3. **Mixer Audio**: WebSocket connects to `/mixer-udp`, proxied by `ws-mixer-proxy.js` to UDP port 9003. SPA1 binary packets are sent as binary WebSocket frames.
+```
+ws-proxy.js          — bridges signaling WSS → TCP :9001
+ws-mixer-proxy.js    — bridges mixer WSS    → UDP :9003
+```
 
-### Environment Variables
+## See also
 
-| Variable | Default | Description |
-|---|---|---|
-| `VITE_SIGNALING_URL` | `signal.tonel.io` | Signaling server domain |
-| `VITE_SIGNALING_PORT` | `9001` | Signaling TCP port |
-| `VITE_MIXER_PORT` | `9003` | Mixer UDP port |
-
-## Audio Pipeline
-
-1. **Capture**: `getUserMedia()` with echo cancellation, noise suppression, and auto gain **disabled** for raw low-latency audio
-2. **Encode**: AudioWorklet captures 20ms frames, converts to PCM16, wraps in SPA1 header
-3. **Send**: Binary SPA1 packets sent via WebSocket → proxy → UDP mixer
-4. **Receive**: SPA1 packets from mixer (mixed audio), decoded to PCM16, played via Web Audio API `AudioBufferSourceNode`
-
-## Limitations
-
-- Browser Web Audio API introduces ~20-50ms additional latency vs native clients
-- Opus decoding in browser requires WASM (not included in this build) -- PCM16 only
-- Not suitable for production low-latency rehearsal; use desktop clients for that purpose
+- [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — topology, port map, WSS connection flow
+- [`../docs/SPA1_PROTOCOL.md`](../docs/SPA1_PROTOCOL.md) — wire format
+- [`../docs/DEVELOPMENT.md`](../docs/DEVELOPMENT.md) — build/test/deploy workflow
+- [`../../Tonel-local/local_docs/STANDARDS_WEB_AUDIO.md`](../../Tonel-local/local_docs/STANDARDS_WEB_AUDIO.md) — browser audio rules (internal)

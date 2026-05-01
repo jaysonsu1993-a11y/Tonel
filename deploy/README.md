@@ -127,7 +127,7 @@ Each one was confusing in its first encounter and is worth recognizing instantly
   from many other vantage points succeeds; users on Wi-Fi / cellular /
   abroad are unaffected. This is *not* a deploy regression — it is the
   reason `health.sh` probes from the production server, not from the
-  operator's laptop (R1 in `DEPLOY_SCRIPTING_STANDARDS.md`, internal).
+  operator's laptop (R1 in [STANDARDS.md](STANDARDS.md)).
   The same quirk applies to `srv-new.tonel.io` post-v5.0 (Aliyun box).
 
 - **Aliyun cloud WAF rejects HTTP-01 ACME for new hostnames** with
@@ -171,8 +171,8 @@ becomes corrupted, restore from there with `cp -a`.
 
 Read these two — they are the distilled rules and the case files behind them:
 
-- `DEPLOY_SCRIPTING_STANDARDS.md` (internal — kept in `local_docs/Git-docs/`) —
-  10 normative rules covering shell quoting across SSH, dry-run propagation,
+- [STANDARDS.md](STANDARDS.md) — 10 normative rules covering shell quoting
+  across SSH, dry-run propagation,
   `npm ci` discipline, health-check vantage point, idempotency, drift
   detection, audit logging, and remote-expansion smoke testing.
 - [LESSONS.md](LESSONS.md) — case files for the v1.0.3 / v1.0.4 release
