@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.5] - 2026-05-01
+
+### Added — branching infra for the macOS client
+
+The macOS client iterates faster than the umbrella `release: vX.Y.Z`
+discipline allows. Established a long-lived **`tonel-macos`** branch
+off v5.0.4 for day-to-day app work, with a clear merge-back protocol.
+
+* `Git/scripts/hooks/pre-push` — refuses any commit on `main` whose
+  subject does not match `^release: v\d+\.\d+\.\d+`. Branch protection
+  on GitHub requires Pro for private repositories; this hook is the
+  fence in lieu of paying.
+* `Git/scripts/install-hooks.sh` — sets `core.hooksPath` to the in-repo
+  hook directory, run once per clone.
+* `Tonel-MacOS/README.md` — documents the branch + version policy
+  (`MARKETING_VERSION` ticks independently in `Tonel-MacOS/project.yml`;
+  umbrella `vX.Y.Z` only bumps on merge-to-main).
+
+### Notes
+
+The hook can only enforce the rule when it lives on `main` itself —
+this commit is what gets it there. Until merged, attempts to push
+non-release commits to `main` from a tonel-macos checkout (where the
+hook IS present) are blocked locally; from a `main` checkout without
+this commit the rule was unenforced (which is what slipped two empty
+test commits onto `origin/main` during initial setup; `--force-with-lease`
+back to v5.0.4 cleaned them up before this release).
+
 ## [5.0.4] - 2026-05-01
 
 ### Fixed — `Tonel-MacOS` (new SwiftUI client) audio path
