@@ -1,8 +1,13 @@
-# Local-only paths (per repo policy: GitHub mirrors only Git/ + this .gitignore)
-/docs/
-/local_docs/
-/Tonel-Desktop(Legacy)/
-/.claude/
+# =============================================================================
+# Tonel .gitignore
+#
+# Repo layout (post-flatten, 2026-05-01):
+#   Repo root = working tree root. Standard layout. Local-only content lives
+#   OUTSIDE this directory at ~/project-s/Tonel-local/.
+#
+# Anything that does *not* match this file is intended to be tracked.
+# Keep this file the single source of truth — there is no nested .gitignore.
+# =============================================================================
 
 # Build artifacts (CMake + Unix)
 build/
@@ -14,9 +19,17 @@ cmake-build-*/
 _build/
 **/_build/
 
+# clangd LSP local index (machine-specific, gets rebuilt on demand)
+.cache/
+**/.cache/
+
 # Binaries
 bin/
 server/bin/
+# Cross-compiled Go proxy binary (deploy/server.sh wt-proxy step
+# produces this at the source dir; the 10MB ELF was leaking into
+# release commits via `git add -A` until v4.3.3 added it here.)
+server/wt-mixer-proxy/wt-mixer-proxy
 
 # Xcode generated
 build_xcode/
@@ -41,6 +54,7 @@ build_xcode_legacy/
 .vscode/
 .idea/
 *.code-workspace
+.claude/
 
 # Logs
 *.log
@@ -51,9 +65,15 @@ build_xcode_legacy/
 # Runtime config (generated/overridden per deployment)
 config.json
 
-# Web
-web/dist/
-web/node_modules/
+# Web / Node
+**/node_modules/
+**/dist/
+
+# CF Workers / Wrangler local cache
+**/.wrangler/
 
 # Environment files
 .env
+
+# Deploy secrets (SSH host, CF token, tunnel id)
+deploy/.env.deploy

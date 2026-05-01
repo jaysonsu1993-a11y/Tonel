@@ -1,0 +1,27 @@
+#!/bin/bash
+# Pre-commit fence — blocks staged paths matching known-bad patterns.
+#
+# This is belt-and-suspenders alongside .gitignore. .gitignore is passive
+# (it ignores untracked files); this hook actively rejects `git add -f`
+# bypasses and any pattern slip-throughs.
+#
+# Install: `scripts/install-hooks.sh` (sets core.hooksPath).
+# Triggered by: `git commit`.
+
+set -euo pipefail
+
+forbidden_re='(^|/)(node_modules|\.wrangler|dist|build|build_[^/]*|\.DS_Store|\.cache|wt-mixer-proxy)(/|$)'
+
+bad=$(git diff --cached --name-only --diff-filter=A | grep -E "$forbidden_re" || true)
+
+if [[ -n "$bad" ]]; then
+    echo "✗ pre-commit: refusing to add paths matching forbidden pattern" >&2
+    echo "  pattern: $forbidden_re" >&2
+    echo "" >&2
+    echo "$bad" | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "  if you really need one of these, fix the pattern in" >&2
+    echo "  scripts/hooks/pre-commit and .gitignore together — don't" >&2
+    echo "  bypass with --no-verify." >&2
+    exit 1
+fi
