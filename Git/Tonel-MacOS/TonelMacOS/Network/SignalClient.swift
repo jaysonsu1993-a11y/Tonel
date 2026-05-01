@@ -229,12 +229,8 @@ final class SignalClient: NSObject {
         let sent = pingSentAt
         pingSentAt = 0
         pingLock.unlock()
-        guard sent > 0 else {
-            AppLog.log("[Signal] ACK arrived but pingSentAt=0 (race)")
-            return
-        }
+        guard sent > 0 else { return }
         let rttMs = Int((recvAt - sent) * 1000)
-        AppLog.log("[Signal] ACK rtt=\(rttMs)ms")
         Task { @MainActor in self.latencyMs = rttMs }
     }
 
@@ -335,7 +331,6 @@ final class SignalClient: NSObject {
     private func sendHeartbeat() {
         guard let task = task, task.state == .running else { return }
         let payload = "{\"type\":\"HEARTBEAT\",\"user_id\":\"\(userId)\"}\n"
-        let before = Date().timeIntervalSinceReferenceDate
         task.send(.string(payload)) { [weak self] err in
             guard let self = self else { return }
             if err != nil { return }
@@ -343,8 +338,6 @@ final class SignalClient: NSObject {
             self.pingLock.lock()
             self.pingSentAt = now
             self.pingLock.unlock()
-            let dt = Int((now - before) * 1000)
-            AppLog.log("[Signal] HEARTBEAT send-complete after \(dt)ms")
         }
     }
 

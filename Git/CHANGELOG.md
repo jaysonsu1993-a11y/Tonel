@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.4] - 2026-05-01
+
+### Fixed — `Tonel-MacOS` (new SwiftUI client) audio path
+
+Several latency / correctness fixes after end-to-end testing the SwiftUI
+client against the酷番云 mixer.
+
+* **Capture: `installTap` → `AVAudioSinkNode`.** AVAudioEngine's tap
+  aggregates ~100 ms regardless of HW IO buffer size — kills the whole
+  point of a 2.5 ms wire frame. Replaced with `AVAudioSinkNode`, which
+  delivers per HW IO buffer (now 120 frames / 2.5 ms). Capture-side
+  latency dropped from ~100 ms to ~2.5 ms.
+* **Voice processing forced off.** macOS auto-promoted the input node to
+  `VoiceProcessingIO` (`AVAUVoiceIOChatFlavor` in the unified log),
+  which silently applied AGC + echo cancellation — wrong DSP for
+  rehearsal, and EC was actively muting the local self-monitor by
+  classifying the speaker return as an echo. `setVoiceProcessingEnabled(false)`
+  before `prepare()`.
+* **Tap/connection conflict.** A graph connection on `inputNode` bus 0
+  silently disabled the tap on the same bus. Local self-monitor now
+  flows mic → ring buffer → realtime playback callback, instead of
+  mic → mixerNode → mainMixerNode (which was killing the tap).
+* **HW IO buffer pinned to 120 frames.** `kAudioDevicePropertyBufferFrameSize`
+  set on both input and output devices via Core Audio HAL — every
+  sinkNode callback produces exactly one SPA1 packet, and monitor
+  latency stays at one buffer period.
+* **Drift trim on capture rings.** `monitorRing` and `selfLoopRing`
+  used to grow up to 200 ms before being clipped — any network burst
+  permanently inflated listening latency. Both now trim to a 5 ms
+  target depth on every push (drop-oldest, same strategy as
+  `JitterBuffer`).
+* **Alone-vs-peer monitor switch.** Mirrors web `updateMonitorGain`:
+  when `peers.isEmpty`, the user hears themselves through the server's
+  fullMix loopback (proves the round-trip is alive). When peers join,
+  the local mic-tap → playback path takes over for low-latency
+  self-hear and the server runs N-1.
+
+### Fixed — `Tonel-MacOS` latency display
+
+* **RTT was the wrong number.** Header was showing signaling RTT
+  (`wss://api.tonel.io/signaling`, which routes through Cloudflare AMS
+  ≈ 500 ms RTT and is irrelevant for audio). Replaced with
+  `MixerClient.audioRttMs` — `{"type":"PING"}` / `PONG` over the
+  TCP-direct mixer control channel (port 9002), same path the SPA1 UDP
+  stream takes. Now reads ~8 ms direct-to-Kufan, matching ICMP. Web
+  parity (`audioService.audioLatency`).
+* **e2e formula now includes device-reported HW latency.** Old formula
+  was missing ADC/DAC + USB transport + AU-internal buffers — all read
+  from Core Audio HAL (`kAudioDevicePropertyLatency` + `SafetyOffset`
+  + `StreamLatency`). Component breakdown surfaced in the room debug
+  bar.
+* **Heartbeat RTT measurement off-main.** `pingSentAt` stamped in the
+  URLSession send-completion handler; ACK time captured at the top of
+  the receive callback, before any `Task { @MainActor in ... }` hop.
+  Without this, RTT was smeared with whatever else main was doing
+  (SwiftUI re-renders driven by `pollPub` at 100 ms cadence).
+* **Parse `jitter_target` / `jitter_max_depth` from `MIXER_JOIN_ACK`.**
+  The server tells us its jitter buffer config; the e2e calculation
+  uses the actual target instead of a hardcoded guess.
+
+### Notes
+
+`Tonel-MacOS/project.yml` MARKETING_VERSION 0.1.0 → 0.1.1. The legacy
+`Tonel-Desktop-AppKit/` is untouched (preserved as reference).
+
 ## [5.0.3] - 2026-05-01
 
 ### Changed — homepage live latency now reflects mixer-server RTT

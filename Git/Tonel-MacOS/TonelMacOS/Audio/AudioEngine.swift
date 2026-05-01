@@ -41,6 +41,16 @@ final class AudioEngine: ObservableObject {
     @Published var perPeerMuted: [String: Bool] = [:]
     @Published private(set) var actualSampleRate: Double = Double(AudioWire.sampleRate)
     @Published private(set) var outputLatencyMs: Int = 0
+    /// Capture HW IO buffer size in frames (set by setHardwareBufferFrames,
+    /// clamped to device range). Used for the e2e latency breakdown.
+    @Published private(set) var captureHwFrames: Int = AudioWire.frameSamples
+    @Published private(set) var outputHwFrames: Int = AudioWire.frameSamples
+    /// Device-reported latency (ADC + USB transport + AU internals, ms).
+    /// Read from CoreAudio HAL's `kAudioDevicePropertyLatency + SafetyOffset
+    /// + StreamLatency`. NOT counted by HW-buffer math alone — this is what
+    /// our 27 ms naive estimate was missing.
+    @Published private(set) var deviceInputLatencyMs: Int = 0
+    @Published private(set) var deviceOutputLatencyMs: Int = 0
     // Debug counters — surfaced in the room debug bar.
     @Published private(set) var txCount: Int = 0
     @Published private(set) var rxCount: Int = 0
@@ -63,13 +73,18 @@ final class AudioEngine: ObservableObject {
     /// So monitor is mixed into the playback callback alongside peer audio.
     private var monitorRing: [Float] = []
     private let monitorRingLock = NSLock()
-    private static let monitorRingMaxSamples = 9600   // ~200ms at 48k
+    /// Drop oldest above this depth — keeps monitor latency bounded even
+    /// if capture / playback rates drift. 240 samples = 2 wire frames = 5 ms.
+    private static let monitorRingTrimSamples = 240
+    private static let monitorRingMaxSamples = 9600
     /// Server-side self-loopback queue. Used only when alone in the room
     /// (web parity: when peers.count == 0 we let the server's fullMix
     /// route bring our voice back instead of using local monitor — proves
     /// the round-trip is alive and gives a server-confirmed audio path).
     private var selfLoopRing: [Float] = []
     private let selfLoopLock = NSLock()
+    /// Equivalent jitter target for the server-loopback path. 2 frames = 5ms.
+    private static let selfLoopRingTrimSamples = 240
     private static let selfLoopMaxSamples = 9600
     private var captureLogCounter: Int = 0
 
@@ -166,7 +181,77 @@ final class AudioEngine: ObservableObject {
         captureAccum.removeAll(keepingCapacity: true)
         isRunning = true
         let outFmt = engine.outputNode.outputFormat(forBus: 0)
+        // Read AVAudio's reported presentationLatency — Apple's only public
+        // hook for "real device-reported delay" (includes ADC/DAC, USB
+        // transport, AU-internal buffers). This is the missing piece our
+        // raw HW-buffer math couldn't see.
+        readDeviceLatencies()
         AppLog.log("[AudioEngine] started — mic: \(micFmt.sampleRate)Hz \(micFmt.channelCount)ch / out: \(outFmt.sampleRate)Hz \(outFmt.channelCount)ch / monitor=\(monitorGain) muted=\(monitorMuted)")
+        AppLog.log("[AudioEngine] reported latency — input: \(deviceInputLatencyMs)ms, output: \(deviceOutputLatencyMs)ms")
+    }
+
+    /// Pull device-reported latency in ms from CoreAudio HAL: the AU's
+    /// `kAudioDevicePropertyLatency` + `SafetyOffset` give the path
+    /// from "frame submitted to driver" to "frame at speaker" (or the
+    /// inverse for input). These are the numbers AVAudio uses for
+    /// `presentationLatency` under the hood, but exposed in a way that
+    /// doesn't need a running engine context.
+    private func readDeviceLatencies() {
+        deviceInputLatencyMs = readDeviceLatencyMs(unit: engine.inputNode.audioUnit,
+                                                   inputScope: true)
+        deviceOutputLatencyMs = readDeviceLatencyMs(unit: engine.outputNode.audioUnit,
+                                                    inputScope: false)
+    }
+
+    private func readDeviceLatencyMs(unit: AudioUnit?, inputScope: Bool) -> Int {
+        guard let au = unit else { return 0 }
+        var deviceID: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                   kAudioUnitScope_Global, 0, &deviceID, &size) == noErr,
+              deviceID != 0 else { return 0 }
+        let scope: AudioObjectPropertyScope = inputScope
+            ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput
+
+        // Total = device latency + safety offset + buffer (already counted)
+        // + stream latency. We pull device + safety + stream here; the
+        // buffer-period delay stays in our explicit formula.
+        var total: UInt32 = 0
+
+        for selector in [kAudioDevicePropertyLatency, kAudioDevicePropertySafetyOffset] {
+            var addr = AudioObjectPropertyAddress(mSelector: selector,
+                                                  mScope: scope,
+                                                  mElement: kAudioObjectPropertyElementMain)
+            var value: UInt32 = 0
+            var sz = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &sz, &value) == noErr {
+                total += value
+            }
+        }
+        // Stream latency (per-stream, often 0 on USB pro)
+        var streamsAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams,
+                                                     mScope: scope,
+                                                     mElement: kAudioObjectPropertyElementMain)
+        var streamsSize: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(deviceID, &streamsAddr, 0, nil, &streamsSize) == noErr,
+           streamsSize > 0 {
+            let count = Int(streamsSize) / MemoryLayout<AudioObjectID>.size
+            var ids = [AudioObjectID](repeating: 0, count: count)
+            if AudioObjectGetPropertyData(deviceID, &streamsAddr, 0, nil, &streamsSize, &ids) == noErr {
+                for sid in ids {
+                    var lat: UInt32 = 0
+                    var lsz = UInt32(MemoryLayout<UInt32>.size)
+                    var addr = AudioObjectPropertyAddress(mSelector: kAudioStreamPropertyLatency,
+                                                          mScope: kAudioObjectPropertyScopeGlobal,
+                                                          mElement: kAudioObjectPropertyElementMain)
+                    if AudioObjectGetPropertyData(sid, &addr, 0, nil, &lsz, &lat) == noErr {
+                        total += lat
+                        break  // Single primary stream is enough.
+                    }
+                }
+            }
+        }
+        return Int(Double(total) / Double(AudioWire.sampleRate) * 1000.rounded())
     }
 
     /// No-op now that monitor is mixed in the playback callback. Kept as a
@@ -246,23 +331,27 @@ final class AudioEngine: ObservableObject {
             self.inputLevel = muted ? 0 : peak
             if clipDelta > 0 { self.captureClipCount &+= clipDelta }
         }
-        // Log mic peak: first 3 calls + every 100th after, so we can see
-        // whether the input ever fires (vs. firing with silence).
+        // Log mic peak + ring depths every ~1s so we can spot buffer drift.
         captureLogCounter &+= 1
-        if captureLogCounter <= 3 || captureLogCounter % 100 == 0 {
-            AppLog.log("[AudioEngine] capture#\(captureLogCounter) peak=\(String(format: "%.4f", peak)) frames=\(n) ch=\(channels) muted=\(muted)")
+        if captureLogCounter <= 3 || captureLogCounter % 400 == 0 {
+            monitorRingLock.lock()
+            let monDepth = monitorRing.count
+            monitorRingLock.unlock()
+            selfLoopLock.lock()
+            let loopDepth = selfLoopRing.count
+            selfLoopLock.unlock()
+            AppLog.log("[AudioEngine] capture#\(captureLogCounter) peak=\(String(format: "%.4f", peak)) monRing=\(monDepth)smp selfLoop=\(loopDepth)smp")
         }
 
-        // Feed the self-monitor ring. We push the unmuted, post-input-gain
-        // samples; the playback callback decides whether/how loud to fold
-        // them in. This way "MIC OFF" stops what peers hear (silence on
-        // the wire) but the user still has the option to hear themselves
-        // on a separate monitor knob, matching web behaviour.
+        // Feed the self-monitor ring. Hard upper bound at 200ms is just a
+        // safety; the AGGRESSIVE trim to 5ms (`monitorRingTrimSamples`)
+        // keeps live monitor latency bounded under capture/playback drift.
+        // Without this, a brief stall of fillPlayback would let the ring
+        // accumulate, permanently inflating monitor latency.
         monitorRingLock.lock()
         monitorRing.append(contentsOf: frame)
-        if monitorRing.count > Self.monitorRingMaxSamples {
-            // Drop oldest — we'd rather glitch than drift further behind.
-            monitorRing.removeFirst(monitorRing.count - Self.monitorRingMaxSamples)
+        if monitorRing.count > Self.monitorRingTrimSamples {
+            monitorRing.removeFirst(monitorRing.count - Self.monitorRingTrimSamples)
         }
         monitorRingLock.unlock()
 
@@ -306,8 +395,13 @@ final class AudioEngine: ObservableObject {
         if uid == mixer?.userId {
             selfLoopLock.lock()
             selfLoopRing.append(contentsOf: samples)
-            if selfLoopRing.count > Self.selfLoopMaxSamples {
-                selfLoopRing.removeFirst(selfLoopRing.count - Self.selfLoopMaxSamples)
+            // Trim to ~5ms target depth. The server-loopback path has no
+            // explicit jitter buffer (unlike per-peer JitterBuffer); without
+            // this, network bursts inflate the ring and listening latency
+            // creeps up over the session. Trim is the same "drop oldest"
+            // strategy JitterBuffer uses.
+            if selfLoopRing.count > Self.selfLoopRingTrimSamples {
+                selfLoopRing.removeFirst(selfLoopRing.count - Self.selfLoopRingTrimSamples)
             }
             selfLoopLock.unlock()
             Task { @MainActor in self.rxCount &+= 1 }
@@ -493,12 +587,80 @@ final class AudioEngine: ObservableObject {
                 mElement: kAudioObjectPropertyElementMain)
             let status = AudioObjectSetPropertyData(deviceID, &sizeAddr, 0, nil,
                                                     UInt32(MemoryLayout<UInt32>.size), &size)
-            AppLog.log("[AudioEngine] \(which.1) device=\(deviceID) set bufferFrames=\(size) (range=\(Int(range.mMinimum))…\(Int(range.mMaximum))) status=\(status)")
+            // Read back the actual size the device accepted (it may clamp).
+            var actual: UInt32 = 0
+            var actualSize = UInt32(MemoryLayout<UInt32>.size)
+            AudioObjectGetPropertyData(deviceID, &sizeAddr, 0, nil, &actualSize, &actual)
+            let actualInt = Int(actual)
+            Task { @MainActor in
+                if which.1 == "input"  { self.captureHwFrames = actualInt }
+                if which.1 == "output" { self.outputHwFrames  = actualInt }
+            }
+            AppLog.log("[AudioEngine] \(which.1) device=\(deviceID) set bufferFrames=\(actualInt) (req=\(size), range=\(Int(range.mMinimum))…\(Int(range.mMaximum))) status=\(status)")
         }
     }
 
     private func nowMs() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    // MARK: - E2E latency
+
+    /// Estimated mouth-to-ear latency in ms for audio that goes through the
+    /// server (peer's voice arriving at me, OR my own voice when alone via
+    /// server fullMix loopback). Components, all measured / device-reported:
+    ///
+    ///   deviceInputLatencyMs   ← ADC + USB transport + input AU internals
+    ///   captureBufMs           ← input HW IO buffer (period delay)
+    ///   networkUpMs            ← RTT/2
+    ///   serverJitterMs         ← server's own jitter buffer target (from ACK)
+    ///   serverMixHalfTickMs    ← average wait inside server mix loop = ½ tick
+    ///   networkDownMs          ← RTT/2
+    ///   clientJitterMs         ← our JitterBuffer.primeMin × wire frame ms
+    ///   outputBufMs            ← output HW IO buffer (period delay)
+    ///   deviceOutputLatencyMs  ← DAC + USB transport + output AU internals
+    ///
+    /// We can't observe the SENDER side's device latency (a peer's mic
+    /// hardware), so we approximate it by reusing OUR own input device
+    /// latency. Reasonable when both ends are macOS / similar; when alone
+    /// it's exact (we ARE the sender too, server-loopback mode).
+    func computeE2eLatencyMs(audioRttMs: Int, serverJitterTargetFrames: Int) -> Int {
+        guard audioRttMs >= 0, isRunning else { return 0 }
+        let frameMs = AudioWire.frameMs
+        let captureBufMs = Double(captureHwFrames) / Double(AudioWire.sampleRate) * 1000
+        let outputBufMs  = Double(outputHwFrames)  / Double(AudioWire.sampleRate) * 1000
+        let serverJitterMs   = Double(serverJitterTargetFrames) * frameMs
+        let serverMixWaitMs  = frameMs / 2.0   // average half-tick wait
+        let clientJitterMs   = Double(JitterBuffer.primeMin) * frameMs
+        let total = Double(deviceInputLatencyMs)
+                  + captureBufMs
+                  + Double(audioRttMs)
+                  + serverJitterMs
+                  + serverMixWaitMs
+                  + clientJitterMs
+                  + outputBufMs
+                  + Double(deviceOutputLatencyMs)
+        return Int(total.rounded())
+    }
+
+    /// Returns each component (ms) for diagnostic display.
+    func e2eBreakdown(audioRttMs: Int, serverJitterTargetFrames: Int) -> [(String, Int)] {
+        let frameMs = AudioWire.frameMs
+        let cap = Int((Double(captureHwFrames) / Double(AudioWire.sampleRate) * 1000).rounded())
+        let out = Int((Double(outputHwFrames)  / Double(AudioWire.sampleRate) * 1000).rounded())
+        let srvJ = Int((Double(serverJitterTargetFrames) * frameMs).rounded())
+        let srvT = Int((frameMs / 2.0).rounded())
+        let cliJ = Int((Double(JitterBuffer.primeMin) * frameMs).rounded())
+        return [
+            ("dev-in",   deviceInputLatencyMs),
+            ("cap-buf",  cap),
+            ("net",      max(0, audioRttMs)),
+            ("srv-jit",  srvJ),
+            ("srv-tick", srvT),
+            ("cli-jit",  cliJ),
+            ("out-buf",  out),
+            ("dev-out",  deviceOutputLatencyMs),
+        ]
     }
 
     // MARK: - Per-peer controls (UI helpers)

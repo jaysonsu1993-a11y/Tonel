@@ -22,6 +22,8 @@ struct RoomView: View {
     @State private var peerLevelsTick: [String: Float] = [:]
     @State private var txTick: Int = 0
     @State private var rxTick: Int = 0
+    @State private var rttTick: Int = -1
+    @State private var e2eTick: Int = 0
 
     // Local UI state.
     @State private var settingsOpen = false
@@ -76,6 +78,10 @@ struct RoomView: View {
             peerLevelsTick = state.audio.peerLevels
             txTick = state.audio.txCount
             rxTick = state.audio.rxCount
+            rttTick = state.mixer.audioRttMs
+            e2eTick = state.audio.computeE2eLatencyMs(
+                audioRttMs: state.mixer.audioRttMs,
+                serverJitterTargetFrames: state.mixer.serverJitterTargetFrames)
             state.refreshLevels()
             refreshDebug()
         }
@@ -167,8 +173,11 @@ struct RoomView: View {
     }
 
     private var latencyDisplay: some View {
-        let e2e = state.audio.e2eLatencyMs
-        let rtt = state.signal.latencyMs
+        // RTT = mixer TCP-direct PING/PONG (~8ms to Kufan), NOT signaling
+        // WS RTT (which routes through Cloudflare AMS and is irrelevant
+        // for audio). Web does the same — the displayed RTT is `audioLatency`.
+        let e2e = e2eTick
+        let rtt = rttTick
         return HStack(spacing: 6) {
             Text("延迟").font(.system(size: 10))
                 .foregroundStyle(Color(white: 0.5))
@@ -185,7 +194,7 @@ struct RoomView: View {
         .padding(.horizontal, 10).padding(.vertical, 4)
         .background(Color(white: 0.10),
                     in: RoundedRectangle(cornerRadius: 4))
-        .help("端到端 = capture + RTT + server jitter + mix + client ring + output device")
+        .help("延迟 (e2e) = 采集 HW + RTT + 服务器 jitter + mix tick + 客户端 jitter + 输出 HW；RTT = 与 mixer 的 TCP 直连往返（不经 CF）")
     }
 
     private func latencyColor(_ ms: Int, good: Int, ok: Int) -> Color {
@@ -443,9 +452,15 @@ struct RoomView: View {
         let a = state.audio
         let uid = String(state.userId.prefix(14))
         let muteFlag = a.isMicMuted ? " MUTED" : ""
+        // e2e breakdown: visualise each component so the user sees what
+        // dominates the audio delay.
+        let bd = a.e2eBreakdown(
+            audioRttMs: state.mixer.audioRttMs,
+            serverJitterTargetFrames: state.mixer.serverJitterTargetFrames)
+        let bdStr = bd.map { "\($0.0)=\($0.1)" }.joined(separator: " ")
         debugLine = "uid=\(uid) peers=\(state.peers.count) sr=\(Int(a.actualSampleRate)) " +
                     "tx=\(a.txCount) rx=\(a.rxCount) clip=\(a.captureClipCount) " +
-                    "gap=\(a.seqGapCount) drop=\(a.ringDropCount)\(muteFlag)"
+                    "gap=\(a.seqGapCount) drop=\(a.ringDropCount)\(muteFlag) | e2e: \(bdStr)"
     }
 
     private func refreshInputDevices() {

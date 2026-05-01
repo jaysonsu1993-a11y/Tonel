@@ -40,6 +40,23 @@ final class MixerClient {
     private var sequence: UInt16 = 0
     private var packetHandlers: [(UUID, PacketHandler)] = []
 
+    /// Latest measured PING→PONG round-trip over mixer TCP (port 9002).
+    /// This is the meaningful "audio RTT" — same physical path the
+    /// SPA1 UDP stream takes, ~8ms direct to Kufan. (Signaling RTT
+    /// goes through Cloudflare AMS and is irrelevant for audio.)
+    nonisolated(unsafe) private(set) var audioRttMs: Int = -1
+    /// Server-side jitter buffer target depth in frames, parsed out of
+    /// `MIXER_JOIN_ACK` (`"jitter_target":<n>`). Used by AudioEngine to
+    /// compute the e2e latency display.
+    private(set) var serverJitterTargetFrames: Int = 2
+    /// Server-side jitter buffer cap, parsed out of `MIXER_JOIN_ACK`
+    /// (`"jitter_max_depth":<n>`). Diagnostic only.
+    private(set) var serverJitterMaxFrames: Int = 8
+    nonisolated(unsafe) private var pingSentAt: TimeInterval = 0
+    nonisolated private let pingLock = NSLock()
+    private var pingTimer: Timer?
+    private var tcpReadAccum = ""
+
     func onPacket(_ h: @escaping PacketHandler) -> () -> Void {
         let id = UUID()
         packetHandlers.append((id, h))
@@ -66,6 +83,7 @@ final class MixerClient {
         sendHandshake()
         startUDPReceive()
         startTCPRead()
+        startPing()
         state = .connected
         AppLog.log("[Mixer] connected ✅")
     }
@@ -76,9 +94,38 @@ final class MixerClient {
                         "room_id": roomId,
                         "user_id": userId])
         }
+        stopPing()
         tcp?.cancel(); tcp = nil
         udp?.cancel(); udp = nil
         state = .disconnected
+    }
+
+    // MARK: - Audio RTT (PING/PONG over mixer TCP)
+
+    private func startPing() {
+        stopPing()
+        let timer = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.sendPing()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pingTimer = timer
+        // Fire one immediately so we get a number within 3s of joining.
+        sendPing()
+    }
+
+    private func stopPing() {
+        pingTimer?.invalidate(); pingTimer = nil
+        pingLock.lock(); pingSentAt = 0; pingLock.unlock()
+    }
+
+    private func sendPing() {
+        guard let conn = tcp else { return }
+        pingLock.lock()
+        pingSentAt = Date().timeIntervalSinceReferenceDate
+        pingLock.unlock()
+        let line = "{\"type\":\"PING\"}\n"
+        conn.send(content: line.data(using: .utf8),
+                  completion: .contentProcessed { _ in })
     }
 
     // MARK: - Control (TCP JSON)
@@ -177,6 +224,16 @@ final class MixerClient {
             let digits = tail.prefix(while: { $0.isNumber })
             if let v = UInt16(digits) { udpPort = v }
         }
+        if let r = line.range(of: "\"jitter_target\":") {
+            let tail = line[r.upperBound...]
+            let digits = tail.prefix(while: { $0.isNumber })
+            if let v = Int(digits) { serverJitterTargetFrames = v }
+        }
+        if let r = line.range(of: "\"jitter_max_depth\":") {
+            let tail = line[r.upperBound...]
+            let digits = tail.prefix(while: { $0.isNumber })
+            if let v = Int(digits) { serverJitterMaxFrames = v }
+        }
     }
 
     private func startTCPRead() {
@@ -184,10 +241,12 @@ final class MixerClient {
         func loop() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, err in
                 guard let self = self else { return }
+                let recvAt = Date().timeIntervalSinceReferenceDate
                 if let err = err { AppLog.log("[Mixer] TCP recv err: \(err)"); return }
-                // We currently consume LEVELS broadcasts silently; AudioEngine
-                // computes meters locally from received PCM, so this is fine.
-                _ = data
+                if let data = data, !data.isEmpty,
+                   let s = String(data: data, encoding: .utf8) {
+                    self.handleTCPChunk(s, recvAt: recvAt)
+                }
                 if isComplete {
                     Task { @MainActor in self.state = .disconnected }
                     return
@@ -197,6 +256,31 @@ final class MixerClient {
         }
         loop()
     }
+
+    /// Buffer TCP bytes into newline-separated JSON lines and dispatch each.
+    /// Runs on Network.framework's connection queue (off-main).
+    private nonisolated func handleTCPChunk(_ s: String, recvAt: TimeInterval) {
+        // (LEVELS broadcasts are consumed silently — AudioEngine derives
+        // peer meters from decoded PCM. Only PONG affects state here.)
+        // Quick check: does this chunk contain a PONG? Most of the time
+        // the chunk is exactly one line, so a substring scan is enough.
+        if s.contains("\"PONG\"") {
+            pingLock.lock()
+            let sent = pingSentAt
+            pingSentAt = 0
+            pingLock.unlock()
+            if sent > 0 {
+                let rtt = Int((recvAt - sent) * 1000)
+                audioRttMs = rtt
+                // Surface to UI on main.
+                Task { @MainActor in self.notifyRttChanged(rtt) }
+            }
+        }
+    }
+
+    /// Hook for any `@MainActor` consumer (RoomView reads `audioRttMs`
+    /// directly; this gives a future place for callbacks if we need them).
+    @MainActor private func notifyRttChanged(_ rtt: Int) {}
 
     private func send(json obj: [String: Any]) {
         guard let conn = tcp,
