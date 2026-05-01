@@ -9,6 +9,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.1] - 2026-05-01
+
+### Changed — deploy: cross-compile C++ binaries locally instead of on prod
+
+`deploy/server.sh --component=binary` no longer rsyncs source to the
+production server and runs `cmake` there. Instead, it builds inside a
+local Docker container (`debian:12`, mirrors prod's glibc 2.36 / x86-64)
+and rsyncs only the resulting ELF binaries.
+
+This was uncovered while deploying v5.1.0: the production box (酷番云
+广州) has no `cmake` installed — and never had, going back several
+releases. The previous binary deploy step was silently failing on
+every release; the binaries on `/opt/tonel/bin/` were stale (the
+`/opt/tonel/VERSION` marker still read `v1.0.3`). Production kept
+working only because no recent release had touched the C++ source.
+
+Mirrors the wt-proxy approach in spirit (cross-compile locally, ship
+binary, no remote toolchain). Side benefits:
+
+* Production needs no `cmake`, `g++`, `pkg-config`, or `-dev` packages.
+* Build is reproducible w.r.t. the dev machine — the apt snapshot baked
+  into the builder image, not whatever happens to be on prod today.
+* Deploy is faster (no remote compile, just rsync ~2 MB ELF).
+* Failures surface at build time on the dev machine, before any rsync
+  to prod, so a broken build can't half-deploy.
+
+### Files
+
+| File | Change |
+|---|---|
+| `server/.docker/Dockerfile` | New — debian:12 builder with libuv/opus/openssl/json3 + cmake |
+| `deploy/server.sh` `deploy_binary()` | Rewrote: docker build + docker run + rsync ELF |
+| `ops/cloudflared/cloudflared.service.d/timeout.conf` | New — systemd drop-in extending timeouts to 180s |
+| `deploy/server.sh` `deploy_ops()` | rsync drop-in + daemon-reload before cloudflared restart |
+
+### Notes
+
+* First-time builders: the `tonel-server-builder:debian12` image is
+  ~200 MB and takes ~3 min to build (one-time, cached afterwards). Pull
+  paths use the daocloud mirror (`docker.m.daocloud.io`) and the apt
+  install uses TUNA's Debian mirror; both are CN-network workarounds
+  baked into the Dockerfile so the operator does not need to configure
+  `~/.docker/daemon.json`.
+* Operators must have Docker Desktop (or an OCI-compatible runtime)
+  running locally before invoking `deploy/server.sh --component=binary`.
+  The deploy script verifies `docker info` succeeds and aborts with a
+  clear message otherwise.
+
+### Fixed — cloudflared service timeout regression
+
+`/etc/systemd/system/cloudflared.service` ships with `TimeoutStartSec=15`,
+which is too short for re-establishing connections to all four CF edge
+regions during a `systemctl restart`. The v5.1.0 deploy hit this and
+aborted (`set -e` in `deploy_ops`).
+
+Added `ops/cloudflared/cloudflared.service.d/timeout.conf`, a systemd
+drop-in extending `TimeoutStartSec` and `TimeoutStopSec` to 180s.
+`deploy/server.sh deploy_ops()` now installs the drop-in and runs
+`systemctl daemon-reload` before `systemctl restart cloudflared`. Drop-in
+survives `cloudflared service install` upgrades — unlike editing the
+upstream unit file.
+
 ## [5.1.0] - 2026-05-01
 
 ### Changed — repo flattened to standard git layout

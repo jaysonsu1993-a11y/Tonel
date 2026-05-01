@@ -13,6 +13,7 @@
 build/
 build_/
 build_*/
+build-*/
 cmake-build-*/
 **/build/
 **/build_*/

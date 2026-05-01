@@ -5,7 +5,7 @@
 #   deploy/server.sh [--component=binary|proxy|wt-proxy|ops|all] [--dry-run]
 #
 # Components:
-#   binary    — rsync server/ source → remote build → swap signaling_server + mixer_server
+#   binary    — cross-compile mixer + signaling locally (Docker, debian:12) → rsync ELF → swap
 #   proxy     — rsync ws-proxy.js + ws-mixer-proxy.js + node_modules
 #   wt-proxy  — cross-compile Go WebTransport proxy locally → rsync binary → pm2 reload
 #   ops       — rsync ops/ artifacts (PM2 ecosystem, nginx, cloudflared, scripts)
@@ -14,9 +14,12 @@
 # After all components: PM2 reload, nginx -t + reload, cloudflared restart if changed.
 # Health check runs at the end (deploy/health.sh).
 #
-# The wt-proxy component requires Go on the operator's machine (`brew install go`
-# on macOS). Build is local, only the resulting Linux/amd64 binary lands on the
-# server — no Go runtime needed remotely.
+# Build hosts:
+#   - binary (C++): Docker Desktop (or compatible) running on the operator's
+#     machine. The container (debian:12, see server/.docker/Dockerfile)
+#     matches prod's glibc/ABI; production needs no toolchain.
+#   - wt-proxy (Go): operator's Go SDK (`brew install go`). CGO_ENABLED=0 so
+#     the binary is fully static.
 
 source "$(dirname "$0")/lib/common.sh"
 
@@ -50,25 +53,59 @@ fi
 # ─── binary ──────────────────────────────────────────────────────────────────
 
 deploy_binary() {
-    log "[binary] rsync server/ source"
-    # R-NEW: never push local build artifacts or clangd index to the remote —
-    # they pollute the remote CMakeCache.txt (laptop's source path is baked
-    # into the cache and remote cmake then refuses with "directory differs").
-    # --delete-excluded also wipes any artifacts that previous releases pushed
-    # so we self-heal a polluted remote tree.
-    RSYNC_FLAGS="--delete --delete-excluded --exclude=build/ --exclude=.cache/" \
-        rsync_to_remote "$REPO_ROOT/server/" "$TONEL_DEPLOY_DIR/build-src/"
+    # Cross-compile locally inside debian:12 container, ship ELF only.
+    # Replaces the legacy "rsync source + remote cmake" approach (v5.1.0
+    # incident: prod had no cmake installed; on a fresh box `apt install`
+    # would have been required just to deploy a no-op release). Building
+    # locally also makes the binary deterministic w.r.t. the dev machine's
+    # toolchain version, not whatever apt happens to ship today.
+    local img="tonel-server-builder:debian12"
+    local builder_dir="$REPO_ROOT/server/.docker"
+    local out_dir="$REPO_ROOT/server/build-linux"
 
-    log "[binary] remote build (cmake)"
-    ssh_exec "
-        set -e
-        cd '$TONEL_DEPLOY_DIR/build-src'
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release > /tmp/tonel-build.log 2>&1 || { tail -50 /tmp/tonel-build.log >&2; exit 1; }
-        cmake --build build -j\$(nproc) >> /tmp/tonel-build.log 2>&1 || { tail -50 /tmp/tonel-build.log >&2; exit 1; }
-        test -f build/signaling_server && test -f build/mixer_server
-    "
+    log "[binary] verify Docker"
+    command -v docker >/dev/null 2>&1 || die "docker not found locally — install Docker Desktop"
+    docker info >/dev/null 2>&1 || die "docker daemon not running — start Docker Desktop and retry"
 
-    log "[binary] backup + swap into bin/"
+    if ! docker image inspect "$img" >/dev/null 2>&1; then
+        log "[binary] building cross-compile image (one-time, ~2 min)"
+        run "docker buildx build --platform linux/amd64 -t '$img' '$builder_dir'" \
+            || die "docker build failed"
+    fi
+
+    log "[binary] cross-compile inside container (linux/amd64)"
+    rm -rf "$out_dir"
+    mkdir -p "$out_dir"
+    # Source mounted ro; copy into the container's writable /tmp/srcwork before
+    # running cmake so build artifacts don't leak back into the host tree.
+    # /out is the only writable mount; we drop just signaling_server and
+    # mixer_server there.
+    run "docker run --rm --platform linux/amd64 \
+        -v '$REPO_ROOT/server:/src:ro' \
+        -v '$out_dir:/out' \
+        '$img' \
+        bash -c '
+            set -e
+            # Copy source into the container so build/ artifacts do not leak
+            # back through the read-only mount. Skip the host-side build/ and
+            # .cache/ — they hold a CMakeCache pinned to the macOS source
+            # path and would poison the in-container cmake run.
+            mkdir -p /tmp/srcwork
+            (cd /src && tar --exclude=build --exclude=.cache --exclude=node_modules -cf - .) \
+                | tar -xf - -C /tmp/srcwork
+            cd /tmp/srcwork
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release > /tmp/build.log 2>&1 || { tail -50 /tmp/build.log >&2; exit 1; }
+            cmake --build build -j\$(nproc) >> /tmp/build.log 2>&1 || { tail -50 /tmp/build.log >&2; exit 1; }
+            cp build/signaling_server build/mixer_server /out/
+        '" || die "cross-compile failed"
+
+    file "$out_dir/signaling_server" | grep -q 'ELF 64-bit LSB.*x86-64' \
+        || die "signaling_server is not a Linux x86-64 ELF — check Dockerfile platform"
+    file "$out_dir/mixer_server" | grep -q 'ELF 64-bit LSB.*x86-64' \
+        || die "mixer_server is not a Linux x86-64 ELF — check Dockerfile platform"
+    ok "[binary] cross-compile done — $(ls -la "$out_dir"/{signaling,mixer}_server | awk '{print $9":"$5}' | xargs)"
+
+    log "[binary] backup current bin/ on remote"
     local stamp
     stamp=$(date +%Y%m%d-%H%M%S)
     ssh_exec "
@@ -81,12 +118,12 @@ deploy_binary() {
         done
     "
 
-    # Stop, swap, start (one binary at a time to minimize downtime per process).
+    # Stop, rsync ELF, start (one process at a time to minimize downtime).
     for proc in signaling mixer; do
         local bin_name; [ "$proc" = "signaling" ] && bin_name=signaling_server || bin_name=mixer_server
         log "[binary] swap $bin_name (pm2 stop tonel-$proc)"
         ssh_exec "pm2 stop tonel-$proc 2>/dev/null || true"
-        ssh_exec "cp '$TONEL_DEPLOY_DIR/build-src/build/$bin_name' '$TONEL_DEPLOY_DIR/bin/$bin_name'"
+        rsync_to_remote "$out_dir/$bin_name" "$TONEL_DEPLOY_DIR/bin/$bin_name"
         ssh_exec "chmod +x '$TONEL_DEPLOY_DIR/bin/$bin_name'"
         ssh_exec "pm2 start tonel-$proc 2>/dev/null || pm2 startOrReload '$TONEL_DEPLOY_DIR/ops/ecosystem.config.cjs' --only tonel-$proc"
     done
@@ -193,6 +230,19 @@ deploy_ops() {
     ' "$REPO_ROOT/ops/cloudflared/config.yml.template" > "$tmp"
     rsync_to_remote "$tmp" "/root/.cloudflared/config.yml"
     rm -f "$tmp"
+
+    # Install systemd drop-in extending Start/StopSec to 180s. cloudflared's
+    # upstream unit ships with TimeoutStartSec=15 (way too short for re-
+    # establishing 4 edge connections); the v5.1.0 release deploy hit this
+    # and aborted with a timeout. Drop-in survives `cloudflared service
+    # install` upgrades, unlike editing the unit file. Path is fixed at
+    # /etc/systemd/system/cloudflared.service.d/ per systemd conventions.
+    log "[ops] install cloudflared.service.d/ drop-in (TimeoutStart/Stop=180)"
+    ssh_exec "mkdir -p /etc/systemd/system/cloudflared.service.d"
+    rsync_to_remote "$REPO_ROOT/ops/cloudflared/cloudflared.service.d/timeout.conf" \
+        "/etc/systemd/system/cloudflared.service.d/timeout.conf"
+    ssh_exec "systemctl daemon-reload"
+
     ssh_exec "systemctl restart cloudflared"
 
     log "[ops] save PM2 process list (so it survives reboot)"
