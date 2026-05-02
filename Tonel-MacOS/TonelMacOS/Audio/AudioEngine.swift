@@ -112,6 +112,30 @@ final class AudioEngine: ObservableObject {
     private var peerKeysSnapshot: [String] = []
     private var packetUnsub: (() -> Void)?
 
+    /// Composite "<roomId>:<userId>" key for self-detection in the
+    /// playback ingest path. Set in `start()` from the attached
+    /// MixerClient; read on the network thread by `ingestPeerPacket`.
+    /// Storing it locally — rather than dereferencing
+    /// `mixer?.userIdKey` every packet — avoids the weak-ref +
+    /// optional-unwrap path. If `mixer` ever races to `nil` between
+    /// attach and packet arrival, `mixer?.userId == nil` while
+    /// `uid == String` is non-nil → comparison evaluates to `false` →
+    /// self-loopback packets get routed into `peers` as if they were
+    /// a peer. The room then thinks "I have a peer", drops
+    /// `selfLoopRing`, and the user hears nothing because there's
+    /// no actual peer audio to render. Caching the key here closes
+    /// that race.
+    private var selfUserIdKey: String = ""
+    private let selfUserIdKeyLock = NSLock()
+    /// Diagnostics — first few packets' routing decision logged so
+    /// alone-no-self issues are observable from logs without
+    /// instrumenting the build.
+    private var ingestLogCounter: Int = 0
+    /// Diagnostics — first few alone-branch playback callbacks logged
+    /// with selfLoop depth + take so we can tell if loopback packets
+    /// are arriving but not being mixed (or vice versa).
+    private var alonePlaybackLogCounter: Int = 0
+
     // ── Setup ──────────────────────────────────────────────────────────────
 
     func attach(mixer: MixerClient) {
@@ -125,6 +149,16 @@ final class AudioEngine: ObservableObject {
     func start() throws {
         guard !isRunning else { return }
         try requestMicPermission()    // throws if denied
+
+        // Capture the self-userId composite key at start time (after
+        // mixer.connect has set it). The packet ingest path uses this
+        // for self-loopback detection — see `selfUserIdKey` field doc.
+        selfUserIdKeyLock.lock()
+        selfUserIdKey = mixer?.userIdKey ?? ""
+        selfUserIdKeyLock.unlock()
+        ingestLogCounter = 0
+        alonePlaybackLogCounter = 0
+        AppLog.log("[AudioEngine] selfUserIdKey set: '\(selfUserIdKey)' (mixer=\(mixer == nil ? "nil" : "ok"))")
 
         let wireFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -399,13 +433,43 @@ final class AudioEngine: ObservableObject {
         let uid = pkt.userId.split(separator: ":", maxSplits: 1).last.map(String.init) ?? pkt.userId
         let samples = PCM16.decode(pkt.pcm)
 
-        // Server-side self-loopback. Server runs fullMix mode while we're
-        // alone (gives us our own voice back so the user can hear that the
-        // round-trip is alive) and switches to N-1 once peers join.
-        // We don't add self to peerLevels — that would create a "peer
-        // strip" for ourselves; instead we route into a dedicated ring
-        // and the playback callback only mixes it when we're actually alone.
-        if uid == mixer?.userId {
+        // Server-side self-loopback detection.
+        //
+        // Compare against the cached composite "<room>:<user>" key (set
+        // in start() from `mixer.userIdKey`) — NOT against the bare
+        // `mixer?.userId`. Two reasons:
+        //   1. Robustness: `mixer` is a weak ref; `mixer?.userId == nil`
+        //      while `uid != nil` evaluates to `false` and silently
+        //      misroutes the self packet into the `peers` map. The room
+        //      then thinks it has a peer, fillPlayback's alone-branch
+        //      drains selfLoopRing, and the user hears nothing.
+        //   2. Skip the split: comparing the full composite avoids the
+        //      bare-userId extraction entirely. The 64-byte SPA1 userId
+        //      field is exactly the composite key; just compare bytes.
+        //
+        // Server runs fullMix mode while we're alone (gives us our own
+        // voice back so the user can hear the round-trip is alive) and
+        // switches to N-1 once peers join. We don't add self to
+        // peerLevels — that would create a "peer strip" for ourselves;
+        // instead we route into a dedicated ring and the playback
+        // callback only mixes it when we're actually alone.
+        selfUserIdKeyLock.lock()
+        let myKey = selfUserIdKey
+        selfUserIdKeyLock.unlock()
+        let isSelf = !myKey.isEmpty && pkt.userId == myKey
+
+        // Cold-start diagnostic: log the first 5 packets' routing
+        // decision. Lets us tell at a glance whether a "no self audio
+        // when alone" report is (a) packets aren't arriving from the
+        // server, (b) packets arrive but routing-as-self is failing,
+        // or (c) packets arrive and route correctly but downstream
+        // mix is silent. Only first 5 to keep logs quiet thereafter.
+        ingestLogCounter &+= 1
+        if ingestLogCounter <= 5 {
+            AppLog.log("[AudioEngine] ingest #\(ingestLogCounter) pkt.userId='\(pkt.userId)' uid='\(uid)' myKey='\(myKey)' isSelf=\(isSelf) sampleN=\(samples.count)")
+        }
+
+        if isSelf {
             selfLoopLock.lock()
             selfLoopRing.append(contentsOf: samples)
             // Trim to ~5ms target depth. The server-loopback path has no
@@ -491,6 +555,17 @@ final class AudioEngine: ObservableObject {
             // Volume here is the same monitor knob — the user thinks "this
             // is my self-hear", regardless of which path delivers it.
             let monGain = monitorMuted ? 0 : monitorGain
+            // Cold-start diagnostic: log the first 5 alone-branch passes.
+            // Surfaces both "no packets in the ring" (loopback isn't
+            // arriving / isn't being routed) and "ring full but
+            // monGain==0" (mute or knob bug). Quiet after the first 5.
+            if alonePlaybackLogCounter < 5 {
+                alonePlaybackLogCounter &+= 1
+                selfLoopLock.lock()
+                let depth = selfLoopRing.count
+                selfLoopLock.unlock()
+                AppLog.log("[AudioEngine] fillPlayback alone #\(alonePlaybackLogCounter) frameCount=\(frameCount) selfLoopRing=\(depth)smp monGain=\(monGain) monitorMuted=\(monitorMuted)")
+            }
             if monGain > 0 {
                 selfLoopLock.lock()
                 let take = min(frameCount, selfLoopRing.count)
