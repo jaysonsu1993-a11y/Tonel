@@ -35,9 +35,46 @@ import os.lock
 /// 4 consecutive empty pops the listener hears silence (the network
 /// outage is real; PLC alone will sound stuttery beyond 4×).
 final class JitterBuffer {
-    static let maxDepth      = 33    // matches web v4.3.7+ JITTER_MAX_DEPTH
+    static let maxDepth      = 33    // absolute cap (~82.5 ms) — disaster ceiling
     static let primeMin      = 2     // start drain after this many frames
     static let frameSamples  = 120   // SPA1 wire frame size (informational)
+    /// v0.1.7: target steady-state depth. When a push lands the buffer
+    /// above `targetDepth + trimMargin`, we trim **down to targetDepth
+    /// in one shot** (instead of relying on `drop_oldest` per push to
+    /// dribble it back at cap). Reasoning:
+    ///
+    /// At room-join, the OS UDP recv buffer has queued ~370 ms worth
+    /// of self-loopback packets while the audio engine was setting up.
+    /// As soon as the receive loop runs, those packets all flush in a
+    /// burst. Without target-trim, the buffer fills to `maxDepth=33`
+    /// and `drop_oldest` fires once per excess packet — observed in
+    /// real logs as `drop=908` in the first second = **908 audible
+    /// clicks at room-join**. With target-trim, we get ONE big trim
+    /// (one click) and immediately resume at the desired latency
+    /// floor.
+    ///
+    /// Steady-state: any clock drift between server (NTP-synced) and
+    /// client (audio-crystal) accumulates over time. Without active
+    /// drain, the buffer drifts up to `maxDepth` and then drips at
+    /// cap (the `drop=930` settling pattern in the logs). Target-trim
+    /// catches drift before it accumulates: when count exceeds
+    /// `targetDepth + trimMargin`, drain back. Sparse single clicks
+    /// instead of continuous dribble.
+    static let targetDepth   = 2     // primeMin = 5 ms steady-state floor
+    /// Generous headroom — only trim when buffer is near `maxDepth`.
+    /// Each trim is one audible discontinuity regardless of how many
+    /// frames it drops; we want **one fat trim per burst** rather than
+    /// many small ones (`trimMargin=4` was overly twitchy and produced
+    /// ~30 trim events per room-join burst). Set so trim fires only
+    /// when count would otherwise overflow `maxDepth`:
+    ///   `target + margin + 1 >= maxDepth`  ⇒  margin = maxDepth - target - 1
+    /// The buffer holds up to ~75 ms of jitter headroom before trim;
+    /// normal wifi jitter (5–15 ms) and sustained drift (a few frames)
+    /// are absorbed silently. Trim fires only on bursts large enough
+    /// to fill the absolute cap — same audibility profile as a single
+    /// `drop_oldest` event but recovers latency in one shot rather
+    /// than dripping.
+    static let trimMargin    = maxDepth - targetDepth - 1   // 30 frames = 75 ms
     /// Decay envelope for consecutive PLC quanta. Matches web
     /// `concealDecay`. After this many in a row we emit silence.
     static let concealDecay: [Float] = [1.0, 0.7, 0.4, 0.15]
@@ -67,6 +104,7 @@ final class JitterBuffer {
     private(set) var dropOldestCount = 0
     private(set) var seqGapCount = 0
     private(set) var plcCount = 0        // lifetime PLC events (one per "primed → empty" transition)
+    private(set) var trimCount = 0       // lifetime target-trim events (one per buffer-too-deep concentration)
 
     // os_unfair_lock cannot be a stored Swift property directly with
     // value semantics — we hold a heap-allocated cell so &lock yields
@@ -87,10 +125,19 @@ final class JitterBuffer {
 
     // ── Push (network thread) ──────────────────────────────────────────────
 
-    /// Push one decoded frame. If the ring is at capacity we drop the
-    /// oldest (advance head) — the same trade the web/server jitter
-    /// buffers make when their cap is hit. With `maxDepth = 33` this is
-    /// essentially never reached in normal operation.
+    /// Push one decoded frame.
+    ///
+    /// Two depth-management policies layered:
+    ///   1. **Target-trim** (the productive one): if after this push the
+    ///      buffer would land above `targetDepth + trimMargin`, drain
+    ///      to `targetDepth` in one shot. Concentrates many small
+    ///      `drop_oldest` events into single trims; far fewer
+    ///      audible clicks under burst delivery / clock drift.
+    ///   2. **maxDepth fallback**: if somehow we still hit the absolute
+    ///      cap (only possible if a single push would overshoot
+    ///      target+margin AND the trim logic is bypassed — shouldn't
+    ///      happen but kept as a safety net), drop oldest. Same
+    ///      `drop_oldest` semantics as before.
     func push(_ frame: [Float], sequence: UInt16) {
         lock(); defer { unlock() }
         if let prev = lastSeq {
@@ -99,9 +146,8 @@ final class JitterBuffer {
         }
         lastSeq = sequence
 
+        // Layer 2 fallback: hard cap at maxDepth.
         if count >= Self.maxDepth {
-            // Drop oldest: advance head, slot at the old head is going to
-            // be overwritten via tail in a moment.
             head = (head + 1) % Self.maxDepth
             count -= 1
             dropOldestCount += 1
@@ -109,6 +155,17 @@ final class JitterBuffer {
         ring[tail] = frame
         tail = (tail + 1) % Self.maxDepth
         count += 1
+
+        // Layer 1: target-trim. If we just pushed past target+margin,
+        // drain back to target in one shot. ONE click event instead of
+        // (count - target) drop_oldest events.
+        if count > Self.targetDepth + Self.trimMargin {
+            let drop = count - Self.targetDepth
+            head = (head + drop) % Self.maxDepth
+            count = Self.targetDepth
+            trimCount += 1
+        }
+
         if count >= Self.primeMin { primed = true }
     }
 
@@ -158,6 +215,22 @@ final class JitterBuffer {
         lastFrame = frame
         unlock()
         return .real(frame)
+    }
+
+    // ── Reset ──────────────────────────────────────────────────────────────
+
+    /// Drop all queued frames + reset prime state. Called on engine
+    /// stop+restart (e.g. device change) so stale frames captured
+    /// during the gap don't replay when the new audio path comes up.
+    /// Diagnostic counters are preserved for the session log.
+    func clear() {
+        lock(); defer { unlock() }
+        for i in 0..<ring.count { ring[i] = [] }
+        head = 0
+        tail = 0
+        count = 0
+        primed = false
+        concealQuanta = 0
     }
 
     // ── Diagnostics ────────────────────────────────────────────────────────

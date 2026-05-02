@@ -81,11 +81,18 @@ final class AudioEngine: ObservableObject {
     /// (web parity: when peers.count == 0 we let the server's fullMix
     /// route bring our voice back instead of using local monitor — proves
     /// the round-trip is alive and gives a server-confirmed audio path).
-    private var selfLoopRing: [Float] = []
-    private let selfLoopLock = NSLock()
-    /// Equivalent jitter target for the server-loopback path. 2 frames = 5ms.
-    private static let selfLoopRingTrimSamples = 240
-    private static let selfLoopMaxSamples = 9600
+    /// v0.1.5: was a raw `[Float]` ring with hard trim and no PLC. When a
+    /// self-loop packet was delayed by even a single quantum (2.5 ms),
+    /// `fillPlayback` would find the ring empty, emit silence for that
+    /// quantum → audible click. Network jitter on cellular / Cloudflare /
+    /// any congested path made this fire several times/sec — the 破音
+    /// the user kept reporting on solo playback.
+    ///
+    /// Now a `JitterBuffer` (same as the per-peer path), so the
+    /// alone-branch gets `.real / .plc / .silence` semantics with the
+    /// 4-quanta lastBlock replay budget. Single-quantum gaps are masked
+    /// inaudibly; only sustained outages drop to silence.
+    private let selfLoopJitter = JitterBuffer()
     private var captureLogCounter: Int = 0
 
     // Capture re-blocking — accumulate until we have 120 samples.
@@ -135,6 +142,14 @@ final class AudioEngine: ObservableObject {
     /// with selfLoop depth + take so we can tell if loopback packets
     /// are arriving but not being mixed (or vice versa).
     private var alonePlaybackLogCounter: Int = 0
+    // Per-second running stats for the periodic log.
+    // peak* track the max magnitude observed in the window; clip*
+    // count samples in the soft-clip "knee" region (≥ 0.95). Reset
+    // each time the periodic log fires.
+    private var inPeakWindow:  Float = 0
+    private var inClipWindow:  Int   = 0
+    private var outPeakWindow: Float = 0
+    private var outClipWindow: Int   = 0
 
     // ── Setup ──────────────────────────────────────────────────────────────
 
@@ -213,13 +228,32 @@ final class AudioEngine: ObservableObject {
         engine.attach(sourceNode)
         engine.connect(sourceNode, to: engine.mainMixerNode, format: wireFormat)
 
+        // `prepare()` instantiates the AUHALs (input + output) so we
+        // can mutate their properties below before `start()` actually
+        // begins streaming.
+        engine.prepare()
+
+        // Apply any output-device choice queued before the engine was
+        // running (e.g. the home-screen picker fires before joinRoom →
+        // audio.start). After prepare() the AU is real but not yet
+        // streaming; setting CurrentDevice now means start() brings up
+        // the user's chosen device from frame zero, no renegotiation.
+        if let pending = pendingOutputDevice {
+            do {
+                try setAUDevice(unit: engine.outputNode.audioUnit,
+                                deviceID: pending,
+                                label: "output (queued)")
+            } catch {
+                AppLog.log("[AudioEngine] queued output device apply failed: \(error)")
+            }
+        }
+
         // Match HW IO buffer to the wire frame (120 samples / 2.5 ms): every
         // sinkNode callback produces exactly one SPA1 packet, capture
         // accumulator stays empty, and monitor latency = 1× HW buffer ≈ 2.5 ms.
         // macOS clamps to the device's allowed range — SSL 2+ accepts 15.
         setHardwareBufferFrames(target: UInt32(AudioWire.frameSamples))
 
-        engine.prepare()
         try engine.start()
         startWallClockMs = nowMs()
         captureAccum.removeAll(keepingCapacity: true)
@@ -316,7 +350,7 @@ final class AudioEngine: ObservableObject {
         sourceNode = nil
         captureSink = nil
         monitorRingLock.lock(); monitorRing.removeAll(); monitorRingLock.unlock()
-        selfLoopLock.lock();    selfLoopRing.removeAll(); selfLoopLock.unlock()
+        selfLoopJitter.clear()
         peersLock.lock()
         peers.removeAll()
         peerKeysSnapshot.removeAll(keepingCapacity: false)
@@ -378,16 +412,36 @@ final class AudioEngine: ObservableObject {
             self.inputLevel = muted ? 0 : peak
             if clipDelta > 0 { self.captureClipCount &+= clipDelta }
         }
+        // Accumulate window-max so the periodic log shows the *max*
+        // peak in the second, not just the latest 2.5ms's peak (which
+        // misses brief transients between log emits).
+        if peak > inPeakWindow { inPeakWindow = peak }
+        inClipWindow &+= clipped
+
         // Log mic peak + ring depths every ~1s so we can spot buffer drift.
+        // Includes self-loop JitterBuffer stats (depth + drop / PLC counts),
+        // input/output max-peak, clip-event counts, and audio RTT — all
+        // needed to triage 破音 / latency reports without shipping a
+        // separate instrumentation build.
         captureLogCounter &+= 1
         if captureLogCounter <= 3 || captureLogCounter % 400 == 0 {
             monitorRingLock.lock()
             let monDepth = monitorRing.count
             monitorRingLock.unlock()
-            selfLoopLock.lock()
-            let loopDepth = selfLoopRing.count
-            selfLoopLock.unlock()
-            AppLog.log("[AudioEngine] capture#\(captureLogCounter) peak=\(String(format: "%.4f", peak)) monRing=\(monDepth)smp selfLoop=\(loopDepth)smp")
+            let loopDepth = selfLoopJitter.depth
+            let loopPlc   = selfLoopJitter.plcCount
+            let loopDrop  = selfLoopJitter.dropOldestCount
+            let loopTrim  = selfLoopJitter.trimCount
+            let rtt = mixer.audioRttMs
+            let inP = inPeakWindow, outP = outPeakWindow
+            let inC = inClipWindow, outC = outClipWindow
+            let iGain = inputGain, oGain = outputGain
+            AppLog.log("[AudioEngine] cap#\(captureLogCounter) inPeak=\(String(format: "%.3f", inP)) outPeak=\(String(format: "%.3f", outP)) inClip=\(inC) outClip=\(outC) iGain=\(String(format: "%.2f", iGain)) oGain=\(String(format: "%.2f", oGain)) self.depth=\(loopDepth)fr self.plc=\(loopPlc) self.drop=\(loopDrop) self.trim=\(loopTrim) monRing=\(monDepth) rtt=\(rtt)ms")
+            // Reset window stats for the next second.
+            inPeakWindow  = 0
+            outPeakWindow = 0
+            inClipWindow  = 0
+            outClipWindow = 0
         }
 
         // Feed the self-monitor ring. Hard upper bound at 200ms is just a
@@ -470,17 +524,10 @@ final class AudioEngine: ObservableObject {
         }
 
         if isSelf {
-            selfLoopLock.lock()
-            selfLoopRing.append(contentsOf: samples)
-            // Trim to ~5ms target depth. The server-loopback path has no
-            // explicit jitter buffer (unlike per-peer JitterBuffer); without
-            // this, network bursts inflate the ring and listening latency
-            // creeps up over the session. Trim is the same "drop oldest"
-            // strategy JitterBuffer uses.
-            if selfLoopRing.count > Self.selfLoopRingTrimSamples {
-                selfLoopRing.removeFirst(selfLoopRing.count - Self.selfLoopRingTrimSamples)
-            }
-            selfLoopLock.unlock()
+            // v0.1.5: route into a JitterBuffer so the playback path gets
+            // PLC. `push()` does the depth-cap + drop-oldest internally;
+            // we don't need an explicit trim here.
+            selfLoopJitter.push(samples, sequence: pkt.sequence)
             Task { @MainActor in self.rxCount &+= 1 }
             return
         }
@@ -546,36 +593,42 @@ final class AudioEngine: ObservableObject {
             // Drain server self-loopback so it doesn't pile up while unused.
             // (When peers join we still receive a couple of self-loop frames
             // before the server flips to N-1; tossing them avoids a slug
-            // of doubled audio when the mode actually does change.)
-            selfLoopLock.lock()
-            if !selfLoopRing.isEmpty { selfLoopRing.removeAll(keepingCapacity: true) }
-            selfLoopLock.unlock()
+            // of doubled audio when the mode actually does change.) The
+            // JitterBuffer doesn't expose a drop-all method; pop until
+            // .silence so the queue empties without producing audible
+            // mix contribution.
+            while case .real = selfLoopJitter.pop() { /* drain */ }
         } else {
             // ── Server self-loopback mix-in (alone → server fullMix) ──────
-            // Volume here is the same monitor knob — the user thinks "this
-            // is my self-hear", regardless of which path delivers it.
+            // v0.1.5: pop from `selfLoopJitter` (a JitterBuffer) instead
+            // of reading raw samples. Gives us PLC for free — single-
+            // quantum network jitter no longer drops to silence. Same
+            // PopResult semantics as the per-peer path.
             let monGain = monitorMuted ? 0 : monitorGain
-            // Cold-start diagnostic: log the first 5 alone-branch passes.
-            // Surfaces both "no packets in the ring" (loopback isn't
-            // arriving / isn't being routed) and "ring full but
-            // monGain==0" (mute or knob bug). Quiet after the first 5.
             if alonePlaybackLogCounter < 5 {
                 alonePlaybackLogCounter &+= 1
-                selfLoopLock.lock()
-                let depth = selfLoopRing.count
-                selfLoopLock.unlock()
-                AppLog.log("[AudioEngine] fillPlayback alone #\(alonePlaybackLogCounter) frameCount=\(frameCount) selfLoopRing=\(depth)smp monGain=\(monGain) monitorMuted=\(monitorMuted)")
+                AppLog.log("[AudioEngine] fillPlayback alone #\(alonePlaybackLogCounter) frameCount=\(frameCount) selfLoopDepth=\(selfLoopJitter.depth) monGain=\(monGain) monitorMuted=\(monitorMuted)")
             }
             if monGain > 0 {
-                selfLoopLock.lock()
-                let take = min(frameCount, selfLoopRing.count)
-                if take > 0 {
-                    for i in 0..<take {
-                        out[i] += selfLoopRing[i] * monGain
+                // Pop one wire-frame's worth at a time; if `frameCount`
+                // exceeds 120 we loop. Matches the per-peer mix loop.
+                var written = 0
+                let frameSize = AudioWire.frameSamples
+                while written < frameCount {
+                    let take = min(frameSize, frameCount - written)
+                    switch selfLoopJitter.pop() {
+                    case .real(let f):
+                        let n = min(take, f.count)
+                        for i in 0..<n { out[written + i] += f[i] * monGain }
+                    case .plc(let f, let decay):
+                        let g = monGain * decay
+                        let n = min(take, f.count)
+                        for i in 0..<n { out[written + i] += f[i] * g }
+                    case .silence:
+                        break       // leave zeros from the initial fill
                     }
-                    selfLoopRing.removeFirst(take)
+                    written += take
                 }
-                selfLoopLock.unlock()
             }
             // Drain local monitor while alone — avoids a backlog explosion
             // before peers arrive. (Otherwise switching to with-peers mode
@@ -641,14 +694,32 @@ final class AudioEngine: ObservableObject {
             written += take
         }
 
-        // Output gain + soft clip.
+        // Output gain + tanh soft-clip (knee=0.95, matches server's
+        // `audio_mixer.h::softClipBuffer`). The previous hard-clamp at
+        // ±1.0 produced volume-correlated harmonic distortion for any
+        // sample that overshot — server fixed the same issue in
+        // v1.0.15; the macOS client was still hard-clamping every
+        // output quantum. Track output peak + clip-event count for the
+        // periodic capture log.
         let g = outputGain
+        var peakOut: Float = 0
+        var clipOut = 0
         for i in 0..<frameCount {
-            var v = out[i] * g
+            let raw = out[i] * g
+            let mag = abs(raw)
+            if mag > peakOut { peakOut = mag }
+            if mag >= 0.95 { clipOut &+= 1 }   // entered tanh region
+            // Inline soft-clip — knee 0.95.
+            var v = raw
+            if v > 0.95       { v = 0.95 + 0.05 * tanh((v - 0.95) / 0.05) }
+            else if v < -0.95 { v = -0.95 + 0.05 * tanh((v + 0.95) / 0.05) }
+            // Final safety in case tanh + FP precision produced > 1.
             if v >  1.0 { v =  1.0 }
             if v < -1.0 { v = -1.0 }
             out[i] = v
         }
+        outPeakWindow = max(outPeakWindow, peakOut)
+        outClipWindow &+= clipOut
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -849,12 +920,88 @@ final class AudioEngine: ObservableObject {
         return result
     }
 
-    /// Switch the engine's playback device.
-    /// AVAudioEngine on macOS allows hot-swapping the AUHAL's CurrentDevice
-    /// while running; the engine re-negotiates formats on the fly.
+    /// User-requested output device. Stored separately from the AU's
+    /// `CurrentDevice` because:
+    ///   1. The home-screen picker fires BEFORE `engine.start()` has
+    ///      run. At that point `engine.outputNode.audioUnit` is `nil`
+    ///      (AVAudioEngine creates the AU lazily on prepare/start), so
+    ///      a direct `AudioUnitSetProperty(...)` call would no-op
+    ///      silently. We need to remember the choice and apply it
+    ///      inside `start()`.
+    ///   2. The room-screen picker fires while the engine IS running.
+    ///      The AU exists, so we can apply immediately, but
+    ///      AVAudioEngine often needs a stop+start cycle for the new
+    ///      device's format to be renegotiated end-to-end (matching
+    ///      the existing `setInputDevice` behaviour).
+    ///   3. The settings UI needs to render "current selection" — we
+    ///      return this preference if set, falling back to the AU's
+    ///      live value, falling back to system default, falling back
+    ///      to "first device in the enumeration." Eliminates the
+    ///      "picker shows wrong device" symptom.
+    private var pendingOutputDevice: AudioDeviceID? = nil
+
+    /// Switch the engine's playback device. Works whether or not the
+    /// engine is currently running:
+    ///   • Engine not running (home screen) → save preference, apply
+    ///     during `start()`.
+    ///   • Engine running (in-room) → save preference, set the AU
+    ///     property, restart the engine so format renegotiation takes
+    ///     full effect.
     func setOutputDevice(_ deviceID: AudioDeviceID) throws {
-        try setAUDevice(unit: engine.outputNode.audioUnit, deviceID: deviceID,
+        pendingOutputDevice = deviceID
+        guard isRunning else {
+            // Engine not started yet — preference is recorded; will be
+            // applied at start() time. AU may be nil at this point.
+            AppLog.log("[AudioEngine] output device queued (engine not running) → id=\(deviceID)")
+            return
+        }
+        // Engine running: stop+set+restart, mirroring setInputDevice.
+        // Hot-swap-while-running on macOS is theoretically supported
+        // but produces clicks / format mismatches in practice.
+        let wasRunning = isRunning
+        if wasRunning { stop() }
+        try setAUDevice(unit: engine.outputNode.audioUnit,
+                        deviceID: deviceID,
                         label: "output")
+        if wasRunning { try start() }
+    }
+
+    /// Resolves the "currently-effective" output device for the
+    /// settings picker, in this priority:
+    ///   1. The user's pending choice (if any) — what we'll apply
+    ///      next time the engine starts.
+    ///   2. The running engine's actual device, if engine is up.
+    ///   3. macOS system-default output device — what the AU will
+    ///      pick up at start() if no preference is set.
+    /// Returns nil only if all three sources fail (degenerate state).
+    func currentOutputDevice() -> AudioDeviceID? {
+        if let pending = pendingOutputDevice { return pending }
+        if let au = engine.outputNode.audioUnit {
+            var deviceID: AudioDeviceID = 0
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            let status = AudioUnitGetProperty(au,
+                                              kAudioOutputUnitProperty_CurrentDevice,
+                                              kAudioUnitScope_Global,
+                                              0, &deviceID, &size)
+            if status == noErr && deviceID != 0 { return deviceID }
+        }
+        return Self.systemDefaultOutputDevice()
+    }
+
+    /// macOS system-default output device, queried via Core Audio HAL.
+    /// Lets the home-screen picker render the right "current" choice
+    /// before any AU has been instantiated.
+    static func systemDefaultOutputDevice() -> AudioDeviceID? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var deviceID: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &addr, 0, nil, &size, &deviceID)
+        return (status == noErr && deviceID != 0) ? deviceID : nil
     }
 
     /// Switch the engine's input device (the mic feeding inputNode).

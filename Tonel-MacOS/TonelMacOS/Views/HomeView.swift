@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreAudio   // AudioDeviceID type used by the output-device picker
 
 /// Home screen — mirrors layout of legacy `HomeViewController.mm`:
 /// dark BG, centered "Tonel" wordmark + subtitle, two big stacked
@@ -171,17 +172,55 @@ private struct CreateRoomSheet: View {
     }
 }
 
+/// Pre-room settings — picks output device BEFORE joining a room. Critical
+/// because the room's solo-loopback path plays the user's mic back through
+/// whatever device is selected; if that's the laptop speakers, acoustic
+/// feedback (mic → speaker → mic → server → speaker → ...) makes the
+/// loopback distort proportionally to input volume — exactly the
+/// "破音失真大小与输入音量正相关" symptom the user reported. Letting them
+/// pick headphones BEFORE joining avoids this entirely.
+///
+/// Mirrors the picker inside `SettingsSheet` (the in-room version) so
+/// the same selection sticks across home → room transitions.
 private struct HomeSettingsSheet: View {
+    @EnvironmentObject var state: AppState
     @Environment(\.dismiss) private var dismiss
+    @State private var outputDevices: [AudioDeviceInfo] = []
+    @State private var selectedOutput: AudioDeviceID = 0
+
     var body: some View {
         SheetCard(title: "设置") {
-            Text("（占位 — 后续接入输入/输出设备选择、jitter / prime 调参面板）")
-                .foregroundStyle(.secondary)
-                .font(.callout)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("音频输出").font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color(white: 0.85))
+                Picker("", selection: $selectedOutput) {
+                    ForEach(outputDevices, id: \.id) { d in
+                        Text(d.name).tag(d.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onChange(of: selectedOutput) { _, new in
+                    try? state.audio.setOutputDevice(new)
+                }
+                Text("⚠️ 独自一人时房间会用此设备播放你的回环 — 强烈建议选耳机，扬声器会引起声学反馈失真。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(white: 0.55))
+            }
         } footer: {
             HStack {
                 Spacer()
                 Button("好") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .onAppear {
+            outputDevices = AudioEngine.listOutputDevices()
+            // Show whatever's currently live, not "first device".
+            if let live = state.audio.currentOutputDevice(),
+               outputDevices.contains(where: { $0.id == live }) {
+                selectedOutput = live
+            } else if let first = outputDevices.first {
+                selectedOutput = first.id
             }
         }
     }

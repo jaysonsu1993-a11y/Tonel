@@ -562,7 +562,15 @@ struct SettingsSheet: View {
         .background(Color(red: 0.10, green: 0.10, blue: 0.12))
         .onAppear {
             outputDevices = AudioEngine.listOutputDevices()
-            if let first = outputDevices.first { selectedOutput = first.id }
+            // Reflect the device that's CURRENTLY active, not "first in
+            // list" — the latter looked broken to anyone whose live
+            // output wasn't the alphabetical/enumeration first.
+            if let live = audio.currentOutputDevice(),
+               outputDevices.contains(where: { $0.id == live }) {
+                selectedOutput = live
+            } else if let first = outputDevices.first {
+                selectedOutput = first.id
+            }
         }
     }
 

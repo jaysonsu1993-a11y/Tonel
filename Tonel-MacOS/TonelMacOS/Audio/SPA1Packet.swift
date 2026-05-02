@@ -123,15 +123,42 @@ enum AudioWire {
     static let frameBytesPCM16 = frameSamples * 2  // 240 bytes payload
 }
 
-/// PCM16 (LE) ↔ Float32 sample conversion. Matches web encode/decode rules:
-///   encode: clamp(-1,1) * 32767, decode: int16 / 32768
+/// PCM16 (LE) ↔ Float32 sample conversion. Decode unchanged (int16 / 32768).
+/// Encode v0.1.6: tanh soft-clip with knee=0.95 instead of hard-clamp.
+/// Mirrors `audio_mixer.h::softClipBuffer` on the server. Why:
+///   - Hard-clamp at ±1.0 produces square-wave harmonics for any
+///     instantaneous overshoot — exactly the "破音失真大小与输入音量
+///     正相关" symptom the user reported on solo loopback. Server's
+///     own mixer fixed the equivalent in v1.0.15 by replacing hard
+///     clamp with tanh; the macOS encode path was still
+///     hard-clamping every outgoing frame.
+///   - Region [-0.95, 0.95] passes through linearly (byte-identical
+///     to a clean linear path for normal-volume voice).
+///   - Region (0.95, 1.0] is smoothly compressed by tanh — no kinks
+///     in the derivative, no harmonics, zero added latency.
+///   - Anything past 1.0 still saturates near ±1.0 but as a rolloff,
+///     not a brickwall.
+/// Asymmetric vs. web (which still hard-clamps) — strictly a quality
+/// improvement on the macOS sender; other listeners hear cleaner
+/// audio when this user shouts. Wire format unchanged.
 enum PCM16 {
+    @inline(__always) static func softClip(_ x: Float) -> Float {
+        let knee: Float = 0.95
+        let room: Float = 1.0 - knee  // 0.05
+        if x > knee  { return knee + room * tanh((x - knee) / room) }
+        if x < -knee { return -knee + room * tanh((x + knee) / room) }
+        return x
+    }
+
     static func encode(_ samples: [Float]) -> Data {
         var out = Data(count: samples.count * 2)
         out.withUnsafeMutableBytes { raw in
             let dst = raw.baseAddress!.assumingMemoryBound(to: Int16.self)
             for i in 0..<samples.count {
-                let s = max(-1.0, min(1.0, samples[i]))
+                // Soft-clip first (handles overshoot smoothly), then a
+                // final safety clamp in case tanh produced anything
+                // marginally outside [-1, 1] due to FP precision.
+                let s = max(-1.0, min(1.0, softClip(samples[i])))
                 dst[i] = Int16(s * 32767).littleEndian
             }
         }

@@ -37,6 +37,21 @@ final class MixerClient {
     private var udp: NWConnection?
     private var udpPort: UInt16 = Endpoints.mixerUDPPort
 
+    /// **Critical: dedicated network queue (NOT main).**
+    ///
+    /// Previously TCP+UDP started with `queue: .main`, which routed every
+    /// audio receive callback through the main thread. At 400 packets/sec
+    /// (PCM16 decode + JitterBuffer.push + Task hop per packet) the main
+    /// thread was buried under continuous audio work — especially under
+    /// any UI re-render. The visible symptom: opening the output-device
+    /// picker froze the app, because AVAudioEngine's reconfigure on
+    /// device-change ALSO ran on main and competed with the packet
+    /// firehose. Moving the receives to a userInitiated background queue
+    /// frees main entirely; SwiftUI updates that need main still hop via
+    /// `Task { @MainActor in ... }` from inside the handlers.
+    private let networkQueue = DispatchQueue(label: "io.tonel.network",
+                                              qos: .userInitiated)
+
     private var sequence: UInt16 = 0
     private var packetHandlers: [(UUID, PacketHandler)] = []
 
@@ -190,7 +205,7 @@ final class MixerClient {
                 default: break
                 }
             }
-            conn.start(queue: .main)
+            conn.start(queue: self.networkQueue)
         }
         conn.stateUpdateHandler = nil
     }
@@ -299,7 +314,7 @@ final class MixerClient {
         params.serviceClass = .interactiveVoice    // QoS hint for low-latency RT
         let conn = NWConnection(host: host, port: port, using: params)
         self.udp = conn
-        conn.start(queue: .main)
+        conn.start(queue: networkQueue)
     }
 
     private func sendHandshake() {

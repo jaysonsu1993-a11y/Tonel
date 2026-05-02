@@ -71,16 +71,34 @@ final class JitterBufferTests: XCTestCase {
         }
     }
 
-    /// Dropping oldest at capacity must NOT crash and must not leak
-    /// frames. Verifies the head-advance trim path.
-    func testDropOldestOnOverflow() {
+    /// Pushing many frames past `targetDepth + trimMargin` must trim
+    /// the buffer back to `targetDepth` rather than letting it grow
+    /// to `maxDepth` and dribble single frames. Concentrates clicks:
+    /// fewer audible discontinuities under burst delivery / clock drift.
+    func testTargetTrimOnOverflow() {
         let jb = JitterBuffer()
         let frame: [Float] = [1, 2, 3]
         for i in 0..<(JitterBuffer.maxDepth + 5) {
             jb.push(frame, sequence: UInt16(i))
         }
-        XCTAssertEqual(jb.depth, JitterBuffer.maxDepth)
-        XCTAssertGreaterThanOrEqual(jb.dropOldestCount, 5)
+        // After many pushes, buffer should sit at target (or
+        // target+margin worst case during the push that triggered
+        // the trim — but post-trim is what `depth` returns).
+        XCTAssertLessThanOrEqual(jb.depth, JitterBuffer.targetDepth + JitterBuffer.trimMargin,
+            "buffer overran target+margin: depth=\(jb.depth)")
+        // At least one trim should have fired — buffer hit cap.
+        // With wide trimMargin (= maxDepth - target - 1), one trim
+        // per maxDepth-fill cycle is the design. Pushing maxDepth+5
+        // frames triggers exactly one trim (= 1 audible event vs.
+        // the 5 `drop_oldest` events the legacy code would produce).
+        XCTAssertGreaterThanOrEqual(jb.trimCount, 1,
+            "expected target-trim to fire on overflow; trimCount=\(jb.trimCount)")
+        // dropOldestCount should be ZERO — target-trim catches things
+        // before maxDepth ever fires. Any non-zero here means the
+        // safety net engaged, which would surface as audible clicks
+        // we wanted to avoid.
+        XCTAssertEqual(jb.dropOldestCount, 0,
+            "drop_oldest fired (\(jb.dropOldestCount)) — target-trim should have prevented this")
     }
 
     /// Sequence-gap detection counts non-consecutive arrivals. Useful
