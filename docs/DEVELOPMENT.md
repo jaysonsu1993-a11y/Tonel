@@ -217,7 +217,7 @@ npm run build && npx wrangler pages deploy dist --project-name=tonel-web
 - Verify dataSize ≤ 1356 bytes
 ### WebSocket mixer connection issues
 
-- Verify srv.tonel.io resolves to 8.163.21.207 (DNS-only A record, grey cloud, NOT proxied by Cloudflare)
+- Verify srv.tonel.io resolves to 42.240.163.172 (DNS-only A record, grey cloud, NOT proxied by Cloudflare)
 - Check nginx is running and proxying WSS for srv.tonel.io to ws-mixer-proxy on :9005
 - Verify Let's Encrypt SSL cert is valid: `sudo certbot certificates`
 - Check ws-mixer-proxy is running: `pm2 status tonel-ws-mixer-proxy`

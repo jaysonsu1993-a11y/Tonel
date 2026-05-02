@@ -32,7 +32,7 @@ Every architectural decision in this project serves one metric: **minimizing end
 │  │              │    │ UDP :9003     │    │              │           │
 │  └──────────────┘    └──────────────┘    └──────────────┘           │
 │                                                                      │
-│                         Server (Alibaba Cloud)                      │
+│                         Server (酷番云广州)                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -185,6 +185,7 @@ Automatic: P2P is preferred, switches to Mixer when:
 | 9004 | WebSocket | Web signaling proxy (ws-proxy.js) |
 | 9005 | WebSocket | Web mixer proxy (ws-mixer-proxy.js, TCP control + UDP audio relay) |
 | 9006 | UDP | ws-mixer-proxy UDP receive port (server mixed audio return) |
+| 26806 | TCP | SSH (酷番云, non-standard port) |
 
 ## Deployment Architecture (2026-04)
 
@@ -220,7 +221,7 @@ Automatic: P2P is preferred, switches to Mixer when:
 
 - **Web on Cloudflare Pages**: No ICP filing needed. Global CDN, zero cost.
 - **Signaling via Cloudflare Tunnel**: Low-bandwidth control traffic goes through QUIC tunnel. Domain stays on 443. Beaver (ICP check) only sees Cloudflare IPs.
-- **Mixer audio via direct WSS**: Web client connects to `srv.tonel.io` (DNS-only A record, grey cloud, not proxied by Cloudflare). Audio traffic goes directly to the Alibaba Cloud server via nginx WSS → ws-mixer-proxy → UDP mixer. **No Cloudflare in the audio path** — critical for low latency.
+- **Mixer audio via direct WSS**: Web client connects to `srv.tonel.io` (DNS-only A record, grey cloud, not proxied by Cloudflare). Audio traffic goes directly to the 酷番云广州 server via nginx WSS → ws-mixer-proxy → UDP mixer. **No Cloudflare in the audio path** — critical for low latency.
 - **AppKit uses direct UDP**: Native client connects directly to server IP for both TCP control and UDP audio. Lowest possible latency.
 
 ### DNS Records
@@ -229,13 +230,13 @@ Automatic: P2P is preferred, switches to Mixer when:
 |---|---|---|---|
 | tonel.io | CNAME | tonel-web.pages.dev | Orange (Proxied by CF Pages) |
 | api.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel) |
-| srv.tonel.io | A | 8.163.21.207 | **Grey (DNS only, direct)** |
+| srv.tonel.io | A | 42.240.163.172 | **Grey (DNS only, direct)** |
 
 ### Client Connection Points
 
 | Client | Web URL | Signaling | Audio (Mixer) |
 |---|---|---|---|
-| AppKit (Production) | — | TCP direct 8.163.21.207:9002 | Direct UDP :9003 |
+| AppKit (Production) | — | TCP direct 42.240.163.172:9002 | Direct UDP :9003 |
 | Web (Trial) | https://tonel.io | wss://api.tonel.io/signaling (CF Tunnel) | **wss://srv.tonel.io/mixer-tcp + /mixer-udp (direct)** |
 | JUCE (Legacy) | — | TCP direct to config host | Direct UDP/TCP |
 
@@ -243,7 +244,7 @@ Automatic: P2P is preferred, switches to Mixer when:
 
 ```
 1. Browser connects to wss://srv.tonel.io/mixer-tcp (control) and /mixer-udp (audio)
-   - srv.tonel.io: DNS-only A record to 8.163.21.207, Let's Encrypt SSL via certbot-dns-cloudflare
+   - srv.tonel.io: DNS-only A record to 42.240.163.172, Let's Encrypt SSL via certbot
    - nginx on server terminates WSS and proxies to ws-mixer-proxy on :9005
 2. ws-mixer-proxy creates TCP connection to mixer_server:9002 only for /mixer-tcp
 3. /mixer-tcp WebSocket ↔ TCP:9002 (MIXER_JOIN, PING/PONG, level data)
