@@ -9,6 +9,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.3] - 2026-05-03
+
+### Reverted — web frontend rolled back to v5.0.0 state
+
+User asked to put the web frontend back to its v5.0.0 (`08175b1`)
+configuration. The v5.0.x → v5.1.x band of releases was largely infra
+(server migration, repo flatten, deploy plumbing, doc cleanup); only
+**v5.0.3** added a substantive runtime change to web — the
+`mixerRttProbe` service that replaced `signalService.onLatency` as
+the source of the homepage live-RTT display. That single addition is
+the only thing reverted here.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerRttProbe.ts` | **Deleted** (added in v5.0.3) |
+| `web/src/pages/HomePage.tsx` | Restored to v5.0.0 contents — homepage live RTT now sourced from `signalService.onLatency` again |
+
+No server, ops, or deploy-pipeline reverts. The migrated server
+infrastructure (酷番云 primary, Aliyun fallback) and the WSS-default
+on `/` transport selection from v5.0.0 are unchanged.
+
 ## [5.1.2] - 2026-05-02
 
 ### Changed — documentation consolidation pass

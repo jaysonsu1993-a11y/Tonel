@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { PeerInfo } from '../types'
-import { mixerRttProbe } from '../services/mixerRttProbe'
+import { signalService } from '../services/signalService'
 
 /**
  * HomePage — V1 redesign (2026-04-29).
@@ -38,8 +38,8 @@ interface Props {
 /**
  * Live latency number, used in three slots on the home page (hero
  * giant number, hero axis line, bottom stats row). All three slots
- * subscribe to the mixer-server PING/PONG RTT (same figure shown
- * inside a live room) so they show the same value at the same time.
+ * subscribe to the same signalService PING/PONG RTT so they show
+ * the same value at the same time.
  *
  * Display rules per spec:
  *   - Pre-connect / no RTT yet → animated 12 ± `jitter` placeholder.
@@ -54,8 +54,7 @@ function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: nu
   const [haveReal, setHaveReal] = useState(false)
   const lastUiUpdate = useRef(0)
   useEffect(() => {
-    mixerRttProbe.start()
-    const unsub = mixerRttProbe.onLatency((rtt) => {
+    const unsub = signalService.onLatency((rtt) => {
       const now = Date.now()
       // Throttle to >= 200 ms between visible updates.
       if (now - lastUiUpdate.current < 200) return
