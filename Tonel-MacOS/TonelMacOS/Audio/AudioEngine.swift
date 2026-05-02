@@ -93,13 +93,23 @@ final class AudioEngine: ObservableObject {
     private var captureSeq: UInt32   = 0  // for diagnostics only
     private var startWallClockMs: UInt64 = 0
 
-    // Per-peer playback state.
-    private struct PeerSink {
-        var jitter = JitterBuffer()
-        var lastFrame: [Float] = []  // for peer level meter
+    // Per-peer playback state. Reference type so `peers` dictionary
+    // lookups don't have to copy-write the JitterBuffer through the
+    // dictionary (which Swift's CoW would otherwise force every time we
+    // mutate the buffer). `final class` keeps method dispatch direct.
+    private final class PeerSink {
+        let jitter = JitterBuffer()
+        var lastFrame: [Float] = []  // for peer level meter, written off RT
     }
     private var peers: [String: PeerSink] = [:]
     private let peersLock = NSLock()
+    /// Pre-allocated snapshot of `peers.keys` — refreshed only when a
+    /// peer joins or leaves, never per RT callback. Avoids the
+    /// `Array(peers.keys)` allocation inside `fillPlayback` (was running
+    /// at ~187 callbacks/sec → ~187 heap allocs/sec on the Core Audio
+    /// thread, which can wedge the audio scheduler under load and
+    /// produce the audible 破音 the user reports).
+    private var peerKeysSnapshot: [String] = []
     private var packetUnsub: (() -> Void)?
 
     // ── Setup ──────────────────────────────────────────────────────────────
@@ -273,7 +283,10 @@ final class AudioEngine: ObservableObject {
         captureSink = nil
         monitorRingLock.lock(); monitorRing.removeAll(); monitorRingLock.unlock()
         selfLoopLock.lock();    selfLoopRing.removeAll(); selfLoopLock.unlock()
-        peersLock.lock(); peers.removeAll(); peersLock.unlock()
+        peersLock.lock()
+        peers.removeAll()
+        peerKeysSnapshot.removeAll(keepingCapacity: false)
+        peersLock.unlock()
         peerLevels = [:]
         isRunning = false
     }
@@ -409,10 +422,19 @@ final class AudioEngine: ObservableObject {
         }
 
         peersLock.lock()
-        var sink = peers[uid] ?? PeerSink()
+        let sink: PeerSink
+        if let existing = peers[uid] {
+            sink = existing
+        } else {
+            sink = PeerSink()
+            peers[uid] = sink
+            // Refresh the RT-side snapshot exactly when membership
+            // changes. Allocation here is fine — runs on the network
+            // ingest task, not the Core Audio thread.
+            peerKeysSnapshot = Array(peers.keys)
+        }
         sink.jitter.push(samples, sequence: pkt.sequence)
         sink.lastFrame = samples
-        peers[uid] = sink
         let gapDelta = sink.jitter.seqGapCount
         let dropDelta = sink.jitter.dropOldestCount
         peersLock.unlock()
@@ -489,32 +511,56 @@ final class AudioEngine: ObservableObject {
         }
 
         // ── Peer mix ──────────────────────────────────────────────────────
-        // Pull a full frame from each peer; mix in. We pop at most one frame
-        // per playback callback from each peer, sized to AudioWire.frameSamples.
-        // If frameCount > 120, we run the loop multiple times.
+        // Pop one wire frame from each peer per loop iteration, mix in.
+        // RT-thread invariants:
+        //   - No `Array(peers.keys)` in the hot path: we use the cached
+        //     `peerKeysSnapshot` updated only on join/leave. Snapshot
+        //     read under a tiny lock at the top of the callback, then
+        //     used for the rest of the call.
+        //   - `pop()` is now PLC-aware: `.real` is fresh, `.plc` masks a
+        //     missed packet by replaying the last real frame at decay
+        //     (1.0 → 0.7 → 0.4 → 0.15 over 4 quanta, matches web).
+        //     `.silence` only fires after the PLC budget is exhausted —
+        //     i.e. a real network outage, not a single-packet hiccup.
+        //     Each `.silence` historically read as a click; with PLC the
+        //     listener hears a soft tail instead.
+        //   - Per-frame `JitterBuffer.pop()` does not allocate; the
+        //     returned `[Float]` aliases the slot we just vacated, which
+        //     the producer can't overwrite for at least `maxDepth` more
+        //     pushes (~80 ms with depth 33).
+        peersLock.lock()
+        let keys = peerKeysSnapshot
+        // Snapshot per-peer gain/mute too — reading SwiftUI @Published
+        // dicts directly on RT thread is unsafe in the abstract (CoW
+        // races) and produces a dictionary alloc on first hash anyway.
+        // Cheap copy once per callback.
+        let gainSnapshot = perPeerGain
+        let mutedSnapshot = perPeerMuted
+        peersLock.unlock()
+
         var written = 0
         let frameSize = AudioWire.frameSamples
         while written < frameCount {
             let take = min(frameSize, frameCount - written)
 
-            // Snapshot keys under lock — tiny window.
-            peersLock.lock()
-            let keys = Array(peers.keys)
-            peersLock.unlock()
-
             for k in keys {
+                if mutedSnapshot[k] == true { continue }
                 peersLock.lock()
-                var sink = peers[k]
-                let frame = sink?.jitter.pop()
-                if let f = frame { sink?.lastFrame = f }
-                if let s = sink { peers[k] = s }
+                let sink = peers[k]
                 peersLock.unlock()
-                guard let f = frame else { continue }
-                if perPeerMuted[k] == true { continue }
-                let g = perPeerGain[k] ?? 1.0
-                let n = min(take, f.count)
-                for i in 0..<n {
-                    out[written + i] += f[i] * g
+                guard let s = sink else { continue }
+                let result = s.jitter.pop()
+                let g = gainSnapshot[k] ?? 1.0
+                switch result {
+                case .real(let f):
+                    let n = min(take, f.count)
+                    for i in 0..<n { out[written + i] += f[i] * g }
+                case .plc(let f, let decay):
+                    let scaled = g * decay
+                    let n = min(take, f.count)
+                    for i in 0..<n { out[written + i] += f[i] * scaled }
+                case .silence:
+                    continue
                 }
             }
             written += take
