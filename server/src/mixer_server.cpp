@@ -97,8 +97,17 @@ void MixerServer::pcm16_to_float(const int16_t* src, float* dst, int count) {
 }
 
 void MixerServer::float_to_pcm16(const float* src, int16_t* dst, int count) {
+    constexpr float kKnee = 0.95f;
+    constexpr float kRoom = 1.0f - kKnee;  // 0.05
     for (int i = 0; i < count; ++i) {
-        float v = std::max(-1.0f, std::min(1.0f, src[i]));
+        float v = src[i];
+        if (v > kKnee) {
+            v = kKnee + kRoom * std::tanh((v - kKnee) / kRoom);
+        } else if (v < -kKnee) {
+            v = -kKnee + kRoom * std::tanh((v + kKnee) / kRoom);
+        }
+        // Final safety clamp in case tanh + FP precision produced marginally outside [-1,1]
+        v = std::max(-1.0f, std::min(1.0f, v));
         dst[i] = static_cast<int16_t>(v * 32767.0f);
     }
 }
@@ -172,9 +181,17 @@ int MixerServer::opus_encode_packet(const float* pcm, int frame_count,
     if (!s_enc) return -1;
 
     std::vector<int16_t> pcm_buf(frame_count * channels);
+    constexpr float kKnee = 0.95f;
+    constexpr float kRoom = 1.0f - kKnee;
     for (int i = 0; i < frame_count * channels; ++i) {
-        float clamped = std::max(-1.0f, std::min(1.0f, pcm[i]));
-        pcm_buf[i] = static_cast<int16_t>(clamped * 32767.0f);
+        float v = pcm[i];
+        if (v > kKnee) {
+            v = kKnee + kRoom * std::tanh((v - kKnee) / kRoom);
+        } else if (v < -kKnee) {
+            v = -kKnee + kRoom * std::tanh((v + kKnee) / kRoom);
+        }
+        v = std::max(-1.0f, std::min(1.0f, v));
+        pcm_buf[i] = static_cast<int16_t>(v * 32767.0f);
     }
     return ::opus_encode(s_enc, pcm_buf.data(), frame_count,
                          reinterpret_cast<unsigned char*>(out), max_out);

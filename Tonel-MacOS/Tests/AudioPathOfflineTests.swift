@@ -243,17 +243,20 @@ final class AudioPathOfflineTests: XCTestCase {
                 if v > 0.95       { serverFloat[j] = 0.95 + 0.05 * tanh((v - 0.95) / 0.05) }
                 else if v < -0.95 { serverFloat[j] = -0.95 + 0.05 * tanh((v + 0.95) / 0.05) }
             }
+            // v0.1.8: server float_to_pcm16 now ALSO does soft-clip before
+            // the final safety clamp, matching the production C++ path.
             let serverPcm = serverFloat.withUnsafeBufferPointer { _ -> Data in
-                // Match the server's `float_to_pcm16` (clamp + cast,
-                // no soft-clip — server does soft-clip in the mix
-                // accumulator before this conversion). Keeps wire
-                // semantics aligned with the C++ implementation.
                 var d = Data(count: serverFloat.count * 2)
                 d.withUnsafeMutableBytes { raw in
                     let p = raw.baseAddress!.assumingMemoryBound(to: Int16.self)
                     for k in 0..<serverFloat.count {
-                        let s = max(-1.0, min(1.0, serverFloat[k]))
-                        p[k] = Int16(s * 32767).littleEndian
+                        var v = serverFloat[k]
+                        let kKnee: Float = 0.95
+                        let kRoom: Float = 0.05
+                        if v > kKnee  { v = kKnee + kRoom * tanh((v - kKnee) / kRoom) }
+                        else if v < -kKnee { v = -kKnee + kRoom * tanh((v + kKnee) / kRoom) }
+                        v = max(-1.0, min(1.0, v))
+                        p[k] = Int16(v * 32767).littleEndian
                     }
                 }
                 return d
