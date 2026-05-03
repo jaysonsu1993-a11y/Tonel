@@ -9,6 +9,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.11] - 2026-05-03
+
+### Fixed — v5.1.10's probe was leaking hung connections to kufan
+
+User reported `Control WebSocket 连接失败` was still happening on
+`tonel.io/` (Chrome and Safari both) after v5.1.10. Diagnosis:
+
+```
+$ curl --max-time 5 -w "code=%{http_code} time=%{time_total}s\n" \
+       https://srv-new.tonel.io/mixer-tcp
+curl: (28) Operation timed out after 5003 milliseconds with 0 bytes received
+code=000 time=5.003568s
+
+$ curl --max-time 5 -w "code=%{http_code} time=%{time_total}s\n" \
+       https://srv-new.tonel.io/
+code=200 time=0.037328s
+```
+
+The v5.1.10 probe target — `GET /mixer-tcp` — **hangs forever
+server-side**. The nginx site config forces `Connection: upgrade`
+upstream for the `/mixer-tcp` location, and a plain GET (no Upgrade
+header) leaves `tonel-ws-mixer-proxy` waiting for a WebSocket
+handshake that never comes. Each 3-second probe tick leaked one
+half-open TCP connection on the kufan box. After a few ticks the
+酷番云 hypervisor saw a flood of stuck connections from the same
+client IP and started rejecting fresh WSS handshakes from it —
+which is exactly the "Control WebSocket 连接失败" the user reported.
+
+The local Playwright probe didn't catch this because:
+1. `mode: 'no-cors'` made the hung response indistinguishable from a
+   slow response — the abort fired at 5 s but the homepage placeholder
+   animation kept ticking, masking the fact that *no real RTT was
+   ever measured*.
+2. The Aliyun fallback box doesn't exhibit the same connection-flood
+   sensitivity, so the room-entry probe still passed 10/10.
+
+#### Fix
+
+* **Probe target**: `/` instead of `/mixer-tcp`. nginx serves a static
+  200 in tens of ms with no upstream proxy. RTT measurement is from
+  the same physical server, so the displayed figure is ~equivalent.
+* **First tick deferred 600 ms**: gives the page a beat to settle so
+  the probe never competes with an immediate-click 创建房间.
+* **Tick interval 3 s → 5 s**: less wire traffic on a number that's
+  cosmetic.
+* **Abort timeout 5 s → 2.5 s**: bounds any pathological hang to a
+  much tighter window.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerRttProbe.ts` | Probe target `/`, defer first tick, slower interval, tighter abort |
+
 ## [5.1.10] - 2026-05-03
 
 ### Fixed — "Audio WebSocket 连接失败" on room entry
