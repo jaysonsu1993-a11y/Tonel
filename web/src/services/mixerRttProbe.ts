@@ -36,8 +36,6 @@
  * `/new` rule as audioService.connectMixer.
  */
 
-import { pickMixerHost } from './mixerHost'
-
 type Sub = (rttMs: number) => void
 
 class MixerRttProbe {
@@ -75,12 +73,10 @@ class MixerRttProbe {
   private async tick(): Promise<void> {
     if (!this.started) return
     const protocol = location.protocol === 'https:' ? 'https:' : 'http:'
-    // v5.1.12: probe goes to whichever mixer host audioService will
-    // connect to. `pickMixerHost()` first call probes both hosts; later
-    // calls hit the same 10-min cache that audioService uses, so the
-    // hero figure on the homepage and the in-room WSS handshake never
-    // disagree about which box they're talking to.
-    const host = await pickMixerHost()
+    // v5.1.14: probe targets the same host audioService will connect to,
+    // chosen purely by the URL path — no auto-fallback. `/new` stays on
+    // Aliyun, everything else on kufan.
+    const host = location.pathname.startsWith('/new') ? 'srv-new.tonel.io' : 'srv.tonel.io'
     // GET / — nginx serves a static 200 in ms. Do NOT use /mixer-tcp:
     // that location proxies to ws-mixer-proxy and hangs on non-upgrade
     // requests. See header doc.

@@ -9,6 +9,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.14] - 2026-05-03
+
+### Reverted — auto-fallback (v5.1.12 + v5.1.13)
+
+Operator decision: the kufan and Aliyun mixer servers are independent
+products with different intended audiences. `/` traffic is allocated
+to kufan and `/new` traffic to Aliyun on purpose; transparent
+cross-host failover would mix the two segments. Reverting the
+v5.1.12 host-picker + v5.1.13 retry-on-WSS-error so each path stays
+on its assigned server, full stop.
+
+When kufan blocks a client IP at its hypervisor layer (the recurring
+issue we tried to paper over), the right fix lives in the kufan
+console (DDoS thresholds, IP allow-list, connection-rate limits) —
+not in the web client.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerHost.ts` | **Deleted** (added v5.1.12) |
+| `web/src/services/audioService.ts` | `connectMixer` reverted to a single attempt; host comes from the URL path (`/new` → Aliyun, else kufan). No retry on WSS error |
+| `web/src/services/mixerRttProbe.ts` | Probe host comes from the URL path (same rule); no host-picker |
+| `web/src/pages/RoomPage.tsx` | Drop the fallback-engaged hint banner (no longer reachable) |
+
+The good v5.1.11 fixes — probe target `/` instead of `/mixer-tcp`, and
+the v5.1.10 sequential `controlWs → audioWs` open — both stay.
+
 ## [5.1.13] - 2026-05-03
 
 ### Fixed — auto-fallback now retries on the OTHER host on WSS error

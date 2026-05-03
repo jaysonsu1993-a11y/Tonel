@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { audioService } from '../services/audioService'
-import { isUsingFallbackHost } from '../services/mixerHost'
 import type { PeerInfo } from '../types'
 import { ChannelStrip } from '../components/ChannelStrip'
 import { InputChannelStrip } from '../components/InputChannelStrip'
@@ -103,12 +102,6 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   // first audio quantum has actually played) and surface a dismissible
   // banner if it crosses the perceptible threshold.
   const [outputLatencyMs, setOutputLatencyMs] = useState<number>(0)
-  // v5.1.12: surface a soft hint when audioService failed over from
-  // the primary mixer host (kufan) to the Aliyun fallback. The user
-  // can ignore it; we just want them to know which path their audio
-  // is taking so a "why is latency higher today" question has an
-  // immediate answer.
-  const [usingFallback] = useState<boolean>(() => isUsingFallbackHost())
   const [outputHintDismissed, setOutputHintDismissed] = useState<boolean>(() => {
     try { return sessionStorage.getItem('tonel.outputHintDismissed') === '1' } catch { return false }
   })
@@ -386,18 +379,6 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           (AirPods ~150 ms, generic BT 100-200 ms) without false
           positives on USB DACs (3-8 ms) or wired output (5-10 ms).
           Banner stays dismissed for the rest of the browser session. */}
-      {usingFallback && (
-        <div
-          role="status"
-          style={{
-            background: '#0d2a3b', color: '#b3d9ff', padding: '8px 24px',
-            fontSize: 13, borderTop: '1px solid #1a5a7a',
-            borderBottom: '1px solid #1a5a7a',
-          }}
-        >
-          ℹ 主混音服务器暂时不可达，已自动切换至备用服务器。延迟可能略高，刷新页面会自动重试主服务器。
-        </div>
-      )}
       {!outputHintDismissed && outputLatencyMs > 30 && (
         <div
           role="status"

@@ -9,8 +9,6 @@
  *   5. Audio relay via /mixer-udp WebSocket (→ proxy → UDP 9003)
  */
 
-import { pickMixerHost, invalidateMixerHostCache, recordWorkingHost } from './mixerHost'
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA1 Packet Constants  (server expects big-endian, 44-byte header)
@@ -2570,40 +2568,6 @@ export class AudioService {
     this.userId = userId
     this.roomId = roomId
 
-    // v5.1.12 → tweak: try the picked host once; if the WSS handshake
-    // itself fails (Control or Audio onerror), invalidate the cache
-    // and retry exactly once on the other host. The probe-based pick
-    // alone wasn't reliable — `GET /` could succeed against kufan even
-    // when the WSS upgrade is blocked, leaving us with a wrong cached
-    // choice. The retry catches that mismatch without bothering the user.
-    const ATTEMPT_HOSTS: string[] = []
-    const firstHost = await pickMixerHost()
-    ATTEMPT_HOSTS.push(firstHost)
-    if (!location.pathname.startsWith('/new') &&
-        new URLSearchParams(location.search).get('host') == null) {
-      const fallback = firstHost === 'srv.tonel.io' ? 'srv-new.tonel.io' : 'srv.tonel.io'
-      ATTEMPT_HOSTS.push(fallback)
-    }
-
-    let lastErr: Error | null = null
-    for (const host of ATTEMPT_HOSTS) {
-      try {
-        await this._connectMixerToHost(host)
-        return
-      } catch (err) {
-        lastErr = err as Error
-        const msg = lastErr.message || ''
-        const wssLayer = msg.includes('Control WebSocket') || msg.includes('Audio WebSocket')
-        if (!wssLayer) throw err  // non-WSS error (e.g. timeout): no point retrying on a different host
-        console.warn(`[Mixer] ${host} failed (${msg}); ${ATTEMPT_HOSTS.indexOf(host) < ATTEMPT_HOSTS.length - 1 ? 'trying fallback' : 'no more hosts'}`)
-        invalidateMixerHostCache()
-      }
-    }
-    throw lastErr ?? new Error('Mixer 连接失败')
-  }
-
-  private async _connectMixerToHost(host: string): Promise<void> {
-
     // v5.1.9: removed `mixerRttProbe.stop()` + the await-old-CLOSED
     // cleanup. The whole reason both existed is gone — `mixerRttProbe`
     // was a homepage-only singleton that opened its own /mixer-tcp
@@ -2638,9 +2602,12 @@ export class AudioService {
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // `host` is the param: `connectMixer` decides primary vs fallback,
-    // we just open against whichever was chosen.
-    console.log(`[Mixer] connecting to host=${host}`)
+    // v5.1.14: hosts are independent — `/` traffic stays on kufan
+    // (srv.tonel.io), `/new` traffic stays on Aliyun (srv-new.tonel.io).
+    // No auto-fallback between them. Operator's product decision: each
+    // server has its own purpose and is allocated to a specific user
+    // segment; cross-host failover would mix audiences.
+    const host = location.pathname.startsWith('/new') ? 'srv-new.tonel.io' : 'srv.tonel.io'
     const controlUrl = `${protocol}//${host}/mixer-tcp`
     const audioUrl   = `${protocol}//${host}/mixer-udp`
     // WebTransport listens on UDP 4433 with the same TLS cert as
@@ -2674,10 +2641,6 @@ export class AudioService {
       const checkBothReady = () => {
         if (controlReady && audioReady) {
           clearTimeout(timer)
-          // Both WSS handshakes (or WS+WT) finished — this host works.
-          // Cache it so future connects + the homepage RTT probe both
-          // skip the slower probe and head straight here.
-          recordWorkingHost(host)
           // Send MIXER_JOIN via control channel
           console.log('[Mixer] Both transports ready, sending MIXER_JOIN')
           this.controlWs?.send(JSON.stringify({
