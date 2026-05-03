@@ -9,6 +9,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.7] - 2026-05-03
+
+### Fixed — "Control WebSocket 连接失败" still firing on every room entry
+
+v5.1.6 added `mixerRttProbe.stop()` to `audioService.connectMixer` to
+collapse the dual-`/mixer-tcp` overlap, but the fix was racy and the
+red banner kept appearing on essentially every join. User confirmed it
+fires every time on `tonel.io/`.
+
+Root cause: `mixerRttProbe.stop()` was synchronous, but
+`WebSocket.close()` is not — it only flips the socket to CLOSING and
+sends a close frame; the underlying TCP/TLS connection takes another
+50-200 ms to drain. On `tonel.io/` (kufan, no WebTransport leg), there
+is no awaited work between the synchronous `stop()` call and the next
+`new WebSocket(controlUrl)` — so the new control socket opens while
+the probe's old socket is still in CLOSING state on the wire. Two
+in-flight WSS sessions to `/mixer-tcp` from the same client through
+the酷番云 hypervisor / WAF: the second handshake gets dropped,
+`controlWs.onerror` fires, the user sees the banner. After clicking
+the retry, the probe socket has fully drained and the second
+`connectMixer` succeeds — which is exactly the always-fail-then-retry
+pattern the user reported.
+
+Fix: `mixerRttProbe.stop()` now returns a Promise that resolves only
+when the WS reaches CLOSED (via `onclose`/`onerror`), with a 500 ms
+safety timeout so a stuck close never deadlocks the join. `connectMixer`
+awaits it. Now there is exactly one `/mixer-tcp` socket on the wire at
+any given moment, and the WAF has nothing to chew on.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerRttProbe.ts` | `stop(): void` → `stop(): Promise<void>` resolving on CLOSED |
+| `web/src/services/audioService.ts` | `connectMixer` does `await mixerRttProbe.stop()` |
+
 ## [5.1.6] - 2026-05-03
 
 ### Fixed — "Control WebSocket 连接失败" on slow / VPN'd networks

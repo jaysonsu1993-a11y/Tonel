@@ -32,12 +32,33 @@ class MixerRttProbe {
     this.connect()
   }
 
-  stop(): void {
+  // Async so callers can await the underlying TCP/TLS shutdown, not just
+  // the close-frame send. v5.1.6 made `audioService.connectMixer` call
+  // this synchronously, then immediately opened its own /mixer-tcp socket
+  // — but `WebSocket.close()` only flips state to CLOSING and the kernel
+  // socket may take 50-200 ms to drain. On `tonel.io/` (kufan, no WT
+  // path) there's no other awaited work between this stop() and the new
+  // socket, so the two WSS sessions to /mixer-tcp overlap on the wire
+  // and the酷番云 WAF/hypervisor drops the second handshake — surfaces
+  // as `Control WebSocket 连接失败` every time. Resolving this Promise
+  // only when readyState reaches CLOSED guarantees no overlap.
+  stop(): Promise<void> {
     this.started = false
     if (this.pingTimer)      { clearInterval(this.pingTimer);      this.pingTimer = null }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null }
-    try { this.ws?.close() } catch { /* noop */ }
+    const w = this.ws
     this.ws = null
+    if (!w || w.readyState === WebSocket.CLOSED) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const done = () => { w.onclose = null; w.onerror = null; resolve() }
+      w.onclose = done
+      w.onerror = done
+      try { w.close() } catch { done() }
+      // Belt-and-suspenders timeout — if the close handler somehow never
+      // fires (very unlikely in practice; browsers always emit onclose),
+      // don't deadlock the room-join flow.
+      setTimeout(done, 500)
+    })
   }
 
   onLatency(cb: Sub): () => void {

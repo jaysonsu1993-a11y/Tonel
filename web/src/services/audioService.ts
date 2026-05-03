@@ -2584,7 +2584,14 @@ export class AudioService {
     // one /mixer-tcp socket exists at a time. The probe will resume
     // automatically when the user navigates back to the home page
     // (LiveLatency's useEffect fires `mixerRttProbe.start()` on mount).
-    mixerRttProbe.stop()
+    //
+    // v5.1.7: await the close — `WebSocket.close()` only flips state
+    // to CLOSING; the underlying TCP/TLS may take 50-200 ms to drain.
+    // The synchronous v5.1.6 call was racy; the new socket opened
+    // below would still overlap the old one on the wire, and the酷番云
+    // WAF/hypervisor would drop the second handshake — observed as
+    // 'Control WebSocket 连接失败' on every room entry.
+    await mixerRttProbe.stop()
 
     // Clean up any existing transports before reconnecting
     if (this.controlWs || this.audioWs || this.audioWT) {
