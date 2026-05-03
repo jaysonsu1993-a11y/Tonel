@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { PeerInfo } from '../types'
+import { mixerRttProbe } from '../services/mixerRttProbe'
 
 /**
  * HomePage — V1 redesign (2026-04-29).
@@ -38,29 +39,45 @@ interface Props {
  * Live latency number — three slots on the home page (hero giant
  * number, hero axis line, bottom stats row).
  *
- * v5.1.9: this used to subscribe to a `mixerRttProbe` singleton that
- * opened its own WSS to the mixer's `/mixer-tcp` for a real PING/PONG
- * reading. That probe overlapped with `audioService.connectMixer`'s
- * own /mixer-tcp socket on every room entry, and the酷番云 WAF
- * dropped one of the two concurrent handshakes — surfaced as
- * `Control WebSocket 连接失败` and made room entry fully unreliable
- * (v5.1.6 → v5.1.8 each tried to fix the race and each fell short).
- * Removing the probe removes the conflict at the source: only one
- * /mixer-tcp socket per client now exists, opened by audioService
- * once the user is actually in a room. The cosmetic homepage figure
- * is now an animated placeholder around the typical Tonel-network
- * end-to-end latency. The real number a user cares about — the
- * one in their own current network conditions — is shown in-room
- * via the latency-display strip on RoomPage.
+ * v5.1.10: re-introduces the live mixer-RTT reading on the home page
+ * via the new `mixerRttProbe` (HTTPS-fetch-based, no WebSocket). Adds
+ * `kAudioPathOffsetMs` so the displayed figure represents the
+ * end-to-end audio latency the user actually hears, not just the raw
+ * network leg — same +offset rationale as v5.1.5.
+ *
+ * Why this is safe to bring back: the new probe doesn't open a
+ * WebSocket. The old WSS-based probe overlapped with
+ * `audioService.connectMixer`'s own /mixer-tcp socket on every room
+ * entry and tripped the酷番云 hypervisor; v5.1.9 removed it and
+ * v5.1.10 puts it back via a plain `fetch()` against /mixer-tcp
+ * that gets a quick 426 from nginx. No WebSocket = no /mixer-tcp
+ * socket from the home page = no race with room entry.
  */
-function LiveLatency({ baseMs = 22, jitter = 2 }: { baseMs?: number; jitter?: number }) {
-  const [ms, setMs] = useState<number>(baseMs)
+const kAudioPathOffsetMs = 10  // jitter + mix tick + IO buffers (flat)
+
+function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: number }) {
+  const [ms, setMs] = useState<number>(baseMs + kAudioPathOffsetMs)
+  const [haveReal, setHaveReal] = useState(false)
+  const lastUiUpdate = useRef(0)
   useEffect(() => {
+    mixerRttProbe.start()
+    const unsub = mixerRttProbe.onLatency((rtt) => {
+      const now = Date.now()
+      if (now - lastUiUpdate.current < 200) return
+      lastUiUpdate.current = now
+      setMs(rtt + kAudioPathOffsetMs)
+      setHaveReal(true)
+    })
+    return () => { unsub(); mixerRttProbe.stop() }
+  }, [])
+  // Animated placeholder until the first real measurement lands.
+  useEffect(() => {
+    if (haveReal) return
     const id = setInterval(() => {
-      setMs(baseMs + Math.round((Math.random() - 0.5) * jitter * 2))
+      setMs(baseMs + kAudioPathOffsetMs + Math.round((Math.random() - 0.5) * jitter * 2))
     }, 220)
     return () => clearInterval(id)
-  }, [baseMs, jitter])
+  }, [haveReal, baseMs, jitter])
   return <>{ms}</>
 }
 

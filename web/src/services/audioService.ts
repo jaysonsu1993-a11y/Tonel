@@ -2663,12 +2663,72 @@ export class AudioService {
         }
       }
 
+      // ── Sequential WebSocket open ───────────────────────────────────────
+      //
+      // v5.1.10: open controlWs FIRST, audioWs only after controlWs is
+      // OPEN. Previously the two were created back-to-back synchronously,
+      // which made them race onto the wire as concurrent WSS handshakes
+      // to the same nginx (one to /mixer-tcp, one to /mixer-udp, both
+      // proxying to the same upstream :9005). The酷番云 hypervisor
+      // sometimes dropped one of the two — surfaced to the user as
+      // 'Audio WebSocket 连接失败' (when /mixer-udp lost the race) or
+      // 'Control WebSocket 连接失败' (when /mixer-tcp did). Sequencing
+      // them adds ~one network RTT (~5-15 ms in China) to room-entry
+      // time, which is negligible vs. the cost of a failed join.
+
+      const openAudioWs = () => {
+        if (useWT) return  // WT already up — no audio WS needed
+        this.audioWs = new WebSocket(audioUrl)
+        this.audioWs.binaryType = 'arraybuffer'
+        this.audioWs.onopen = () => {
+          console.log('[Mixer] Audio WebSocket open')
+          audioReady = true
+          checkBothReady()
+        }
+        this.audioWs.onmessage = (evt) => {
+          this.handleMixerMessage(evt.data)
+        }
+        this.audioWs.onclose = () => {
+          console.log('[Mixer] Audio WebSocket closed, reconnecting...')
+          // Auto-reconnect audio WS (matches AppKit's persistent UDP socket)
+          setTimeout(() => {
+            if (!this.audioWs || this.audioWs.readyState > 1) {
+              this.audioWs = new WebSocket(audioUrl)
+              this.audioWs.binaryType = 'arraybuffer'
+              this.audioWs.onopen = () => {
+                console.log('[Mixer] Audio WebSocket reconnected')
+                // Re-send handshake to re-register UDP return path
+                const pkt = buildSpa1Packet(
+                  new Uint8Array(0), SPA1_CODEC_HANDSHAKE, 0, 0,
+                  `${this.roomId}:${this.userId}`
+                )
+                this.sendAudioPacket(pkt)
+              }
+              this.audioWs.onmessage = (evt) => this.handleMixerMessage(evt.data)
+              this.audioWs.onclose = () => {
+                console.log('[Mixer] Audio WebSocket closed again, will retry...')
+                setTimeout(() => this.audioWs?.onclose?.(new CloseEvent('close')), 3000)
+              }
+              this.audioWs.onerror = () => {}
+            }
+          }, 1000)
+        }
+        this.audioWs.onerror = (evt) => {
+          console.error('[Mixer] Audio WebSocket error:', evt)
+          clearTimeout(timer)
+          reject(new Error('Audio WebSocket 连接失败'))
+        }
+      }
+
       // ── Control WebSocket (/mixer-tcp) ──────────────────────────────────
       this.controlWs = new WebSocket(controlUrl)
       this.controlWs.binaryType = 'arraybuffer'
       this.controlWs.onopen = () => {
         console.log('[Mixer] Control WebSocket open')
         controlReady = true
+        // Now that the first WSS is fully handshaken, kick off the
+        // audio one. checkBothReady() runs on whichever finishes last.
+        openAudioWs()
         checkBothReady()
       }
       this.controlWs.onmessage = (evt) => {
@@ -2682,53 +2742,6 @@ export class AudioService {
         console.error('[Mixer] Control WebSocket error:', evt)
         clearTimeout(timer)
         reject(new Error('Control WebSocket 连接失败'))
-      }
-
-      // ── Audio channel ───────────────────────────────────────────────────
-      // WT path is already established by tryWebTransport above; the
-      // read loop is running. Skip the WSS audio socket entirely.
-      if (useWT) return
-
-      // WSS audio fallback path (Safari / older browsers / WT failure).
-      this.audioWs = new WebSocket(audioUrl)
-      this.audioWs.binaryType = 'arraybuffer'
-      this.audioWs.onopen = () => {
-        console.log('[Mixer] Audio WebSocket open')
-        audioReady = true
-        checkBothReady()
-      }
-      this.audioWs.onmessage = (evt) => {
-        this.handleMixerMessage(evt.data)
-      }
-      this.audioWs.onclose = () => {
-        console.log('[Mixer] Audio WebSocket closed, reconnecting...')
-        // Auto-reconnect audio WS (matches AppKit's persistent UDP socket)
-        setTimeout(() => {
-          if (!this.audioWs || this.audioWs.readyState > 1) {
-            this.audioWs = new WebSocket(audioUrl)
-            this.audioWs.binaryType = 'arraybuffer'
-            this.audioWs.onopen = () => {
-              console.log('[Mixer] Audio WebSocket reconnected')
-              // Re-send handshake to re-register UDP return path
-              const pkt = buildSpa1Packet(
-                new Uint8Array(0), SPA1_CODEC_HANDSHAKE, 0, 0,
-                `${this.roomId}:${this.userId}`
-              )
-              this.sendAudioPacket(pkt)
-            }
-            this.audioWs.onmessage = (evt) => this.handleMixerMessage(evt.data)
-            this.audioWs.onclose = () => {
-              console.log('[Mixer] Audio WebSocket closed again, will retry...')
-              setTimeout(() => this.audioWs?.onclose?.(new CloseEvent('close')), 3000)
-            }
-            this.audioWs.onerror = () => {}
-          }
-        }, 1000)
-      }
-      this.audioWs.onerror = (evt) => {
-        console.error('[Mixer] Audio WebSocket error:', evt)
-        clearTimeout(timer)
-        reject(new Error('Audio WebSocket 连接失败'))
       }
     })
   }

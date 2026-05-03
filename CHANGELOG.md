@@ -9,6 +9,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.10] - 2026-05-03
+
+### Fixed — "Audio WebSocket 连接失败" on room entry
+
+After v5.1.9 collapsed the `mixerRttProbe` second socket, the user
+still hit `Audio WebSocket 连接失败` on `tonel.io/`. Root cause: even
+within `audioService.connectMixer` itself, the control WS (/mixer-tcp)
+and the audio WS (/mixer-udp) were created back-to-back synchronously
+inside the same Promise constructor — two concurrent WSS handshakes
+to the same nginx upstream from the same client IP within a single
+millisecond. The酷番云 hypervisor sometimes dropped the second one,
+which surfaced as either banner depending on which socket lost the
+race.
+
+Fix: open `controlWs` first, and only kick off `audioWs` from
+`controlWs.onopen`. The two handshakes are now sequential — adds one
+network RTT (~5-15 ms in China) to room-entry time, which is invisible
+next to the cost of a failed join. `checkBothReady()` still gates the
+final `MIXER_JOIN`/handshake on whichever socket finishes last.
+
+### Re-added — homepage RTT display, this time without a WebSocket
+
+User asked for the live RTT figure on the home page back, but
+explicitly **independent** of any room session ("不调用房间的RTT").
+The constraint that broke v5.0.3 → v5.1.8 was that the probe opened
+a /mixer-tcp WebSocket from the home page that conflicted with
+audioService's own /mixer-tcp the moment the user entered a room.
+
+`mixerRttProbe` is back, but it now uses **plain HTTPS `fetch()`**
+against `/mixer-tcp` instead of opening a WebSocket. The endpoint
+returns nginx's `426 Upgrade Required` on a non-WebSocket GET — fast,
+cheap, no upgrade negotiated. Round-trip time of that request is the
+displayed value (plus the +10 ms audio-path offset, same as v5.1.5).
+Because there is no WebSocket from the home page anymore, there is
+literally nothing for `audioService.connectMixer` to race against on
+room entry.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/audioService.ts` | `connectMixer` opens `controlWs` first, then `audioWs` from inside `controlWs.onopen` |
+| `web/src/services/mixerRttProbe.ts` | New (replaces the deleted v5.1.9 file). Fetch-based, 3 s tick, abortable, no WebSocket |
+| `web/src/pages/HomePage.tsx` | `LiveLatency` re-subscribes to `mixerRttProbe.onLatency`, displays `rtt + 10` |
+
 ## [5.1.9] - 2026-05-03
 
 ### Removed — `mixerRttProbe` (the real fix for "Control WebSocket 连接失败")
