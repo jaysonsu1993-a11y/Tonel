@@ -9,6 +9,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.16] - 2026-05-04
+
+### Removed — "混音服务器连接失败" red banner; replaced with silent
+### infinite-retry + subtle "正在连接服务器…" indicator
+
+User feedback after v5.1.15: the 3-attempt-internal retry covers most
+intermittent kufan-DPI hits, but when all 3 fail the user still saw the
+alarming red banner. Clicking 启用麦克风 always worked because by then
+the DPI rule had passed — i.e. the banner is purely a side effect of
+the failure path, not actionable. The user explicitly asked: "能取消
+这样的错误提示吗？"
+
+Today's pcap-evidenced architectural diagnosis (also recorded as the
+basis for this change):
+
+* The kufan VM is **internally completely clean** — `iptables`,
+  `nftables`, `ipset`, `eBPF`/XDP, `tc`, no cloud-provider security
+  agents. Single `nf_tables` kernel module loaded but zero rules.
+* RSTs are injected at a **device upstream of the VM** (machine room
+  switch / hypervisor / edge firewall — somewhere in kufan's network
+  before our kernel gets the packet). The smoking-gun signature: an
+  RST arrives ~4 µs after the VM ACKs the client's TLS ClientHello,
+  bearing the client's source IP but with **TCP options
+  `[nop,nop,nop,eol]` and no TCP timestamp**, which no real Linux/
+  macOS TCP stack would produce.
+* A multi-vantage curl test (kufan-self / Aliyun-cross-cloud /
+  US-laptop) showed: kufan-self 10/10 OK, Aliyun-curl 10/10 RST after
+  ClientHello, US-laptop 10/10 SYN never even reached the VM (L3
+  block at GFW or kufan edge).
+* Banner CODE has been there since v3.3.0 — what changed is the
+  v5.0.0 (2026-04-30) production migration from Aliyun (no DPI) →
+  kufan (this DPI). AppKit is unaffected because it's hardcoded to
+  the Aliyun box and uses raw TCP/UDP, not WSS.
+
+#### What this release changes
+
+* `RoomPage.runInit` now wraps `audioService.connectMixer` in an
+  **unbounded retry loop** with exponential backoff capped at 30 s.
+  The loop bails out only on component unmount (`cancelledRef`).
+* While that loop is dialing, the page shows a subtle slate-blue
+  status line `● 正在连接服务器…` (pulsing yellow dot) at the top —
+  one CSS line, no buttons, no jarring red.
+* The red banner is **only** shown for mic-permission failures
+  (`NotAllowedError` etc.) — those genuinely require user action.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/pages/RoomPage.tsx` | `runInit` mixer-connect path becomes a silent retry loop with exp backoff. New `mixerConnecting` state + `cancelledRef`. New subtle "正在连接服务器…" status line; red banner now reserved for mic-permission failures only |
+
+The kufan upstream RST issue itself is **not** fixed by this release —
+that requires either a kufan-side ticket to disable their TLS DPI
+appliance, or DNS-A switch back to Aliyun (the v5.2.0 plan, on hold
+pending operator decision). v5.1.16 just makes sure the user never
+sees it again.
+
 ## [5.1.15] - 2026-05-03
 
 ### Fixed — silent same-host retry on transient WSS Upgrade drops

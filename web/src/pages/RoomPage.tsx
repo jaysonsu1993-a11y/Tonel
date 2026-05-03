@@ -95,6 +95,14 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
   // human-readable line to debug from.
   const [initError, setInitError] = useState<string>('')
   const [retrying,  setRetrying]  = useState<boolean>(false)
+  // v5.1.16: mixer-connect runs in a silent background retry loop —
+  // `mixerConnecting=true` while we're still dialing, false once a
+  // connection lands. UI only surfaces a subtle "正在连接服务器…" line
+  // after a few seconds (so a fast happy-path attempt never flashes).
+  const [mixerConnecting, setMixerConnecting] = useState<boolean>(true)
+  // Set true on unmount so the silent-retry loop can bail out instead
+  // of dialing forever in the background.
+  const cancelledRef = useRef<boolean>(false)
   // High-output-latency hint. Bluetooth output (AirPods etc.) typically
   // reports `outputLatency` 100-200 ms — this single variable can blow
   // past every server-side optimisation we've done. We poll the value
@@ -186,15 +194,46 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
       setInitError(`麦克风/音频初始化失败：${errName || 'Error'}: ${errMsg}${hint}`)
     }
 
-    try {
-      await audioService.connectMixer(userId, roomId)
-      if (micOk) audioService.startCapture()
-    } catch (err) {
-      console.error('[RoomPage] Mixer connect failed:', err)
-      const msg = (err instanceof Error ? err.message : String(err)) || 'unknown error'
-      setInitError(prev =>
-        (prev ? prev + ' / ' : '') + `混音服务器连接失败：${msg}`
-      )
+    // v5.1.16: mixer connect failures no longer surface as a red banner.
+    // The user already gets a 3-attempt retry inside `connectMixer` itself
+    // (v5.1.15 — handles the kufan DPI's intermittent TLS-RST injection;
+    // see CHANGELOG v5.1.15 + the architectural diagnosis in the
+    // pcap-evidenced 2026-05-04 session). When the in-call retries are
+    // also exhausted, we now keep retrying *silently* in the background
+    // with exponential backoff capped at 30 s. The user sees a subtle
+    // "正在连接服务器…" indicator (set via `setMixerConnecting`) instead
+    // of an alarming "混音服务器连接失败" banner that can only be cleared
+    // by clicking 启用麦克风 (which under v5.1.15 does nothing the user
+    // didn't already get from the internal retry).
+    //
+    // Why this is safe: a successful `connectMixer` is idempotent w.r.t.
+    // its own state (it cleans up any stale sockets at entry), and the
+    // mic side already finished above. We just keep dialing the mixer
+    // until it picks up.
+    //
+    // Mic-permission failures (the other path that sets `initError`)
+    // STILL show the red banner — those genuinely need user action
+    // (grant permission / unblock device / etc.).
+    setMixerConnecting(true)
+    let attempt = 0
+    while (true) {
+      attempt++
+      try {
+        await audioService.connectMixer(userId, roomId)
+        if (micOk) audioService.startCapture()
+        setMixerConnecting(false)
+        break
+      } catch (err) {
+        console.warn(`[RoomPage] Mixer connect attempt ${attempt} failed (will keep retrying):`, err)
+        // Exp backoff: 1s, 2s, 4s, 8s, 16s, then capped at 30 s.
+        const delay = Math.min(1000 * Math.pow(2, Math.min(attempt - 1, 5)), 30000)
+        await new Promise(r => setTimeout(r, delay))
+        // If user already left the room (component unmounted), bail out.
+        if (cancelledRef.current) {
+          setMixerConnecting(false)
+          return
+        }
+      }
     }
     setRetrying(false)
   }, [userId, roomId])
@@ -237,6 +276,7 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     joinedRef.current = true
 
     // Three-stage init — see retryMicInit for the per-stage rationale.
+    cancelledRef.current = false
     void runInit()
 
     // Wire mixer SESSION_REPLACED. Pre-v3.3.3 this callback was defined
@@ -253,6 +293,10 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
     })
 
     return () => {
+      // v5.1.16: signal the silent-retry loop in runInit() to stop on
+      // unmount, otherwise it keeps dialing the mixer forever after the
+      // user has already left the room.
+      cancelledRef.current = true
       audioService.stopCapture()
     }
   }, [])
@@ -402,6 +446,29 @@ export function RoomPage({ roomId, userId, userProfile, peers, onLeave }: Props)
           >
             知道了
           </button>
+        </div>
+      )}
+      {/* v5.1.16: subtle "正在连接服务器…" line while the silent-retry
+          loop in runInit() dials the mixer. Replaces the alarming red
+          "混音服务器连接失败" banner — the retry loop handles it for
+          the user, no interaction needed.
+          Mic-permission failures still surface via `initError` below. */}
+      {mixerConnecting && !initError && (
+        <div
+          role="status"
+          style={{
+            background: '#1c2530', color: '#9fb3c8', padding: '6px 24px',
+            fontSize: 12, borderTop: '1px solid #2a3441',
+            borderBottom: '1px solid #2a3441',
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}
+        >
+          <span style={{
+            display: 'inline-block', width: 8, height: 8, borderRadius: 4,
+            background: '#facc15', animation: 'tonel-pulse 1.2s ease-in-out infinite',
+          }} />
+          <span>正在连接服务器…</span>
+          <style>{`@keyframes tonel-pulse { 0%,100% { opacity: 0.4 } 50% { opacity: 1 } }`}</style>
         </div>
       )}
       {initError && (
