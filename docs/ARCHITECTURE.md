@@ -173,7 +173,7 @@ to flag Bluetooth headphones.
                                  │
               ┌──────────────────┴────────────────────┐
               │                                       │
-    [酷番云广州 (primary)]                  [Aliyun ECS (fallback)]
+    [酷番云广州 (primary)]                  [Aliyun ECS (内部使用)]
     42.240.163.172                          8.163.21.207
     Debian 12 / Linux 6                     Debian 12 / Linux 6
     nginx :443  (TLS, certbot-DNS-CF)       nginx :443

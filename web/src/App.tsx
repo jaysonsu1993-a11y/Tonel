@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { HomePage } from './pages/HomePage'
 import { RoomPage } from './pages/RoomPage'
 import { useSignal } from './hooks/useSignal'
+import { mixerRttProbe } from './services/mixerRttProbe'
 import { MusicBackground } from './components/MusicBackground'
 import { WechatLogin } from './components/WechatLogin'
 import type { PageState, UserProfile } from './types'
@@ -258,6 +259,12 @@ export default function App() {
     setCreateError(null)
     try {
       await createRoom(id, userId, password)
+      // v5.1.20: stop the homepage `mixerRttProbe` WS BEFORE we mount
+      // RoomPage. Both probe and audioService talk to /mixer-tcp, and
+      // the kufan upstream DPI penalises overlapping WSS handshakes
+      // from the same client IP. Awaiting the probe's CLOSED state
+      // guarantees no overlap. See mixerRttProbe.stop() doc.
+      await mixerRttProbe.stop()
       setRoomId(id)
       setRoomPassword(password)
       setPage('room')
@@ -270,6 +277,7 @@ export default function App() {
     setJoinError(null)
     try {
       await joinRoom(id, userId, password)
+      await mixerRttProbe.stop()    // v5.1.20: see handleCreateRoom
       setRoomId(id)
       setRoomPassword(password)
       setPage('room')
@@ -293,6 +301,7 @@ export default function App() {
       // joinRoom throws on server error; surface the message inline so the
       // user can retry with a different password without leaving the prompt.
       await joinRoom(deepLinkRoomId, userId, deepLinkPassword || undefined)
+      await mixerRttProbe.stop()    // v5.1.20: see handleCreateRoom
       setRoomId(deepLinkRoomId)
       setRoomPassword(deepLinkPassword || undefined)
       setPage('room')

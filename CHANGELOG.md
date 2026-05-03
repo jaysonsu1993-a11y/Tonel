@@ -9,6 +9,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.20] - 2026-05-04
+
+### Changed — homepage hero RTT now uses the same algorithm as in-room
+
+User asked for the homepage's giant latency number to match the in-room
+RTT shown in `RoomPage`'s latency strip — same algorithm, same wire
+protocol, same number — but **independently measured** (not by reading
+in-room state).
+
+#### Implementation
+
+* `mixerRttProbe.ts` switched back from `fetch('/')` (v5.1.10–.19) to
+  WSS PING/PONG against `/mixer-tcp`, which is exactly what
+  `audioService` uses for its in-room RTT (see `startPing` and the
+  `PONG` handler in `audioService.ts`). Send `{type:"PING"}\n` every
+  3 s, time the `{type:"PONG"}` reply with `performance.now()`.
+* The probe owns its own WebSocket; in-room code owns its own. No JS
+  data-flow link between them — they just happen to send identical
+  frames over identical URLs and so produce identical RTT numbers.
+* `mixerRttProbe.stop()` returns `Promise<void>` that resolves only
+  when the WebSocket has actually reached `CLOSED` (with a 500 ms
+  safety timeout). This was the v5.1.7 fix; we needed it again because
+  going back to WSS-based probe brings back the kufan upstream DPI's
+  "two concurrent WSS handshakes to /mixer-tcp from same IP" trip
+  wire if probe and audioService races.
+* `App.tsx`'s `handleCreateRoom`, `handleJoinRoom`, and `submitDeepLink`
+  now `await mixerRttProbe.stop()` *before* calling `setPage('room')`,
+  so the homepage probe socket is fully off the wire before
+  `RoomPage`'s mount triggers `audioService.connectMixer`. (This
+  was the missing step that v5.1.6 → v5.1.8 each tried in vain — they
+  hooked the stop inside `connectMixer` itself, which is too late.)
+
+The result: same number on home and in-room, identical algorithm,
+no race.
+
+### Changed — hero RTT number colour: white → green
+
+User-facing tweak: the giant `.v1-num` (desktop) and `.v1m-num`
+(mobile) numbers are now `#4ade80` (the "good" latency tier colour
+already used elsewhere on the page and in the in-room latency strip),
+making the visual story "low number = green = good" consistent across
+the whole app.
+
+### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerRttProbe.ts` | Replaced fetch-based implementation with WSS PING/PONG; `stop()` returns Promise resolving on WS CLOSED |
+| `web/src/App.tsx` | `handleCreateRoom` / `handleJoinRoom` / `submitDeepLink` `await mixerRttProbe.stop()` before `setPage('room')` |
+| `web/src/styles/globals.css` | `.v1-num` and `.v1m-num` colour `#fff` → `#4ade80` (green) |
+
 ## [5.1.19] - 2026-05-04
 
 ### Removed — dead WebRTC / P2P code paths across server, web, and macOS
