@@ -9,6 +9,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.4] - 2026-05-03
+
+### Re-applied — `mixerRttProbe` (the v5.0.3 homepage RTT fix)
+
+v5.1.3 over-reverted: the user asked to put web back to v5.0.0 state,
+which I read as "drop everything since". But of the v5.0.x → v5.1.x
+band, **v5.0.3 was the only purely-beneficial web change** —
+`mixerRttProbe` makes the homepage hero RTT show the same low number
+the in-room debug panel shows (mixer-direct PING/PONG, ~8 ms to Kufan)
+instead of `signalService.onLatency`'s reading (signaling RTT through
+Cloudflare's AMS edge, ~400 ms for China users).
+
+After v5.1.3 the homepage hero displayed **387 ms** instead of the
+real ~8 ms audio path. User reported this as a regression in
+displayed latency. Restoring the v5.0.3 files brings the display
+back to reality. No other v5.0.x / v5.1.x web change is touched.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerRttProbe.ts` | **Restored** from v5.0.3 (`fc6d1bf`) |
+| `web/src/pages/HomePage.tsx` | Restored from v5.0.3 — homepage hero RTT now sourced from `mixerRttProbe.onLatency` again |
+
+In-room display was never affected (it uses `audioService.audioLatency`
+from the `/mixer-tcp` PONG, which v5.1.3 didn't touch).
+
 ## [5.1.3] - 2026-05-03
 
 ### Reverted — web frontend rolled back to v5.0.0 state
