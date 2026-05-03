@@ -38,19 +38,35 @@ interface Props {
 /**
  * Live latency number, used in three slots on the home page (hero
  * giant number, hero axis line, bottom stats row). All three slots
- * subscribe to the mixer-server PING/PONG RTT (same figure shown
- * inside a live room) so they show the same value at the same time.
+ * subscribe to the mixer-server PING/PONG RTT and add a fixed
+ * `kAudioPathOffsetMs` so the displayed figure represents the
+ * **end-to-end audio latency** the user actually hears, not the raw
+ * network RTT.
+ *
+ * Why the +offset:
+ *   - mixerRttProbe measures only TCP control RTT (≈ network RTT).
+ *   - The audio path adds: client jitter buffer (~5 ms),
+ *     server jitter target (~5 ms), server mix half-tick (~1 ms),
+ *     client + server playback buffers (~2.5 ms × 2). The non-network
+ *     overhead is roughly **10 ms regardless of the user's network**
+ *     — flat for everyone since all clients hit the same server
+ *     pipeline. Adding it makes the headline number representative
+ *     of the audible end-to-end delay, not just the network leg.
+ *   - Pre-connect placeholder also displays `baseMs + offset` so the
+ *     visual jump from placeholder → real measurement stays small.
  *
  * Display rules per spec:
- *   - Pre-connect / no RTT yet → animated 12 ± `jitter` placeholder.
+ *   - Pre-connect / no RTT yet → animated `baseMs + jitter` placeholder.
  *   - < 50 ms  → green
  *   - 50–99 ms → yellow
  *   - >= 100 ms → red
  *
  * UI throttle ≥ 200 ms so the digit doesn't strobe on rapid pings.
  */
+const kAudioPathOffsetMs = 10  // see header doc for breakdown
+
 function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: number }) {
-  const [ms, setMs] = useState<number>(baseMs)
+  const [ms, setMs] = useState<number>(baseMs + kAudioPathOffsetMs)
   const [haveReal, setHaveReal] = useState(false)
   const lastUiUpdate = useRef(0)
   useEffect(() => {
@@ -60,7 +76,7 @@ function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: nu
       // Throttle to >= 200 ms between visible updates.
       if (now - lastUiUpdate.current < 200) return
       lastUiUpdate.current = now
-      setMs(rtt)
+      setMs(rtt + kAudioPathOffsetMs)
       setHaveReal(true)
     })
     return unsub
@@ -71,7 +87,7 @@ function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: nu
   useEffect(() => {
     if (haveReal) return
     const id = setInterval(() => {
-      setMs(baseMs + Math.round((Math.random() - 0.5) * jitter * 2))
+      setMs(baseMs + kAudioPathOffsetMs + Math.round((Math.random() - 0.5) * jitter * 2))
     }, 220)
     return () => clearInterval(id)
   }, [haveReal, baseMs, jitter])

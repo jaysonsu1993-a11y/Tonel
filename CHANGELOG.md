@@ -9,6 +9,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.5] - 2026-05-03
+
+### Changed — homepage hero number is now `RTT + 10 ms` (audio-path total)
+
+Per user feedback after v5.1.4 went live: the hero digit jumping from
+the 12 ± 2 ms mock placeholder up to the user's real RTT (~30 ms over
+their VPN) was misleading — visually the page felt like it was
+"discovering" the user's connection mid-paint.
+
+Fix: the displayed number is `mixerRttProbe.rtt + 10 ms` instead of
+just the raw RTT. The `+10 ms` represents the network-independent
+audio-path overhead (client jitter buffer ~5 ms, server jitter target
+~5 ms, server mix half-tick ~1 ms, IO buffers ~2 × 2.5 ms). This
+makes the headline figure represent the **end-to-end audible latency**
+rather than the network leg alone — what users actually hear in a
+room. The placeholder mock also gets the `+10 ms` so the
+pre-connect → real-measurement jump stays small.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/pages/HomePage.tsx` | `LiveLatency` adds `kAudioPathOffsetMs = 10` to both the placeholder and the real reading |
+
+In-room latency display unchanged (it shows the full e2e breakdown
+already and is sourced from `audioService.audioLatency`).
+
 ## [5.1.4] - 2026-05-03
 
 ### Re-applied — `mixerRttProbe` (the v5.0.3 homepage RTT fix)
