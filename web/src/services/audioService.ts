@@ -9,6 +9,8 @@
  *   5. Audio relay via /mixer-udp WebSocket (→ proxy → UDP 9003)
  */
 
+import { mixerRttProbe } from './mixerRttProbe'
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA1 Packet Constants  (server expects big-endian, 44-byte header)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2566,6 +2568,23 @@ export class AudioService {
   public async connectMixer(userId: string, roomId: string): Promise<void> {
     this.userId = userId
     this.roomId = roomId
+
+    // v5.1.6: shut down the homepage's `mixerRttProbe` before opening
+    // our own /mixer-tcp control socket. The probe is a singleton that
+    // HomePage keeps running for as long as it's mounted; React's
+    // route change to /room/:id unmounts HomePage but its useEffect
+    // cleanup only unsubscribes the callback — it does NOT call
+    // `mixerRttProbe.stop()`. Result: two simultaneous WSS sessions to
+    // wss://srv.tonel.io/mixer-tcp from the same browser. On a stable
+    // direct-to-mixer path this works (browsers allow many parallel
+    // WebSockets per host), but on a global VPN with finicky middlebox
+    // state the second concurrent WSS handshake to the same path
+    // sometimes fails — observed as "Control WebSocket 连接失败" right
+    // after clicking 创建房间. Stopping the probe here ensures only
+    // one /mixer-tcp socket exists at a time. The probe will resume
+    // automatically when the user navigates back to the home page
+    // (LiveLatency's useEffect fires `mixerRttProbe.start()` on mount).
+    mixerRttProbe.stop()
 
     // Clean up any existing transports before reconnecting
     if (this.controlWs || this.audioWs || this.audioWT) {

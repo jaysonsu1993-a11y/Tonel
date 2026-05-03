@@ -9,6 +9,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.6] - 2026-05-03
+
+### Fixed — "Control WebSocket 连接失败" on slow / VPN'd networks
+
+After v5.1.4 restored `mixerRttProbe`, users on a global VPN started
+seeing the room's connect step fail with "Control WebSocket 连接失败"
+right after clicking 创建房间.
+
+Root cause: `mixerRttProbe` is a singleton that HomePage's
+`LiveLatency` starts via `useEffect`. When React navigates from `/`
+to `/room/:id`, HomePage unmounts and the effect's cleanup runs —
+**but the cleanup only unsubscribes the callback; it never calls
+`mixerRttProbe.stop()`**. The probe's WebSocket stays open. Then
+RoomPage's `audioService.connectMixer` opens its OWN `/mixer-tcp`
+socket. Two concurrent WSS sessions to the same path from the same
+origin.
+
+On a clean network this is fine (browsers allow many parallel
+WebSockets per host). On a global VPN with stateful middleboxes the
+second concurrent WSS handshake to the same path sometimes drops —
+which surfaces as `controlWs.onerror` and the toast above.
+
+Fix: `audioService.connectMixer` now calls `mixerRttProbe.stop()` at
+the start, so only one `/mixer-tcp` socket exists at a time. When the
+user navigates back to the home page, `LiveLatency`'s `useEffect`
+calls `mixerRttProbe.start()` again, so the probe resumes
+transparently.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/audioService.ts` | Imports `mixerRttProbe`; `connectMixer` calls `mixerRttProbe.stop()` before opening its own control socket |
+
 ## [5.1.5] - 2026-05-03
 
 ### Changed — homepage hero number is now `RTT + 10 ms` (audio-path total)
