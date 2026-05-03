@@ -39,24 +39,23 @@ interface Props {
  * Live latency number — three slots on the home page (hero giant
  * number, hero axis line, bottom stats row).
  *
- * v5.1.10: re-introduces the live mixer-RTT reading on the home page
- * via the new `mixerRttProbe` (HTTPS-fetch-based, no WebSocket). Adds
- * `kAudioPathOffsetMs` so the displayed figure represents the
- * end-to-end audio latency the user actually hears, not just the raw
- * network leg — same +offset rationale as v5.1.5.
+ * v5.1.21: drops the `+10 ms` offset that was added in v5.1.5 to make
+ * the homepage figure "look like" an end-to-end-minus-output-device
+ * estimate. v5.1.20 switched the underlying probe to WSS PING/PONG
+ * (same algorithm as the in-room RTT strip), and the user expects the
+ * homepage number to **match** that in-room RTT figure. Keeping the
+ * +10 made the homepage display roughly twice the in-room number for
+ * fast networks (RTT 8 ms → display 18 ms), which was confusing.
  *
- * Why this is safe to bring back: the new probe doesn't open a
- * WebSocket. The old WSS-based probe overlapped with
- * `audioService.connectMixer`'s own /mixer-tcp socket on every room
- * entry and tripped the酷番云 hypervisor; v5.1.9 removed it and
- * v5.1.10 puts it back via a plain `fetch()` against /mixer-tcp
- * that gets a quick 426 from nginx. No WebSocket = no /mixer-tcp
- * socket from the home page = no race with room entry.
+ * What's shown now: raw mixer PING/PONG round-trip in milliseconds —
+ * identical algorithm and number range to `audioService._audioLatency`
+ * shown on RoomPage's latency strip. The probe owns its own WebSocket
+ * (independent of the in-room session), so the two readings happen to
+ * land within ±2 ms of each other due only to network jitter, never
+ * due to algorithm mismatch.
  */
-const kAudioPathOffsetMs = 10  // jitter + mix tick + IO buffers (flat)
-
 function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: number }) {
-  const [ms, setMs] = useState<number>(baseMs + kAudioPathOffsetMs)
+  const [ms, setMs] = useState<number>(baseMs)
   const [haveReal, setHaveReal] = useState(false)
   const lastUiUpdate = useRef(0)
   useEffect(() => {
@@ -65,7 +64,7 @@ function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: nu
       const now = Date.now()
       if (now - lastUiUpdate.current < 200) return
       lastUiUpdate.current = now
-      setMs(rtt + kAudioPathOffsetMs)
+      setMs(rtt)
       setHaveReal(true)
     })
     return () => { unsub(); mixerRttProbe.stop() }
@@ -74,7 +73,7 @@ function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: nu
   useEffect(() => {
     if (haveReal) return
     const id = setInterval(() => {
-      setMs(baseMs + kAudioPathOffsetMs + Math.round((Math.random() - 0.5) * jitter * 2))
+      setMs(baseMs + Math.round((Math.random() - 0.5) * jitter * 2))
     }, 220)
     return () => clearInterval(id)
   }, [haveReal, baseMs, jitter])

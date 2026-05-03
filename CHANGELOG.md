@@ -9,6 +9,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.21] - 2026-05-04
+
+### Fixed — homepage hero RTT showing ~2× the in-room RTT
+
+After v5.1.20 swapped the homepage probe to WSS PING/PONG (identical
+algorithm to the in-room RTT strip), the displayed homepage number
+was still ~10 ms above the in-room number — e.g. in-room 8 ms →
+homepage 18 ms, in-room 12 ms → homepage 22 ms. User noticed it
+looked roughly **twice** the in-room reading on fast networks and
+asked why.
+
+Cause: a leftover `kAudioPathOffsetMs = 10` constant in
+`HomePage.tsx`. v5.1.5 added it on top of the (then-network-only)
+RTT to make the hero figure approximate "end-to-end minus output
+device". v5.1.20 switched the underlying probe to be the **same**
+algorithm as the in-room RTT strip but kept the +10. Result: hero
+displayed RTT + 10, which is no longer what the user wants.
+
+Fix: remove the `+10` offset. Display the raw mixer PING/PONG round
+trip, exactly as in-room does. The two numbers will now agree within
+network jitter (~±2 ms), never differ by a fixed +10.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/pages/HomePage.tsx` | `LiveLatency`: drop `kAudioPathOffsetMs` constant + every `+ kAudioPathOffsetMs` term in the `setMs` calls |
+
 ## [5.1.20] - 2026-05-04
 
 ### Changed — homepage hero RTT now uses the same algorithm as in-room
