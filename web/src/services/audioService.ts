@@ -2668,6 +2668,25 @@ export class AudioService {
     console.log(`[Mixer] audio transport: ${this.audioTransport}` +
                 (chosen === 'wt' && !useWT ? ' (WT attempted, fell back)' : ''))
 
+    // v5.1.17: explicit 100 ms breathing room before opening the WSS
+    // control socket on the kufan path. Reasoning: the kufan upstream
+    // DPI (the one injecting RST after TLS ClientHello — see the
+    // 2026-05-04 architectural diagnosis) appears to use a "burst of
+    // new connections from the same client IP within a few ms"
+    // heuristic among other signals. The homepage's `mixerRttProbe`
+    // had its last fetch within the prior 0-5 s — its TCP/HTTP-2
+    // connection may still be lingering in the browser's pool when
+    // `mixerRttProbe.stop()` was just called. 100 ms gives that
+    // connection a chance to actually close before the new TLS
+    // handshake for the WSS Upgrade hits the wire, so the DPI sees
+    // them as separate events rather than one burst. Negligible cost
+    // (room-entry +100 ms; user can't perceive that), zero impact on
+    // happy path. WT path skips this — `tryWebTransport` above
+    // already burns tens-to-hundreds of ms doing its handshake.
+    if (!useWT) {
+      await new Promise(r => setTimeout(r, 100))
+    }
+
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error('Mixer 连接超时'))
@@ -2766,9 +2785,18 @@ export class AudioService {
       this.controlWs.onopen = () => {
         console.log('[Mixer] Control WebSocket open')
         controlReady = true
-        // Now that the first WSS is fully handshaken, kick off the
-        // audio one. checkBothReady() runs on whichever finishes last.
-        openAudioWs()
+        // v5.1.17: 80 ms gap between the freshly-completed control WSS
+        // handshake and the audio WSS handshake. v5.1.10 already split
+        // them apart by sequencing audio after control's onopen, but
+        // that meant the second TLS handshake hit the wire literally
+        // one network RTT (~10 ms) after the first — same client IP,
+        // same SNI, both new TCP+TLS sessions. The kufan upstream DPI
+        // may treat that as a burst. 80 ms is small enough to be
+        // invisible to the user but big enough that the two
+        // ClientHellos fall into clearly separate evaluation windows
+        // for any sliding-window heuristic. checkBothReady() will run
+        // on whichever socket finishes last.
+        setTimeout(() => { openAudioWs() }, 80)
         checkBothReady()
       }
       this.controlWs.onmessage = (evt) => {

@@ -9,6 +9,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.17] - 2026-05-04
+
+### Changed — explicit pacing between consecutive new connections to kufan
+
+Belt-and-suspenders against the kufan upstream DPI's burst-detection
+heuristics. Two existing back-to-back new-connection sites had only a
+few-ms or one-RTT gap between them — well within the window most
+"too many new connections from this IP" rules look at. Adding small
+explicit delays so each new TCP+TLS handshake lands in a clearly
+separate evaluation window:
+
+* **`mixerRttProbe.stop()` → `new WebSocket(controlUrl)`**: 100 ms.
+  When the user clicks 创建房间 from the homepage, the probe's last
+  `fetch('/')` may have hit `srv.tonel.io` within the prior 0-5 s and
+  its underlying HTTP/2 connection is still in the browser's pool.
+  `connectMixer` previously opened the WSS upgrade within a few ms of
+  `mixerRttProbe.stop()`. The 100 ms gap gives the lingering connection
+  a chance to actually drain before the new TLS handshake hits the
+  wire. WT path (only `/new`) skips this delay — `tryWebTransport`
+  there already burns tens-to-hundreds of ms doing its own handshake.
+
+* **`controlWs.onopen` → `audioWs` open**: 80 ms. v5.1.10 split these
+  by sequencing audio after control's `onopen`, but that meant the
+  audio TLS handshake hit the wire one network RTT (~10 ms) after
+  the control one. 80 ms keeps them clearly separate.
+
+Total room-entry overhead: +180 ms (only on `/`, not `/new`).
+Imperceptible to the user; well below any audio-latency budget; pure
+upside if the DPI's heuristic actually has a sliding-window component.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/audioService.ts` | `connectMixer`: 100 ms wait before `new WebSocket(controlUrl)` on WSS path; `controlWs.onopen` → `openAudioWs` deferred 80 ms |
+
 ## [5.1.16] - 2026-05-04
 
 ### Removed — "混音服务器连接失败" red banner; replaced with silent
