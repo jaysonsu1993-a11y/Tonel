@@ -2568,6 +2568,46 @@ export class AudioService {
     this.userId = userId
     this.roomId = roomId
 
+    // v5.1.15: silent same-host retry. The kufan path occasionally has
+    // a WSS Upgrade dropped in transit (between client ISP and the
+    // kufan box) — the browser sees an `onerror` Event with no HTTP
+    // status, and nginx logs nothing because the request never arrives.
+    // It's intermittent (~10-20% in observed sessions). Rather than
+    // surface every transient failure as a red banner that requires the
+    // user to click 启用麦克风, we transparently retry the SAME host up
+    // to 2 more times before giving up. This is NOT cross-host failover
+    // (the operator decision is that `/` and `/new` stay on their
+    // assigned servers; see v5.1.14). It's a per-host handshake retry
+    // for an unreliable WAN path.
+    const MAX_ATTEMPTS = 3
+    const RETRY_DELAY_MS = 800
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.connectMixerOnce(userId, roomId)
+        return
+      } catch (err) {
+        const last = attempt === MAX_ATTEMPTS
+        console.warn(`[Mixer] connect attempt ${attempt}/${MAX_ATTEMPTS} failed${last ? ' (giving up)' : ' (retrying)'}:`, err)
+        // Tear down any sockets that were left in a half-open state by
+        // the failed attempt before retrying.
+        try { this.controlWs?.close() } catch (_) {}
+        try { this.audioWs?.close() } catch (_) {}
+        try { this.audioWT?.close() } catch (_) {}
+        this.controlWs = null
+        this.audioWs = null
+        this.audioWT = null
+        this.audioWTWriter = null
+        this.audioWTReader = null
+        if (last) throw err
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+      }
+    }
+  }
+
+  private async connectMixerOnce(userId: string, roomId: string): Promise<void> {
+    this.userId = userId
+    this.roomId = roomId
+
     // v5.1.9: removed `mixerRttProbe.stop()` + the await-old-CLOSED
     // cleanup. The whole reason both existed is gone — `mixerRttProbe`
     // was a homepage-only singleton that opened its own /mixer-tcp

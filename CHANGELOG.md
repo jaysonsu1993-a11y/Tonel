@@ -9,6 +9,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.15] - 2026-05-03
+
+### Fixed — silent same-host retry on transient WSS Upgrade drops
+
+User on `tonel.io/` (kufan path) reported `Control WebSocket 连接失败`
+intermittently. Server-side investigation:
+
+```
+Server time 23:19:54
+User IP /mixer-tcp attempts since 21:48:
+  21:48:15  101 ✅
+  22:19:04  101 ✅
+  22:19:29  101 ✅
+  22:19:34  101 ✅
+  22:38:38  101 ✅
+  23:16:50  101 ✅ (8KB session — real audio activity)
+```
+
+100% of WS Upgrades that **reached** nginx in the last ~90 minutes
+were upgraded successfully (status 101). At the same time the user
+was clearly seeing failures in the browser. Conclusion: occasional
+WS Upgrade requests are dropped in transit between the client ISP
+and the kufan public IP — the browser surfaces an `onerror` Event
+with no HTTP status, and nginx never sees the request to log it.
+Plain HTTPS to the same host (e.g., the homepage RTT probe's
+`fetch('/')`) keeps working through the same network path,
+suggesting the drop is specific to the WS Upgrade pattern (or
+intermittent enough that it correlates with whichever request
+happens to be in flight when the network blip occurs).
+
+This is not something we can fix server-side (the request never
+arrives) and per v5.1.14 we are not adding cross-host failover
+(operator decision — kufan and Aliyun are separate products).
+The user-visible mitigation that fits the constraint is a
+**silent same-host retry**: `connectMixer` now wraps its
+single-attempt body in a 3-attempt loop with 800 ms backoff,
+re-targeting the same host each time. A user transiently dropped
+on attempt 1 sees attempt 2 succeed and never knows. Only if all
+three attempts fail does the red banner appear.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/audioService.ts` | `connectMixer` becomes a retry loop around `connectMixerOnce`. Up to 3 attempts, 800 ms delay between, same host throughout |
+
 ## [5.1.14] - 2026-05-03
 
 ### Reverted — auto-fallback (v5.1.12 + v5.1.13)
