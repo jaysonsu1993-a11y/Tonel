@@ -36,13 +36,13 @@ deploy/bootstrap.sh
 All scripts accept `--dry-run`. All scripts require a clean working tree
 (no uncommitted changes) — exception: `health.sh` and `rollback.sh`.
 
-## v5.0.0+ architecture (post-migration)
+## Two-server architecture
 
-`tonel.io/` traffic now hits **酷番云广州 (42.240.163.172)** — that is
-the deploy target of these scripts. The Aliyun box (8.163.21.207) is
-the **`/new` fallback** path on the web client and the **AppKit
-hardcoded** mixer; it stays alive but is **not** part of the standard
-deploy flow.
+`tonel.io/` traffic hits **酷番云广州 (42.240.163.172)** — that is the
+default deploy target of these scripts. A second box at Aliyun
+(8.163.21.207) runs the same code from this repo and serves the
+`tonel.io/new` fallback path; it stays alive but is **not** part of
+the standard deploy flow.
 
 ```
             ┌── srv.tonel.io       (DNS-A → 42.240.163.172, 酷番云) ─── nginx → ws-mixer-proxy
@@ -53,7 +53,9 @@ tonel.io/ ──┤
 tonel.io/new ───┤
                 └── api-new.tonel.io   (CNAME → tonel-tunnel tunnel) ─── cloudflared → ws-proxy
 
-AppKit (kMixerHost hardcoded) ───────► 8.163.21.207:9002/9003 (raw TCP+UDP, Aliyun)
+Tonel-MacOS desktop client ───► 8.163.21.207:9002/9003 (raw TCP+UDP, Aliyun)
+                                 (kufan UDP path has known burst issues; native
+                                  client stays on Aliyun, see project_kufan_udp_burst)
 ```
 
 To touch the Aliyun box from these scripts, override env inline:

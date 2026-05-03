@@ -4,8 +4,8 @@ C++ low-latency signaling and audio mixing servers. Two binaries:
 
 | Binary | Port | Description |
 |---|---|---|
-| `signaling_server` | 9001 (TCP JSON) | Room management, P2P SDP exchange, heartbeat |
-| `mixer_server` | 9002 (TCP) + 9003 (UDP) | Audio mixing, SPA1 packet routing |
+| `signaling_server` | 9001 (TCP JSON) | Room management, peer-list broadcast, heartbeat |
+| `mixer_server` | 9002 (TCP) + 9003 (UDP) | Server-side N−1 mixing, SPA1 packet routing |
 
 ## Build (locally for dev)
 

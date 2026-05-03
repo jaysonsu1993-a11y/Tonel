@@ -9,6 +9,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.18] - 2026-05-04
+
+### Removed — legacy desktop clients + outdated documentation
+
+`Tonel-Desktop/` (the JUCE-based original client) and
+`Tonel-Desktop-AppKit/` (the ObjC++ rewrite) deleted entirely. The
+SwiftUI **`Tonel-MacOS/`** is now the only desktop client and has
+been since v5.0.x — these dirs were stale, took up space, and
+multiple docs still claimed `Tonel-Desktop-AppKit` was "current
+production". With this release, the repo's reality matches what's
+actually shipping.
+
+`bump-version.sh` no longer syncs to the deleted `Tonel-Desktop-AppKit/CMakeLists.txt`
+(removed). Root `CMakeLists.txt` no longer prints "build via
+Tonel-Desktop-AppKit" hint (replaced with current per-module build
+commands).
+
+### Documentation rewrite
+
+A complete sweep of all top-level Markdown to remove three classes
+of outdated content:
+
+1. **References to multiple desktop clients** — replaced with the
+   single Tonel-MacOS narrative.
+2. **P2P / WebRTC mesh as an active mode** — production has been
+   mixer-only since v3.x. Remaining server-side `MIXER_OFFER`/`P2P_*`
+   handlers are documented as dead-code; no active client opens
+   `RTCPeerConnection`. Architecture is **always a star through the
+   mixer**.
+3. **Aliyun as primary** — wrong since v5.0.0 (2026-04-30). Primary
+   is **酷番云广州 (42.240.163.172)**; Aliyun is the `tonel.io/new`
+   fallback path running the same code from this same repo.
+
+### Files
+
+| File | Change |
+|---|---|
+| `Tonel-Desktop/` (whole dir) | **Deleted** |
+| `Tonel-Desktop-AppKit/` (whole dir) | **Deleted** |
+| `CMakeLists.txt` | Build-hint comments updated to current modules |
+| `scripts/bump-version.sh` | Removed `Tonel-Desktop-AppKit/CMakeLists.txt` from sync set |
+| `deploy/.env.deploy{,.example}` | Comments no longer claim Aliyun is "AppKit接入点" |
+| `README.md` (root) | Rewrote module table, removed P2P/Mixer mode matrix, removed Mini/Pro JUCE editions table |
+| `docs/ARCHITECTURE.md` | Full rewrite — mixer-only topology, two-server architecture, kufan-as-primary, kufan-DPI mitigations summary, v5 latency-roadmap recap |
+| `docs/SPA1_PROTOCOL.md` | Full rewrite — removed `P2P_OFFER`/`P2P_ANSWER`/`P2P_ICE`/`MIXER_REGISTER`/`MIXER_OFFER`/`MIXER_ANSWER`/`MIXER_ICE_RELAY` sections; current frame size 2.5 ms (was documented as 5 ms); added PLC-fired flag, in-room mixer control messages |
+| `docs/DEVELOPMENT.md` | Bump-version table dropped AppKit/JUCE rows; build instructions point at Tonel-MacOS; AppKit code-style section dropped; network-arch line says "Tonel-MacOS" instead of "AppKit" |
+| `deploy/README.md` | "AppKit接入点" wording dropped; Tonel-MacOS naming used for the native client |
+| `ops/README.md` | "v5.0.0+ migration" section reframed as steady-state two-server architecture |
+| `server/README.md` | `signaling_server` description no longer mentions P2P SDP exchange |
+| `web/README.md` | Updated tech stack table (AudioWorklet, not ScriptProcessor; HTTPS-fetch RTT probe), point at `server/proxy/` for proxies |
+| `libs/README.md` | JUCE section deleted; miniaudio repurposed as "available for future cross-platform work, not used by Tonel-MacOS" |
+| `Tonel-MacOS/README.md` | Now described as "the only desktop client"; legacy-AppKit cross-references dropped |
+
+No code/runtime change.
+
 ## [5.1.17] - 2026-05-04
 
 ### Changed — explicit pacing between consecutive new connections to kufan

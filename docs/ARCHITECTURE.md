@@ -1,279 +1,274 @@
-# S1 System Architecture
+# Tonel System Architecture
 
 ## Goal
 
-Ultra-low latency real-time audio for online band rehearsal.
+Ultra-low latency real-time audio for online band rehearsal. Every
+architectural decision serves one metric: **minimizing end-to-end audio
+latency**. Target on a Chinese intra-province network is **~30 ms
+mouth-to-ear**.
 
-Every architectural decision in this project serves one metric: **minimizing end-to-end audio latency**. Users in different locations should be able to hear each other's instruments in near real-time as if playing in the same room.
-
-## System Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          S1 BAND REHEARSAL                           │
-│                                                                      │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐           │
-│  │  Desktop A   │    │  Desktop B   │    │  Desktop N   │           │
-│  │  (AppKit)    │    │  (AppKit)    │    │  (Web trial)  │           │
-│  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘           │
-│         │                   │                   │                    │
-│  ┌──────┴───────────────────┼───────────────────┴──────┐            │
-│  │                       Transport                     │            │
-│  │                                                     │            │
-│  │  P2P Mode (2-4 people):  ── UDP Mesh ──             │            │
-│  │  Mixer Mode (5+ or fail):── UDP via Server ──        │            │
-│  │  Signaling:               ── TCP JSON ──             │            │
-│  └──────┬───────────────────┼───────────────────┬──────┘            │
-│         │                   │                   │                    │
-│  ┌──────┴───────┐    ┌──────┴───────┐    ┌──────┴───────┐           │
-│  │ Signaling    │    │ Mixer Server  │    │ Web Proxy    │           │
-│  │ Server       │    │ (Audio Mix)   │    │ (WS→TCP/UDP) │           │
-│  │ TCP :9001    │    │ TCP:9002      │    │ WS :9004/9005│           │
-│  │              │    │ UDP :9003     │    │              │           │
-│  └──────────────┘    └──────────────┘    └──────────────┘           │
-│                                                                      │
-│                         Server (Alibaba Cloud)                      │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## Audio Transport
-
-### SPA1 Protocol
-
-S1 uses a custom binary protocol called **SPA1 (Simple Protocol for Audio v1)**.
-
-- 76-byte fixed header (P1-1: userId 64 bytes), network byte order (big-endian)
-- Magic: `0x53415031` ('SPA1')
-- Supports PCM16 (uncompressed, low latency) and Opus (compressed, bandwidth-efficient)
-- Frame size: 5ms = 240 samples @ 48kHz (PCM16: 480 bytes, Opus: ~20-60 bytes)
-- dataSize upper bound: 1356 bytes (prevents memory overflow)
-
-Full specification: [SPA1_PROTOCOL.md](./SPA1_PROTOCOL.md)
-
-### P2P Mode (2-4 people)
-
-- Direct UDP mesh between all clients
-- No server in the audio path -- lowest possible latency
-- STUN for NAT traversal (ICE candidates exchanged via signaling server)
-- Each peer sends its audio to all other peers
-
-### Mixer Mode (5+ or P2P failure)
-
-- All audio goes through the server
-- Server mixes all incoming audio streams into one
-- Returns the mixed stream to each client
-- Slightly higher latency but scales to more users
-
-### Mode Switching
-
-Automatic: P2P is preferred, switches to Mixer when:
-- Number of P2P peers exceeds `maxPeers` (default: 4)
-- P2P connection fails (STUN timeout, NAT blocking)
-
-## Client Architecture
-
-### AppKit Client (Production)
+## Topology — server-side mixer, always
 
 ```
-┌─── Tonel-Desktop-AppKit ───────────────────────────────┐
-│                                                      │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  │
-│  │  miniaudio  │  │   AppKit    │  │  SPA1 Codec  │  │
-│  │  (Audio I/O)│  │  (UI/Views) │  │  (PCM16)     │  │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬───────┘  │
-│         │                 │                │          │
-│  ┌──────┴─────────────────┴────────────────┴───────┐  │
-│  │              Bridge Layer                        │  │
-│  │  AudioBridge | MixerBridge | NetworkBridge       │  │
-│  │  (capture/   | (TCP ctrl + | (WS signaling)     │  │
-│  │   playback)  |  UDP audio) |                     │  │
-│  └────────────────────────────────────────────────┘  │
-│                                                      │
-│     License: MIT only (zero licensing risk)          │
-└──────────────────────────────────────────────────────┘
+  Client A (Web or Tonel-MacOS)
+            │
+            │  audio (SPA1, every 2.5 ms)
+            ▼
+  ┌─────────────────────────────┐
+  │   Mixer Server (libuv)       │
+  │   per 2.5 ms tick:           │
+  │     for each user U in room: │
+  │       mix = sum of all       │
+  │             other users      │
+  │       send mix → U           │
+  └─────────────┬───────────────┘
+                │
+                ▼  same SPA1 packet stream (the N−1 mix for that user)
+       ◀ Client B   Client C   Client N
 ```
 
-### Web Client (Trial/Demo)
+Every client sends its mic upstream to the mixer; the mixer sends each client
+a personalized **N−1 mix** (everybody else, but not their own voice — that
+would create echo). One TCP control channel + one UDP-equivalent audio
+channel per client. Topology is always a star, never a mesh.
 
-```
-┌─── Tonel-Web (React + TypeScript) ─────────────────────┐
-│                                                      │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  │
-│  │ Web Audio   │  │  React UI   │  │  SPA1 in JS  │  │
-│  │ API         │  │  (Vite)     │  │  PCM16 Codec │  │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬───────┘  │
-│         │                 │                │          │
-│  ┌──────┴─────────────────┴────────────────┴───────┐  │
-│  │  Signaling: WebSocket (CF Tunnel → ws-proxy)    │  │
-│  │  Mixer:     WebSocket (direct → ws-mixer-proxy) │  │
-│  └────────────────────────────────────────────────┘  │
-│                                                      │
-│  Audio path: srv.tonel.io (direct to server, no CF)  │
-└──────────────────────────────────────────────────────┘
-```
+**There is no P2P mode.** Earlier protocol drafts mentioned
+P2P/WebRTC-mesh; that path was deprecated and the production architecture is
+mixer-only. (The server still has unused `MIXER_OFFER`/`P2P_*` JSON message
+handlers from that era — dead code, no live caller.)
 
-### Client Version History
+## Clients
 
-| 目录 | 框架 | 状态 | 说明 |
-|---|---|---|---|
-| **Tonel-Desktop-AppKit** | AppKit + miniaudio | **当前主力** | MIT 许可证，零风险，原生 macOS。唯一推荐的桌面生产版本。 |
-| **Tonel-Desktop** | JUCE | **Legacy** | GPL/商业双许可。保留原因：音频路由、SPA1、Opus 的参考实现。不再维护。 |
-| ~~S1-Desktop-AppKit~~ | — | **已删除** | 源码已迁移到 `Tonel-Desktop-AppKit`。原目录仅有 Xcode 构建残留。 |
+### Web client (`web/`)
 
-> **文件名前缀残留**：`Tonel-Desktop-AppKit/src/ui/S1RoundedButton.h` 等文件仍保留 `S1` 前缀，是项目更名（S1 → Tonel）的历史遗留，不影响功能。
+React + TypeScript + Vite. Served as static assets from Cloudflare Pages
+(`tonel.io`). Audio I/O is `getUserMedia` → `AudioWorklet` for capture, and a
+custom playback worklet that does its own jitter buffer + drift adapter
+(`audioService.ts`).
 
-## Server Architecture
+**Network paths:**
 
-```
-┌─── Server (Alibaba Cloud) ──────────────────────────┐
-│                                                      │
-│  ┌─────────────────────┐  ┌───────────────────────┐  │
-│  │  signaling_server    │  │  mixer_server          │  │
-│  │  (libuv, TCP :9001)  │  │  (libuv, TCP:9002     │  │
-│  │                      │  │         UDP :9003)    │  │
-│  │  - Room management   │  │  - Audio mixing       │  │
-│  │  - P2P SDP exchange  │  │  - SPA1 routing       │  │
-│  │  - WebRTC SDP relay  │  │  - Opus decode/mix    │  │
-│  │  - Heartbeat/check   │  │  - Level computation  │  │
-│  └─────────────────────┘  └───────────────────────┘  │
-│                                                      │
-│  ┌─────────────────────┐  ┌───────────────────────┐  │
-│  │  ws-proxy.js         │  │ ws-mixer-proxy.js     │  │
-│  │  (WS :9004 → TCP)    │  │ (WS :9005 → TCP/UDP) │  │
-│  │  Web client signaling│  │ Web client mixer audio│  │
-│  └─────────────────────┘  └───────────────────────┘  │
-│                                                      │
-└──────────────────────────────────────────────────────┘
-```
-
-## Latency Optimizations
-
-1. **5ms frames** -- 240 samples @ 48kHz, ultra-low latency (server configurable)
-2. **PCM16 by default** -- zero encode/decode latency (no Opus compression)
-3. **P2P first** -- server is not in the audio path for small groups
-4. **UDP transport** -- connectionless, no TCP handshake latency
-5. **miniaudio** -- minimal audio stack, no GUI framework blocking audio thread
-6. **libuv** -- efficient async I/O on server side
-7. **Disabled browser "enhancements"** -- echo cancellation, noise suppression, auto gain all OFF in web client for raw audio
-8. **Big-endian network byte order** -- no endian conversion on ARM server/client
-9. **Browser WebSocket heartbeat** -- 10s interval HEARTBEAT prevents Cloudflare Tunnel idle timeout disconnects
-10. **Direct WebSocket for audio** -- srv.tonel.io bypasses Cloudflare, audio goes straight to domestic server
-11. **SPA1 timestamp RTT** -- client embeds ms-low-16 in SPA1 header, server echoes back, client computes RTT with EMA smoothing
-
-## Editions
-
-The Mini (miniaudio, MIT) vs Pro (JUCE, GPLv3) edition matrix and licensing
-rationale live in the project [README.md](../README.md#editions). Not duplicated here.
-
-## Port Map
-
-| Port | Protocol | Purpose |
+| Layer | URL | Backing |
 |---|---|---|
-| 9001 | TCP | Signaling server (room management + WebRTC SDP relay) |
-| 9002 | TCP | Mixer control channel |
-| 9003 | UDP | Mixer audio (SPA1 packets) |
-| 9004 | WebSocket | Web signaling proxy (ws-proxy.js) |
-| 9005 | WebSocket | Web mixer proxy (ws-mixer-proxy.js, TCP control + UDP audio relay) |
-| 9006 | UDP | ws-mixer-proxy UDP receive port (server mixed audio return) |
+| Static HTML/JS | `https://tonel.io/` | Cloudflare Pages |
+| Signaling (control plane) | `wss://api.tonel.io/signaling` | Cloudflare Tunnel → signaling_server :9001 |
+| Mixer control | `wss://srv.tonel.io/mixer-tcp` | nginx → ws-mixer-proxy :9005 → mixer_server :9002 |
+| Mixer audio | `wss://srv.tonel.io/mixer-udp` | nginx → ws-mixer-proxy :9005 → mixer_server UDP :9003 |
 
-## Deployment Architecture (2026-04)
+The audio path **never touches Cloudflare** — `srv.tonel.io` is a DNS-only A
+record (grey cloud) pointing directly at the mixer server. CF in the audio
+path would add 10-20 ms of edge latency that we don't want.
 
-```
-                           INTERNET
-                              │
-     ┌────────────────────────┼───────────────────────┐
-     │                        │                       │
-[Cloudflare Pages]    [Cloudflare Tunnel]     [Direct WSS/UDP]
-     │                        │                       │
-  tonel.io             api.tonel.io            srv.tonel.io
- (Web static)        (WS signaling)      (Mixer audio: WSS 443)
-     │                        │                       │
-     └────────────────────────┼───────────────────────┘
-                              │
-                    ┌─────────┴─────────┐
-                    │  Alibaba Cloud CN  │
-                    │  (Debian 12)       │
-                    │                    │
-                    │  nginx :443 (SSL)  │
-                    │  Let's Encrypt cert│
-                    │  (certbot-dns-cf)  │
-                    │  signaling :9001   │
-                    │  mixer     :9002   │
-                    │  audio     :9003   │
-                    │  ws-proxy  :9004   │
-                    │  ws-mixer  :9005   │
-                    │  cloudflared       │
-                    └────────────────────┘
-```
+The `tonel.io/new` URL prefix is a **fallback path** that points to the
+secondary box (Aliyun). Same code, same protocol, different DNS — used as a
+backup and for cross-region testing. Not the default.
 
-### Why this architecture?
+### Desktop client (`Tonel-MacOS/`)
 
-- **Web on Cloudflare Pages**: No ICP filing needed. Global CDN, zero cost.
-- **Signaling via Cloudflare Tunnel**: Low-bandwidth control traffic goes through QUIC tunnel. Domain stays on 443. Beaver (ICP check) only sees Cloudflare IPs.
-- **Mixer audio via direct WSS**: Web client connects to `srv.tonel.io` (DNS-only A record, grey cloud, not proxied by Cloudflare). Audio traffic goes directly to the Alibaba Cloud server via nginx WSS → ws-mixer-proxy → UDP mixer. **No Cloudflare in the audio path** — critical for low latency.
-- **AppKit uses direct UDP**: Native client connects directly to server IP for both TCP control and UDP audio. Lowest possible latency.
+Native SwiftUI macOS app. **The only desktop client.** Speaks SPA1 directly
+over raw TCP (control) + UDP (audio) — does not go through the WSS path the
+web client uses. Hardcoded to point at the Aliyun box (8.163.21.207) for
+historical reasons — the kufan box's network behavior with raw UDP has known
+issues (`project_kufan_udp_burst`), so AppKit-equivalent native traffic stays
+on Aliyun.
 
-### DNS Records
+Pre-v5.0.5 there were two other macOS clients (`Tonel-Desktop` JUCE-based,
+`Tonel-Desktop-AppKit` — both deleted in the v5.1.18 doc cleanup along with
+their references in the build system). Anything you find in older
+CHANGELOG entries referring to "AppKit client" is now Tonel-MacOS.
 
-| Record | Type | Target | Proxy |
-|---|---|---|---|
-| tonel.io | CNAME | tonel-web.pages.dev | Orange (Proxied by CF Pages) |
-| api.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel, primary tunnel) |
-| api-new.tonel.io | CNAME | `<tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel, fallback ingress added v5.0.1) |
-| srv.tonel.io | A | 42.240.163.172 (酷番云广州, **primary** since v5.0.0) | **Grey (DNS only, direct)** |
-| srv-new.tonel.io | A | 8.163.21.207 (Aliyun, **fallback** post v5.0.0) | **Grey (DNS only, direct)** |
+## Server (`server/`)
 
-> **v5.0.0 server migration** (2026-05-01): primary mixer flipped from
-> Aliyun → 酷番云广州. AppKit binaries built before that still hard-code
-> the Aliyun IP and are routed via `srv-new.tonel.io`. Web traffic and
-> new AppKit builds default to `srv.tonel.io` (酷番云). Same `ops/`
-> deploys to either box; DNS picks who is primary.
-
-### Client Connection Points
-
-| Client | Web URL | Signaling | Audio (Mixer) |
-|---|---|---|---|
-| AppKit (current) | — | TCP direct 42.240.163.172:9002 (酷番云) | Direct UDP :9003 |
-| AppKit (pre-v5.0) | — | TCP direct 8.163.21.207:9002 (Aliyun) | Direct UDP :9003 |
-| Web (Trial) | https://tonel.io | wss://api.tonel.io/signaling (CF Tunnel) | **wss://srv.tonel.io/mixer-tcp + /mixer-udp (direct)** |
-| JUCE (Legacy) | — | TCP direct to config host | Direct UDP/TCP |
-
-### WebSocket Mixer Connection Flow (Web Client)
+Two separate libuv processes:
 
 ```
-1. Browser connects to wss://srv.tonel.io/mixer-tcp (control) and /mixer-udp (audio)
-   - srv.tonel.io: DNS-only A record to 8.163.21.207, Let's Encrypt SSL via certbot-dns-cloudflare
-   - nginx on server terminates WSS and proxies to ws-mixer-proxy on :9005
-2. ws-mixer-proxy creates TCP connection to mixer_server:9002 only for /mixer-tcp
-3. /mixer-tcp WebSocket ↔ TCP:9002 (MIXER_JOIN, PING/PONG, level data)
-4. /mixer-udp WebSocket ↔ UDP:9003 (SPA1 audio packets)
-5. Audio capture: ScriptProcessorNode (AudioWorklet had zero-data issues with MediaStreamAudioSourceNode)
-6. PCM16 codec: encode Math.round(s * 32767) LE, decode getInt16 LE / 32768.0 (matches AppKit)
-7. Direct frame sending from ScriptProcessor (no frameBuffer accumulation - causes zero-data bug)
-8. Playback: BufferSource scheduling with src.start(0) immediate play
-9. Level metering: linear RMS + 80/20 EMA smoothing, single-bar gradient LedMeter with dB scale (-60dB)
-10. Auto-reconnect on audio WebSocket close
+┌── signaling_server (port 9001) ─────────┐
+│  - Room create/join/leave                │
+│  - Peer-list broadcast                   │
+│  - Heartbeat / idle disconnect           │
+│  - JSON over TCP, newline-delimited      │
+└──────────────────────────────────────────┘
+
+┌── mixer_server (port 9002 TCP, 9003 UDP) ─┐
+│  - SPA1 audio packet handling             │
+│  - 2.5 ms mix tick (timed mixing)          │
+│  - Per-user jitter buffer + PLC fill      │
+│  - PCM16 ↔ Opus codec                      │
+│  - N−1 mix (excluding the listener)        │
+│  - Soft-clip at 0.95 knee                  │
+│  - Level computation (50 ms cadence)      │
+└────────────────────────────────────────────┘
 ```
 
-### Signaling Reliability
+The two are intentionally separate processes — different traffic profiles,
+different failure domains. Signaling is JSON, low-volume, latency-tolerant,
+proxied through Cloudflare Tunnel (`api.tonel.io`). Audio is binary, very
+high volume (~400 packets/sec/user × all users in a room, full duplex), and
+must not go through CF.
 
-- **Server heartbeat**: signaling_server checks client timeouts every 30s (TIMEOUT = 60s)
-- **Browser heartbeat**: signalService sends HEARTBEAT every 10s to prevent CF Tunnel idle disconnect
-- **Auto-reconnect**: signalService reconnects with 3s delay on WebSocket close
-- **Mixer PING/PONG**: mixer_server handles PING on TCP control channel, responds with PONG
-- **Audio WS auto-reconnect**: Web client auto-reconnects mixer WebSocket on close
+In front of both, three Node.js proxies translate between WebSocket and the
+native protocols for browser clients:
 
-### Room Lifecycle
-
-- Rooms are created via `CREATE_ROOM` and start empty (creator does not auto-join)
-- Users join via `JOIN_ROOM` and leave via `LEAVE_ROOM` or TCP disconnect
-- **Idle room reaper**: a timer runs every 5 minutes and destroys any room that has been empty for ≥30 minutes. This handles rooms where the creator never joined, or rooms that became empty due to disconnects without proper cleanup.
-
-### Monthly Cost
-
-| Service | Provider | Cost |
+| Proxy | Path | Wraps |
 |---|---|---|
-| Web hosting | Cloudflare Pages | **$0** |
-| Signaling tunnel | Cloudflare Tunnel | **$0** |
-| Audio server | Alibaba Cloud ECS | Existing |
-| Bandwidth | Cloudflare | **$0** (unlimited) |
+| `tonel-ws-proxy` | `wss://api.tonel.io/signaling` (via cloudflared) | TCP :9001 |
+| `tonel-ws-mixer-proxy` | `wss://srv.tonel.io/mixer-tcp` | TCP :9002 |
+| `tonel-ws-mixer-proxy` | `wss://srv.tonel.io/mixer-udp` | UDP :9003 |
+| `tonel-wt-mixer-proxy` (Go) | `https://srv.tonel.io:4433/mixer-wt` | UDP :9003 (WebTransport, /new path only) |
+
+Native clients (Tonel-MacOS) skip the proxies entirely and speak SPA1 to
+9002/9003 directly.
+
+## Wire protocol — SPA1
+
+76-byte binary header (network byte order) followed by PCM16 or Opus payload.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | magic = 0x53415031 ("SPA1") |
+| 4 | 2 | sequence (u16) |
+| 6 | 2 | timestamp (u16, 2.5 ms units) |
+| 8 | 64 | userId (null-terminated, "roomId:userId" format) |
+| 72 | 1 | codec (0=PCM16, 1=Opus, 0xFF=handshake) |
+| 73 | 2 | dataSize (u16) |
+| 75 | 1 | reserved (PLC-fired bit + padding) |
+| 76+ | N | payload |
+
+Frame size: **120 samples / 2.5 ms @ 48 kHz**. PCM16 payload = 240 bytes;
+Opus is variable. Server mix tick matches at 2.5 ms.
+
+Full spec: [SPA1_PROTOCOL.md](./SPA1_PROTOCOL.md).
+
+## Latency budget
+
+End-to-end on a Chinese intra-province network looks like:
+
+| Component | Time | Source |
+|---|---|---|
+| Mic capture quantum | 2.5 ms | `FRAME_MS` |
+| Network RTT (client → kufan) | 5-15 ms | depends on user network |
+| Server jitter buffer | 3.75 ms | `(JITTER_TARGET_DEFAULT=2 - 0.5) × 2.5` |
+| Server mix tick | 2.5 ms | mix half-period |
+| Client playback ring | 12 ms | `primeTarget=576` samples / 48 kHz |
+| Output device | 2-10 ms (wired); 60-200 ms (Bluetooth) | hardware-dependent |
+| **Total (wired)** | **~30 ms** | |
+
+The output-device term is the only thing that can blow up the figure;
+the in-room latency display surfaces a banner if `outputLatency > 30 ms`
+to flag Bluetooth headphones.
+
+## Production deployment
+
+```
+                              INTERNET
+                                 │
+        ┌────────────────────────┼─────────────────────────┐
+        │                        │                         │
+   [Cloudflare Pages]    [Cloudflare Tunnel]      [Direct WSS / WT]
+        │                        │                         │
+   tonel.io                 api.tonel.io             srv.tonel.io
+                            api-new.tonel.io         srv-new.tonel.io
+        │                        │                         │
+        └────────────────────────┼─────────────────────────┘
+                                 │
+              ┌──────────────────┴────────────────────┐
+              │                                       │
+    [酷番云广州 (primary)]                  [Aliyun ECS (fallback)]
+    42.240.163.172                          8.163.21.207
+    Debian 12 / Linux 6                     Debian 12 / Linux 6
+    nginx :443  (TLS, certbot-DNS-CF)       nginx :443
+    signaling_server  :9001                 signaling_server  :9001
+    mixer_server      :9002 (TCP)           mixer_server      :9002 (TCP)
+    mixer_server      :9003 (UDP)           mixer_server      :9003 (UDP)
+    ws-proxy          :9004                 ws-proxy          :9004
+    ws-mixer-proxy    :9005 / :9006         ws-mixer-proxy    :9005 / :9006
+    wt-mixer-proxy    :4433 / :9007         wt-mixer-proxy    :4433 / :9007
+    cloudflared (tonel-koufan)              cloudflared (tonel-tunnel)
+```
+
+Both boxes run identical code from the same `ops/` configs. DNS picks who
+serves what hostname; switching primary/fallback is a single CF DNS edit.
+
+### DNS records
+
+| Hostname | Type | Target | CF proxy |
+|---|---|---|---|
+| `tonel.io` | CNAME | `tonel-web.pages.dev` | Orange (CF Pages) |
+| `api.tonel.io` | CNAME | `<koufan-tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel) |
+| `api-new.tonel.io` | CNAME | `<aliyun-tunnel-id>.cfargotunnel.com` | Orange (CF Tunnel) |
+| `srv.tonel.io` | A | `42.240.163.172` (酷番云) | **Grey (DNS-only)** |
+| `srv-new.tonel.io` | A | `8.163.21.207` (Aliyun) | **Grey (DNS-only)** |
+
+The `srv.*` records are deliberately DNS-only — CF orange-cloud would push
+the audio through their edge and add latency. We put audio over WSS to a
+direct IP behind the customer's own nginx/TLS instead.
+
+### Why kufan is primary (and what's annoying about it)
+
+The v5.0.0 (2026-04-30) migration moved primary `srv.tonel.io` from Aliyun
+to 酷番云广州 because Aliyun's bandwidth tier was throttling concurrent
+users. Kufan has more headroom.
+
+The downside (documented in detail in the 2026-05-04 architectural
+diagnosis): kufan's upstream network has a TLS-fingerprint-aware DPI
+appliance that occasionally injects forged RST packets on TLS ClientHello
+matching certain heuristics. Symptoms: 30-60% intermittent failure rate on
+fresh WSS handshakes from some networks, and a near-100% failure rate from
+foreign IPs and other Chinese cloud providers.
+
+The web client mitigates this with:
+- **3-attempt internal retry inside `connectMixer`** (v5.1.15)
+- **Background infinite retry with exponential backoff** if the 3 attempts
+  also fail (v5.1.16) — surfaced as a subtle "正在连接服务器…" line
+  rather than a red banner; never blocks the user
+- **Explicit pacing** between consecutive new TCP+TLS handshakes (v5.1.17)
+  so the DPI doesn't see a burst pattern
+
+These mitigate the symptom on the user side. Once a WSS handshake survives
+the DPI window and gets `101 Switching Protocols`, the established
+connection is unaffected — audio flows normally for the rest of the
+session.
+
+## Latency optimizations (chronological)
+
+The v4.x release line was an explicit latency-reduction roadmap. Highlights:
+
+1. **2.5 ms frame size** (v4.2.0) — halved from the original 5 ms. Server
+   mix tick halved to match. Saves ~5 ms end-to-end.
+2. **Client PCM PLC** (v4.2.0) — `primeTarget` could shrink from 30 ms
+   to 12 ms because underruns are now papered over with a one-frame
+   PLC fill instead of needing a fat cushion.
+3. **Server N−1 mix** — listeners get everybody-except-themselves. Avoids
+   a full duplex echo loop that would otherwise need echo cancellation.
+4. **Direct WSS without CF in audio path** — see the deployment section
+   above.
+5. **Per-user jitter buffer with `JITTER_TARGET_DEFAULT = 2`** — absorbs
+   ±5 ms of network jitter without adding more steady-state queue depth.
+6. **Bandlimited interp playback rate adapter** — instead of pinning sample
+   rate, the playback worklet drifts ±2.5% to keep the ring fill near the
+   target without re-priming.
+
+The current end-to-end target on prod is 30 ms; in-room display shows the
+real measured value (`audioE2eLatency = capture + RTT + jitter + mixTick +
+ring + outputLatency`).
+
+## Port map (server)
+
+| Port | Protocol | Process | Exposure |
+|---|---|---|---|
+| 9001 | TCP | signaling_server | proxied to api.tonel.io via cloudflared |
+| 9002 | TCP | mixer_server (control) | proxied to /mixer-tcp via nginx + ws-mixer-proxy |
+| 9003 | UDP | mixer_server (audio) | proxied to /mixer-udp via nginx + ws-mixer-proxy; also to /mixer-wt via wt-mixer-proxy |
+| 9004 | WebSocket | tonel-ws-proxy | wraps TCP :9001 for browser |
+| 9005 | WebSocket | tonel-ws-mixer-proxy | wraps TCP :9002 + UDP :9003 for browser |
+| 9006 | UDP | tonel-ws-mixer-proxy | UDP receive port for /mixer-udp returns |
+| 9007 | UDP | tonel-wt-mixer-proxy | WebTransport receive port |
+| 4433 | UDP/QUIC | tonel-wt-mixer-proxy | WebTransport listening port |
+
+## See also
+
+- [SPA1_PROTOCOL.md](./SPA1_PROTOCOL.md) — wire format spec
+- [DEVELOPMENT.md](./DEVELOPMENT.md) — local dev setup
+- [RELEASE.md](./RELEASE.md) — release flow
+- [../deploy/README.md](../deploy/README.md) — production deploy
+- [../ops/README.md](../ops/README.md) — nginx + cloudflared + pm2 configs

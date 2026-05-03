@@ -30,8 +30,6 @@ during a release. Do not edit them by hand.
 | Location | File | Sync method |
 |---|---|---|
 | Root project | `CMakeLists.txt` | (canonical) |
-| AppKit client | `Tonel-Desktop-AppKit/CMakeLists.txt` | bump-version.sh |
-| JUCE client | `Tonel-Desktop/CMakeLists.txt` | bump-version.sh |
 | Server | `server/CMakeLists.txt` | bump-version.sh |
 | Web | `web/package.json` | bump-version.sh |
 | Schema | `config.schema.json` | bump-version.sh |
@@ -41,16 +39,16 @@ see [`Tonel-MacOS/README.md`](../Tonel-MacOS/README.md).
 
 ### Changelog
 
-Add a `CHANGELOG.md` before each release:
+Add a `CHANGELOG.md` entry before each release:
 
 ```markdown
-## [0.2.0] - 2026-04-18
+## [5.1.18] - 2026-05-04
 
-### Added
-- AppKit native client
+### Removed
+- Legacy `Tonel-Desktop/` and `Tonel-Desktop-AppKit/` directories
 
 ### Fixed
-- Button click handling in AppKit client
+- Stale doc references to AppKit, P2P, Aliyun-as-primary
 ```
 
 ## Git Branch Strategy
@@ -106,13 +104,13 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) format:
 
 # Examples:
 #   feat: add Opus codec support for server mixer
-#   fix: restore button click handling in AppKit client
+#   fix: restore PCM ring underrun PLC fill in playback worklet
 #   docs: add architecture documentation
 ```
 
 ## Code Style
 
-### C++ (Desktop + Server)
+### C++ (Server)
 
 - Standard: C++17
 - Format: **clang-format** (LLVM style, 4-space indent)
@@ -132,11 +130,11 @@ AllowShortFunctionsOnASingleLine: Inline
 clang-format -i src/**/*.cpp src/**/*.h
 ```
 
-### Objective-C++ (AppKit)
+### Swift (Tonel-MacOS)
 
-- Same as C++ style
-- Use ARC (already enabled in CMakeLists.txt)
-- `.mm` files for Objective-C++ code, `.h` for headers
+- Swift 5.10, SwiftUI conventions
+- Format: Xcode default (`Editor → Structure → Re-Indent`) is fine
+- Use `swiftformat` from Homebrew if you want pre-commit consistency
 
 ### TypeScript (Web)
 
@@ -193,9 +191,10 @@ Test coverage is minimal. The following test types need to be added:
 git clone https://github.com/jaysonsu1993-a11y/Tonel.git
 cd Tonel
 
-# Desktop (AppKit -- recommended)
-cd Tonel-Desktop-AppKit
-cmake -S . -B build && cmake --build build
+# Desktop (Tonel-MacOS — the only desktop client)
+cd Tonel-MacOS
+xcodegen generate     # one-time, regenerates the Xcode project
+open TonelMacOS.xcodeproj
 
 # Server
 cd server
@@ -205,17 +204,12 @@ cmake -S . -B build && cmake --build build
 cd web
 npm install && npm run dev
 
-# Web (deploy to Cloudflare Pages)
+# Web (deploy to Cloudflare Pages — usually invoked via deploy/web.sh)
 cd web
 npm run build && npx wrangler pages deploy dist --project-name=tonel-web
 ```
 
 ## Troubleshooting
-
-### "JUCE not found" warning
-- Only appears for the legacy JUCE client (`Tonel-Desktop/`)
-- Safe to ignore if you're building the AppKit client only
-- Set `-DJUCE_PATH=/path/to/JUCE` to suppress
 
 ### SPA1 packet parsing errors
 - Verify network byte order (big-endian) is preserved
@@ -283,6 +277,6 @@ deploy/web.sh                         # Cloudflare Pages
 ### Network architecture
 
 - **Signaling**: browser → Cloudflare Tunnel (api.tonel.io) → ws-proxy → signaling_server
-- **Mixer audio**: browser → **direct** (srv.tonel.io, DNS-only A record) → nginx WSS → ws-mixer-proxy → mixer_server UDP
-- **AppKit audio**: direct TCP/UDP to server IP (no proxy)
+- **Mixer audio (web)**: browser → **direct** (srv.tonel.io, DNS-only A record) → nginx WSS → ws-mixer-proxy → mixer_server UDP
+- **Mixer audio (Tonel-MacOS)**: native client → direct TCP/UDP to server IP (no proxy)
 - Audio traffic MUST NOT go through Cloudflare — adds 200-400ms of latency via overseas edge servers

@@ -1,355 +1,259 @@
 # SPA1 — Simple Protocol for Audio v1
 
-> 对应实现：`server/src/mixer_server.h`（C++ 结构体）、`web/src/services/audioService.ts`（JS 编解码）
+> Authoritative implementations:
+> - `server/src/mixer_server.h` — `struct SPA1Packet`
+> - `web/src/services/audioService.ts` — `buildSpa1Packet()` / `parseSpa1Header()`
+> - `Tonel-MacOS/TonelMacOS/SPA1.swift` — native client packing
 
-## 概述
+## Overview
 
-SPA1 是一个为实时排练场景设计的轻量级二进制音频协议。采用 UDP 传输（音频流）和 TCP 传输（信令消息）。所有多字节字段均采用网络字节序（大端序）。
+SPA1 is a lightweight binary audio protocol for real-time band rehearsal.
+Audio frames travel over UDP (or its WebSocket / WebTransport equivalent for
+browser clients); room control travels over TCP as JSON.
 
----
+All multi-byte fields are network byte order (big-endian).
 
-## 包格式（76 字节固定头 + payload）
-
-> P1-1 变更（2026-04-25）：userId 从 32 扩展至 64 字节，总头长从 44 增至 76 字节。
-> 同时移除了旧版的 `type` 和 `level` 字段，简化头结构。
+## Packet format — 76-byte header + payload
 
 ```
-偏移  大小  类型       字段         说明
-──────────────────────────────────────────────────────────────
-0     4     u32 BE    magic       0x53415031 ('SPA1')
-4     2     u16 BE    sequence    包序号（递增）
-6     2     u16 BE    timestamp   发送端本地毫秒低16位，服务器透传用于RTT测量
-8     64    char[64]  userId      用户标识符，null 终止（P1-1: 64 字节）
-72    1     u8        codec       0=PCM16, 1=Opus, 0xFF=Handshake
-73    2     u16 BE    dataSize    payload 字节数（上限 1356）
-75    1     u8        reserved    保留 / 未来扩展标志位
-──────────────────────────────────────────────────────────────
-76+   N     uint8[]   data        音频数据
-──────────────────────────────────────────────────────────────
-      ── 总头长：76 字节 ──
+Offset  Size  Type      Field        Notes
+─────────────────────────────────────────────────────────────────────
+0       4     u32 BE    magic        0x53415031 ('SPA1')
+4       2     u16 BE    sequence     packet sequence (incremented)
+6       2     u16 BE    timestamp    sender's local ms low-16, server
+                                     echoes back unchanged for RTT
+                                     measurement (see below)
+8       64    char[64]  userId       null-terminated "roomId:userId"
+72      1     u8        codec        0=PCM16, 1=Opus, 0xFF=Handshake
+73      2     u16 BE    dataSize     payload byte length (≤ 1356)
+75      1     u8        reserved     bit 0 = PLC-fired (set by server
+                                     on the broadcast packet when any
+                                     track was filled by PLC this tick)
+─────────────────────────────────────────────────────────────────────
+76+     N     uint8[]   payload      audio data
+─────────────────────────────────────────────────────────────────────
+                       Total header: 76 bytes
 ```
 
-### 各字段详解
+| Field | Type | Offset | Notes |
+|---|---|---|---|
+| `magic` | u32 BE | 0 | Always `0x53415031`; rejects malformed packets |
+| `sequence` | u16 BE | 4 | Per-stream incrementing; receiver detects gaps |
+| `timestamp` | u16 BE | 6 | Client's send-time low-16 ms, mirrored by server for RTT |
+| `userId` | char[64] | 8 | `"roomId:userId"`, null-terminated |
+| `codec` | u8 | 72 | `0` = PCM16, `1` = Opus, `0xFF` = handshake |
+| `dataSize` | u16 BE | 73 | `payload` size in bytes (max 1356) |
+| `reserved` | u8 | 75 | Bit 0 = PLC-fired flag (server only) |
 
-| 字段 | 类型 | 偏移 | 说明 |
-|------|------|------|------|
-| `magic` | u32 BE | 0 | 固定值 `0x53415031`，用于协议识别与校验 |
-| `sequence` | u16 BE | 4 | 包序号，每包递增，接收端用于检测丢包和排序 |
-| `timestamp` | u16 BE | 6 | 客户端发送时写入本地毫秒低 16 位，服务器透传回客户端用于计算音频 RTT |
-| `userId` | char[64] | 8 | 格式 `"roomId:userId"`，null 终止。P1-1 扩展至 64 字节 |
-| `codec` | u8 | 72 | 音频编码器：`0=PCM16`，`1=Opus`，`0xFF=Handshake` |
-| `dataSize` | u16 BE | 73 | `data` payload 的实际字节数，上限 1356 字节 |
-| `reserved` | u8 | 75 | 保留字段，置 0 |
+### PLC-fired flag (reserved bit 0)
 
-### 电平传输
+Production clients ignore this byte. The mixer sets bit 0 of byte 75 to 1 on
+broadcast ticks where any track was PLC-filled (the per-user jitter buffer
+was empty for that user, so the mixer reused the previous frame instead of
+mixing fresh audio). Used as a free debug channel by `audio_quality_e2e.js`
+to count PLC events without a detection threshold.
 
-> 旧版 SPA1 在包头内嵌入了 `level` 字段。P1-1 移除了该字段。
-> 电平数据现在通过 TCP 控制通道以 JSON `LEVELS` 消息广播（~20Hz），
-> 格式：`{"type":"LEVELS","levels":{"userId1":0.42,"userId2":0.15,...}}`。
-> 值域 0.0-1.0，由服务器从 AudioMixer track RMS 计算。
+## Codecs
 
----
+| Value | Name | Format | Use |
+|---|---|---|---|
+| `0x00` | PCM16 | 48 kHz / 16-bit / mono / uncompressed | Default — minimum encode/decode latency |
+| `0x01` | Opus | Variable bitrate | Bandwidth-constrained scenarios |
+| `0xFF` | Handshake | (no payload) | UDP return-path registration; see below |
 
-## 支持的 Codec
+### Frame size
 
-| 值 | 名称 | 格式 | 说明 |
-|----|------|------|------|
-| `0x00` | PCM16 | 48kHz / 16bit / mono / 无压缩 | 适合低延迟本地网络 |
-| `0x01` | Opus | 有损压缩（可变码率） | 适合互联网传输，降低带宽 |
-| `0xFF` | Handshake | — | 用于 UDP 打洞地址注册（见下方） |
+Server's `audio_frames_` parameter sets the canonical frame size. Production
+config (since v4.2.0):
 
-### PCM16 帧结构
+- **120 samples / 2.5 ms @ 48 kHz**
+- PCM16 payload = `120 × 2 = 240 bytes`
+- Opus payload = ~10–40 bytes (variable)
 
-- 帧长：**5 ms** = 240 samples @ 48kHz（默认配置，追求最低延迟）
-- 每帧字节数：240 × 2 = **480 bytes**
-- 服务器 `audio_frames_` 参数可调（如 480=10ms、960=20ms）
+The server mix tick matches at 2.5 ms.
 
-### Opus 帧结构
+### Handshake packet
 
-- 帧长：同 PCM16 配置（5ms/10ms/20ms）
-- 每帧字节数：可变，典型约 **20-60 bytes**（5ms），**80-120 bytes**（20ms）
-- 相比 PCM16 可节省 >90% 带宽
-
----
-
-## Handshake 包（UDP 打洞）
-
-`type = HANDSHAKE` 的包用于在 P2P 连接建立前，在信令服务器的协调下完成 UDP 打洞（STUN）。
+When a browser connects via the WSS audio path (`/mixer-udp`) or a native
+client comes up, the first packet it sends is a `codec = 0xFF` handshake
+with `dataSize = 0`. The proxy / mixer uses this to register the
+`(userId → session)` mapping so subsequent audio packets and the return
+broadcast know where to go.
 
 ```
 SPA1Packet {
     magic     = 0x53415031
-    type      = HANDSHAKE (1)
-    codec     = 0xFF (Handshake)
+    sequence  = 0
+    timestamp = 0
     userId    = "roomId:userId"
-    dataSize  = 0 (HANDSHAKE 无 payload)
-    ...其他字段保留
+    codec     = 0xFF
+    dataSize  = 0
+    reserved  = 0
+    payload   = (empty)
 }
 ```
 
-客户端发送 HANDSHAKE 包到对端，以触发对端接收，从而在双方都向对方地址发包的情况下绕过对称 NAT。
+## Audio RTT measurement (zero-bandwidth)
 
----
+`timestamp` is mirrored by the server, so each broadcast packet a client
+receives carries the timestamp of whatever client packet caused that mix
+tick. Round-trip latency:
 
-## 帧同步与时序
+```
+RTT_ms = (now_ms_low16 - rxPacket.timestamp) & 0xFFFF
+```
 
-- 默认每帧 5 ms（240 samples），接收端按 `sequence` 序号判断顺序
-- 服务器混音模式下，服务器以 5ms 定时器周期触发混音并广播
+EMA-smoothed on the client. Values > 10000 are dropped as outliers. Costs
+zero extra bytes (reuses an otherwise idle 16-bit field) and measures the
+real audio-path latency, not just signaling RTT.
 
-### 音频 RTT 测量
+## Control plane — TCP JSON
 
-`timestamp` 字段用于端到端音频延迟测量：
+The signaling server (TCP :9001) handles room create/join/leave + heartbeat.
+The mixer's TCP control channel (port 9002, accessible via WSS to
+`/mixer-tcp` for browsers) handles the per-session control flow.
 
-1. **客户端发送**: 写入 `currentTimeMs & 0xFFFF`（本地毫秒低 16 位）
-2. **服务器透传**: 记录每个房间最近收到的 timestamp，混音广播时原样写入返回包
-3. **客户端接收**: `RTT = (currentMsLow16 - rxTimestamp) & 0xFFFF`，带 EMA 平滑
+All messages are single-line JSON terminated by `\n`.
 
-16 位可覆盖 0~65535ms 范围，远超实际延迟。客户端丢弃 >10000ms 的异常值。
-此机制零额外带宽开销（复用已有的空闲字段），测量的是真实音频通路延迟而非信令通道延迟。
+### Signaling messages — client → server
 
----
-
-## 信令消息（TCP JSON）
-
-信令通道用于房间管理（创建/加入/离开）和 P2P SDP 交换。所有消息为单行 JSON，结尾以 `\n` 分隔。
-
-### 客户端 → 服务器
-
-#### `CREATE_ROOM` — 创建房间
+#### `CREATE_ROOM`
 ```json
-{
-  "type": "CREATE_ROOM",
-  "room_id": "room_abc123",
-  "user_id": "user_jane"
-}
+{ "type": "CREATE_ROOM", "room_id": "ABCD12", "user_id": "user_jane" }
 ```
 
-#### `JOIN_ROOM` — 加入房间（同时携带本地 UDP 地址）
+#### `JOIN_ROOM`
 ```json
-{
-  "type": "JOIN_ROOM",
-  "room_id": "room_abc123",
-  "user_id": "user_john",
-  "ip": "192.168.1.100",
-  "port": 5000
-}
+{ "type": "JOIN_ROOM", "room_id": "ABCD12", "user_id": "user_john" }
 ```
-> `ip` / `port` 为客户端监听 UDP 的地址，供 P2P 打洞使用。
 
-#### `LEAVE_ROOM` — 离开房间
+#### `LEAVE_ROOM`
 ```json
-{
-  "type": "LEAVE_ROOM",
-  "room_id": "room_abc123",
-  "user_id": "user_john"
-}
+{ "type": "LEAVE_ROOM", "room_id": "ABCD12", "user_id": "user_john" }
 ```
 
-#### `P2P_OFFER` — 发起 P2P 连接（WebRTC SDP offer）
+#### `HEARTBEAT`
 ```json
-{
-  "type": "P2P_OFFER",
-  "room_id": "room_abc123",
-  "from_user": "user_jane",
-  "to_user": "user_john",
-  "sdp": "v=0\r\no=..."
-}
+{ "type": "HEARTBEAT", "user_id": "user_jane" }
 ```
+Browser clients send every 5 s. Native clients send every 30 s. Required
+to prevent CF Tunnel idle disconnect on the api.tonel.io path.
 
-#### `P2P_ANSWER` — 响应 P2P 连接（WebRTC SDP answer）
+### Signaling messages — server → client
+
+#### `CREATE_ROOM_ACK`, `JOIN_ROOM_ACK`
 ```json
-{
-  "type": "P2P_ANSWER",
-  "room_id": "room_abc123",
-  "from_user": "user_john",
-  "to_user": "user_jane",
-  "sdp": "v=0\r\no=..."
-}
+{ "type": "CREATE_ROOM_ACK", "room_id": "ABCD12", "user_id": "user_jane", "success": true }
 ```
 
-#### `P2P_ICE` — 交换 ICE 候选
+#### `PEER_LIST` / `PEER_JOINED` / `PEER_LEFT`
+Currently broadcast by the signaling server but **not used by the production
+clients for audio transport** — the architecture is mixer-only, so peer
+addresses don't need to be exchanged for direct connection. Clients use the
+peer list only for UI (showing who's in the room).
+
+#### `ERROR`
 ```json
-{
-  "type": "P2P_ICE",
-  "room_id": "room_abc123",
-  "from_user": "user_jane",
-  "to_user": "user_john",
-  "candidate": "candidate:1 1 UDP 2122252543 192.168.1.100 5000 typ host"
-}
+{ "type": "ERROR", "room_id": "ABCD12", "user_id": "user_john", "message": "Room is full" }
 ```
 
-#### `HEARTBEAT` — 保活
+#### `SESSION_REPLACED`
+Sent when a duplicate `userId` joins (typically: same user opening a second
+tab / device). The earlier session is cleanly evicted; clients route the
+user back to the home page with a notice.
+
+### Mixer control messages — client → mixer (via /mixer-tcp)
+
+#### `MIXER_JOIN`
 ```json
-{
-  "type": "HEARTBEAT",
-  "user_id": "user_jane"
-}
+{ "type": "MIXER_JOIN", "room_id": "ABCD12", "user_id": "user_jane" }
 ```
-> 建议每 30 秒发送一次。
+Sent immediately after both /mixer-tcp and /mixer-udp WSS sockets are open
+(or the WT session is up). Server replies with `MIXER_JOIN_ACK` containing
+the current per-user tuning (`jitter_target`, `jitter_max_depth`).
 
-#### `MIXER_REGISTER` — WebRTC mixer proxy 注册
+#### `PING`
 ```json
-{
-  "type": "MIXER_REGISTER"
-}
+{ "type": "PING" }
 ```
-> webrtc-mixer-proxy 连接到信令服务器后发送，注册自身以接收 SDP/ICE 转发。
+Sent every 3 s. Server replies with `PONG`. Used to measure control-channel
+RTT for the in-room latency display.
 
-#### `MIXER_OFFER` — 浏览器发送 WebRTC SDP offer
+#### `MIXER_TUNE`
 ```json
-{
-  "type": "MIXER_OFFER",
-  "user_id": "user_jane",
-  "sdp": "v=0\r\no=..."
-}
+{ "type": "MIXER_TUNE", "user_id": "user_jane", "jitter_target": 2, "jitter_max_depth": 33 }
 ```
-> 信令服务器原样转发给已注册的 mixer proxy。
+Sent from the in-room debug panel when the user drags the jitter sliders.
+Server clamps + applies + acks.
 
-#### `MIXER_ICE` — 浏览器发送 ICE 候选
+#### `PEER_GAIN`
 ```json
-{
-  "type": "MIXER_ICE",
-  "user_id": "user_jane",
-  "candidate": "candidate:1 1 UDP ...",
-  "sdpMid": "0"
-}
+{ "type": "PEER_GAIN", "user_id": "user_jane", "peer_id": "user_bob", "gain": 0.8 }
 ```
-> 信令服务器原样转发给 mixer proxy。
+Per-listener gain on a specific peer's track in the mix.
 
-#### `MIXER_ANSWER` — mixer proxy 返回 SDP answer（由 proxy 发送）
-```json
-{
-  "type": "MIXER_ANSWER",
-  "target_user_id": "user_jane",
-  "sdp": "v=0\r\no=..."
-}
-```
-> 信令服务器按 `target_user_id` 转发给对应浏览器。
+### Mixer messages — mixer → client (via /mixer-tcp)
 
-#### `MIXER_ICE_RELAY` — mixer proxy 返回 ICE 候选（由 proxy 发送）
-```json
-{
-  "type": "MIXER_ICE_RELAY",
-  "target_user_id": "user_jane",
-  "candidate": "candidate:1 1 UDP ...",
-  "sdpMid": "0"
-}
-```
-> 信令服务器按 `target_user_id` 转发给对应浏览器。
+| Type | Notes |
+|---|---|
+| `MIXER_JOIN_ACK` | Includes `jitter_target`, `jitter_max_depth` defaults |
+| `PONG` | Reply to `PING` |
+| `MIXER_TUNE_ACK` | Reply to `MIXER_TUNE` (clamped values) |
+| `LEVELS` | `{type:"LEVELS", levels:{user_id: 0.0–1.0, ...}}` — broadcast at ~20 Hz |
+| `SESSION_REPLACED` | Same semantics as signaling-server's |
 
-### 服务器 → 客户端
-
-#### `CREATE_ROOM_ACK` — 创建房间确认
-```json
-{
-  "type": "CREATE_ROOM_ACK",
-  "room_id": "room_abc123",
-  "user_id": "user_jane",
-  "success": true
-}
-```
-
-#### `JOIN_ROOM_ACK` — 加入房间确认（含当前房间成员列表）
-```json
-{
-  "type": "JOIN_ROOM_ACK",
-  "room_id": "room_abc123",
-  "user_id": "user_john",
-  "success": true,
-  "peers": [
-    { "user_id": "user_jane", "ip": "192.168.1.101", "port": 5000 }
-  ]
-}
-```
-
-#### `PEER_LIST` — 房间成员列表（其他成员加入后主动推送）
-```json
-{
-  "type": "PEER_LIST",
-  "room_id": "room_abc123",
-  "peers": [
-    { "user_id": "user_jane", "ip": "192.168.1.101", "port": 5000 },
-    { "user_id": "user_bob",  "ip": "10.0.0.5",      "port": 5001 }
-  ]
-}
-```
-
-#### `PEER_JOINED` — 新成员加入通知
-```json
-{
-  "type": "PEER_JOINED",
-  "room_id": "room_abc123",
-  "peer": { "user_id": "user_bob", "ip": "10.0.0.5", "port": 5001 }
-}
-```
-
-#### `PEER_LEFT` — 成员离开通知
-```json
-{
-  "type": "PEER_LEFT",
-  "room_id": "room_abc123",
-  "user_id": "user_bob"
-}
-```
-
-#### `ERROR` — 错误响应
-```json
-{
-  "type": "ERROR",
-  "room_id": "room_abc123",
-  "user_id": "user_john",
-  "message": "Room is full"
-}
-```
-
----
-
-## 传输架构
+## Transport architecture
 
 ```
-┌─────────────┐         TCP (信令)          ┌──────────────────┐
-│  Desktop    │◄────────────────────────────►│  Signaling Server│
-│  Client A   │                             │  (uv TCP)        │
-└──────┬──────┘                             └────────┬─────────┘
-       │                                               │
-       │  UDP (SPA1 音频)                              │ TCP (JSON)
-       │  P2P Mesh 或                                │
-       │  Mixer Server                               │
-       ▼                                              ▼
-┌─────────────┐         UDP (SPA1 音频)          ┌──────────────────┐
-│  Desktop    │◄────────────────────────────►│  Mixer Server    │
-│  Client B   │        (混音后回传)          │  (uv UDP)        │
-└─────────────┘                             └──────────────────┘
+┌───────────────────┐    JSON over TCP/WSS    ┌──────────────────┐
+│   Web client      │◄──────────────────────►│  signaling_server │
+│   (tonel.io)      │   wss://api.tonel.io   │  :9001            │
+│                   │                         └──────────────────┘
+│   Tonel-MacOS     │
+│   (native macOS)  │
+└─────────┬─────────┘
+          │  SPA1 binary frames (every 2.5 ms)
+          │
+          │   wss://srv.tonel.io/mixer-tcp  (control)
+          │   wss://srv.tonel.io/mixer-udp  (audio)  ─── browser
+          │   raw TCP :9002, raw UDP :9003           ─── native
+          ▼
+   ┌─────────────────────────────────────┐
+   │           mixer_server               │
+   │   per 2.5 ms tick:                   │
+   │     for each user U:                 │
+   │       broadcast(N−1 mix excluding U) │
+   └─────────────────────────────────────┘
 ```
 
-### 传输路径说明
+There is no P2P / mesh / direct-client mode. The topology is always a star
+through the mixer.
 
-| 场景 | 传输路径 | 说明 |
-|------|----------|------|
-| P2P 模式（2-4人）| Client → Client（直连 UDP）| Mesh 网状拓扑，每对成员直连 |
-| Mixer 模式（≥5人或 P2P 失败）| Client → Server → Client（混音后回传）| 星形拓扑，服务器混音后分发 |
+## Version history
 
----
+| Version | Header size | Notes |
+|---|---|---|
+| v1.0 | 44 bytes | Initial 32-byte userId |
+| v1.0a | 44 bytes | Added type + level fields (later removed) |
+| **P1-1** | **76 bytes** | userId expanded to 64 bytes; type/level removed; level moved to JSON `LEVELS` message |
+| P1-2 | 76 bytes | `timestamp` repurposed for RTT measurement (server echo) |
 
-## 版本历史
+## Implementation references
 
-| 版本 | 头长 | userId | 变更 |
-|------|------|--------|------|
-| v1.0 | 44 字节 | 32 字节 | 初始版本 |
-| v1.0a | 44 字节 | 30 字节 | 新增 type、level 字段（已废弃） |
-| **P1-1** | **76 字节** | **64 字节** | userId 扩展至 64 字节，移除 type/level 字段，电平改为 TCP LEVELS 消息 |
-| **P1-2** | 76 字节 | 64 字节 | timestamp 字段改为客户端 RTT 测量用途（服务器透传） |
+- **Server**: `server/src/mixer_server.h` — `struct SPA1Packet` declaration
+- **Server**: `server/src/mixer_server.cpp` — packet handling, mix tick, broadcast
+- **Web**: `web/src/services/audioService.ts` — `buildSpa1Packet()`, `parseSpa1Header()`
+- **Native**: `Tonel-MacOS/TonelMacOS/` — Swift packing
+- **WSS proxy**: `server/proxy/ws-mixer-proxy.js` — wraps TCP :9002 + UDP :9003 for browser
+- **WT proxy**: `wt-mixer-proxy/` (Go) — WebTransport bridge for `/new` path
 
----
+### Constants
 
-## 实现参考
-
-- **服务端头文件**：`server/src/mixer_server.h` — `struct SPA1Packet`
-- **Web 客户端**：`web/src/services/audioService.ts` — `buildSpa1Packet()` / `parseSpa1Header()`
-- **WebRTC 代理**：`web/webrtc-mixer-proxy.js` — SPA1 userId 解析（UDP 路由）
-- **常量定义**：
-  - `SPA1_MAGIC = 0x53415031`
-  - `SPA1_CODEC_PCM16 = 0`
-  - `SPA1_CODEC_OPUS = 1`
-  - `SPA1_HEADER_SIZE = 76`（P1-1）
-  - `MAX_PAYLOAD_SIZE = 1356`（dataSize 上限）
+```
+SPA1_MAGIC          = 0x53415031
+SPA1_HEADER_SIZE    = 76         // (P1-1)
+SPA1_CODEC_PCM16    = 0x00
+SPA1_CODEC_OPUS     = 0x01
+SPA1_CODEC_HANDSHAKE= 0xFF
+MAX_PAYLOAD_SIZE    = 1356       // dataSize cap, prevents memory overflow
+```

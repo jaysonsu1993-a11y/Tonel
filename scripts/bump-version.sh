@@ -40,7 +40,6 @@ fi
 # 需要更新的文件列表
 FILES=(
     "CMakeLists.txt"
-    "Tonel-Desktop-AppKit/CMakeLists.txt"
     "server/CMakeLists.txt"
     "web/package.json"
     "config.schema.json"
@@ -76,26 +75,21 @@ sed -i '' "s/project(Tonel VERSION $CURRENT_VERSION/project(Tonel VERSION $NEW_V
 sed -i '' "s/message(STATUS \"Tonel v$CURRENT_VERSION\")/message(STATUS \"Tonel v$NEW_VERSION\")/" CMakeLists.txt
 echo "   ✅ CMakeLists.txt"
 
-# 2. Tonel-Desktop-AppKit/CMakeLists.txt
-sed -i '' "s/VERSION $CURRENT_VERSION/VERSION $NEW_VERSION/" Tonel-Desktop-AppKit/CMakeLists.txt
-echo "   ✅ Tonel-Desktop-AppKit/CMakeLists.txt"
-
-# 3. server/CMakeLists.txt
+# 2. server/CMakeLists.txt
 sed -i '' "s/VERSION $CURRENT_VERSION/VERSION $NEW_VERSION/" server/CMakeLists.txt
 echo "   ✅ server/CMakeLists.txt"
 
-# 4. web/package.json
+# 3. web/package.json
 sed -i '' "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" web/package.json
 echo "   ✅ web/package.json"
 
-# 5. config.schema.json
+# 4. config.schema.json
 sed -i '' "s/\"default\": \"$CURRENT_VERSION\"/\"default\": \"$NEW_VERSION\"/" config.schema.json
 echo "   ✅ config.schema.json"
 
 echo ""
 echo "🔍 验证:"
 echo "   Root CMake:   $(sed -nE 's/^project\(Tonel VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt | head -1)"
-echo "   AppKit CMake: $(sed -nE 's/^project\(Tonel-Desktop-AppKit VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' Tonel-Desktop-AppKit/CMakeLists.txt | head -1)"
 echo "   Server CMake: $(sed -nE 's/^project\(TonelServer VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' server/CMakeLists.txt | head -1)"
 echo "   Web package:  $(sed -nE 's/.*"version": "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' web/package.json | head -1)"
 echo "   Config schema:$(sed -nE 's/.*"default": "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' config.schema.json | head -1)"

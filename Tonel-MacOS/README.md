@@ -1,17 +1,23 @@
-# Tonel for macOS (a.k.a. "macos app")
+# Tonel for macOS
 
-A from-scratch SwiftUI rebuild of the Tonel desktop client, replacing the legacy
-ObjC++ `Tonel-Desktop-AppKit/`. Functional parity targets the **web client room
-UI/interaction/audio**; transport follows **scheme A** (PCM16 / UDP direct to
-酷番云 v5).
+The native SwiftUI desktop client for Tonel. **The only desktop client** —
+the older `Tonel-Desktop` (JUCE) and `Tonel-Desktop-AppKit` (ObjC++)
+projects were removed in v5.1.18.
+
+Feature parity target: the web client room UI / audio behavior. Transport:
+PCM16 over raw TCP (control) + UDP (audio), bypassing all WSS/WT proxies.
 
 * macOS 14+, Swift 5.10, SwiftUI
 * Pure Swift networking (Network.framework) and audio (AVFoundation /
-  Core Audio)
-* Server: 42.240.163.172 (Kufan v5), TCP:9002 control, UDP:9003 audio
-* Signaling: `wss://api.tonel.io/signaling`
-* Audio wire: PCM16 LE, mono, 48 kHz, **120 samples / 2.5 ms / 240-byte payload**,
-  76-byte SPA1 header — bit-exact match with the web client (`audioService.ts`)
+  Core Audio) — no third-party deps
+* Server: **8.163.21.207 (Aliyun)**, TCP :9002 control, UDP :9003 audio
+  — *not* kufan. The kufan box's hypervisor has known UDP-burst issues
+  (memory `project_kufan_udp_burst`) that breaks the WT path; native
+  raw-UDP traffic stays on Aliyun where the path is clean.
+* Signaling: `wss://api.tonel.io/signaling` (same as web)
+* Audio wire: PCM16 LE, mono, 48 kHz, **120 samples / 2.5 ms / 240-byte
+  payload**, 76-byte SPA1 header — bit-exact match with the web client
+  (`audioService.ts`)
 * Login: phone-number stub (mirrors web `LoginPage.tsx` — no real OTP yet)
 
 ## Build
@@ -36,11 +42,6 @@ TonelMacOS/
   Views/      LoginView, HomeView, RoomView, ChannelStripView, LedMeterView
   Resources/  Info.plist, Assets
 ```
-
-## Why a new project
-
-The legacy `Tonel-Desktop-AppKit/` is kept as historical reference — see its
-README. New work happens here.
 
 ## Branching & versioning
 

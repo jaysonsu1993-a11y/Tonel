@@ -16,13 +16,13 @@ the server should look like**, in contrast to `deploy/` which describes
 | `scripts/start-mixer.sh` | `/opt/tonel/scripts/start-mixer.sh` (called by PM2) | `deploy/server.sh --component=binary` |
 | `scripts/start-signaling.sh` | `/opt/tonel/scripts/start-signaling.sh` (manual debug only) | `deploy/server.sh --component=binary` |
 
-## v5.0.0+ dual-hostname architecture
+## Two-server, dual-hostname architecture
 
 Each production server's nginx serves **both** `srv.tonel.io` and
 `srv-new.tonel.io` on `:443`, distinguished by SNI. Each server's
 cloudflared has **both** `api.tonel.io` and `api-new.tonel.io` ingress
-rules forwarding to the local `:9004`. Same `ops/` deploys to
-either box; **DNS picks who handles which hostname**:
+rules forwarding to the local `:9004`. The same `ops/` configs deploy
+to either box; **DNS picks who handles which hostname**:
 
 ```
                                 primary    fallback
@@ -32,10 +32,8 @@ api.tonel.io       (CNAME) →    tonel-koufan tunnel ⇒ ws-proxy on 酷番云
 api-new.tonel.io   (CNAME) →    tonel-tunnel tunnel ⇒ ws-proxy on Aliyun
 ```
 
-This symmetry lets us flip primary↔fallback by swapping CF DNS
-records (4 edits, < 5 min cutover, what we did at v5.0.0). It also
-means **`ops/` is the source of truth for both servers** — Aliyun
-is no longer "managed manually". To re-align Aliyun to current
+This symmetry means **`ops/` is the source of truth for both servers**
+— neither box is managed manually. To re-align Aliyun to current
 `ops/`, override env inline:
 
 ```bash

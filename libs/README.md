@@ -1,37 +1,18 @@
 # Tonel Third-Party Libraries
 
-This directory contains third-party dependencies used by Tonel.
+Third-party dependencies vendored or referenced by the Tonel build.
 
 ## miniaudio
 
 - **Location**: `./miniaudio/`
 - **Version**: master
-- **License**: MIT (free, can be used in closed-source projects)
+- **License**: MIT
 - **Website**: https://miniaud.io
-- **Purpose**: Lightweight audio engine (used by Tonel-Desktop-AppKit)
-
-## JUCE (Legacy)
-
-- **Location**: `~/JUCE` (fetched via CMake FetchContent)
-- **Version**: 8.x
-- **License**: JUCE License (commercial paid / GPLv3)
-- **Website**: https://juce.com
-- **Purpose**: Audio engine, GUI, networking (used by legacy Tonel-Desktop JUCE client only)
-- **Status**: Legacy -- AppKit client (miniaudio) is the recommended build
-
-## Usage
-
-```c
-#define MINIAUDIO_IMPLEMENTATION
-#include "miniaudio/miniaudio.h"
-```
-
-## License Summary
-
-| Library | License | Closed-Source | Commercial |
-|---------|---------|---------------|------------|
-| JUCE | GPL/Commercial | No (GPL) / Yes (paid) | Yes (paid) |
-| miniaudio | MIT | Yes | Yes |
+- **Purpose**: Lightweight cross-platform audio engine. Vendored from
+  the legacy `Tonel-Desktop-AppKit` era. The current macOS client
+  (`Tonel-MacOS/`) uses Apple's AVFoundation / Core Audio directly
+  and does not depend on miniaudio. Kept here as an option for
+  potential future cross-platform desktop work.
 
 ## Updating miniaudio
 
