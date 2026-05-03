@@ -9,6 +9,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.9] - 2026-05-03
+
+### Removed — `mixerRttProbe` (the real fix for "Control WebSocket 连接失败")
+
+The chain of fixes through v5.1.6 → v5.1.7 → v5.1.8 each tried a
+narrower workaround for the same bug: `mixerRttProbe` — a homepage
+singleton that opened its **own** WSS to the mixer's `/mixer-tcp`
+just to display a more "realistic" RTT figure on the home page —
+overlapped with `audioService.connectMixer`'s `/mixer-tcp` socket on
+every room entry. The酷番云 hypervisor / WAF in front of nginx saw
+two concurrent WSS handshakes to the same path from the same client
+and dropped one. v5.1.6 added a synchronous `mixerRttProbe.stop()`
+that didn't actually wait for the close. v5.1.7 made it await the
+close. v5.1.8 awaited the close on retry-cleanup too. None of them
+ever fully eliminated the race window, and v5.1.8's added
+complexity made the symptoms worse rather than better — the user
+reported "无论怎么点启用麦克风都没办法正常工作" right after it shipped.
+
+The real fix is to delete the second socket. `mixerRttProbe` was a
+cosmetic add to the homepage hero figure (introduced in v5.0.3) and
+worth far less than reliable room entry. The hero number is now
+animated around a static baseline (~22 ms — the typical Tonel
+end-to-end latency on a Chinese network); the **real** latency a
+user cares about — their own current network, on their own current
+device — already lives in the in-room latency strip. After this
+release there is exactly one /mixer-tcp socket per client, opened by
+audioService when the user joins a room, with nothing to race against.
+
+The `connectMixer` cleanup goes back to the v5.1.5 form: a plain
+synchronous `ws.close()` for any leftover transports from a previous
+attempt. The await-CLOSED ceremony added in v5.1.8 is unnecessary
+once there is no concurrent socket from another part of the app.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerRttProbe.ts` | **Deleted** (was added v5.0.3, restored v5.1.4) |
+| `web/src/pages/HomePage.tsx` | `LiveLatency` no longer subscribes to a probe — plain animated placeholder around a static baseline |
+| `web/src/services/audioService.ts` | Drops `mixerRttProbe` import + `await mixerRttProbe.stop()`; reverts v5.1.8's `awaitClose` cleanup ceremony to a plain synchronous `close()` |
+
 ## [5.1.8] - 2026-05-03
 
 ### Fixed — "click 启用麦克风 twice" on first room entry

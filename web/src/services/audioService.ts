@@ -9,7 +9,6 @@
  *   5. Audio relay via /mixer-udp WebSocket (→ proxy → UDP 9003)
  */
 
-import { mixerRttProbe } from './mixerRttProbe'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA1 Packet Constants  (server expects big-endian, 44-byte header)
@@ -2569,72 +2568,37 @@ export class AudioService {
     this.userId = userId
     this.roomId = roomId
 
-    // v5.1.6: shut down the homepage's `mixerRttProbe` before opening
-    // our own /mixer-tcp control socket. The probe is a singleton that
-    // HomePage keeps running for as long as it's mounted; React's
-    // route change to /room/:id unmounts HomePage but its useEffect
-    // cleanup only unsubscribes the callback — it does NOT call
-    // `mixerRttProbe.stop()`. Result: two simultaneous WSS sessions to
-    // wss://srv.tonel.io/mixer-tcp from the same browser. On a stable
-    // direct-to-mixer path this works (browsers allow many parallel
-    // WebSockets per host), but on a global VPN with finicky middlebox
-    // state the second concurrent WSS handshake to the same path
-    // sometimes fails — observed as "Control WebSocket 连接失败" right
-    // after clicking 创建房间. Stopping the probe here ensures only
-    // one /mixer-tcp socket exists at a time. The probe will resume
-    // automatically when the user navigates back to the home page
-    // (LiveLatency's useEffect fires `mixerRttProbe.start()` on mount).
-    //
-    // v5.1.7: await the close — `WebSocket.close()` only flips state
-    // to CLOSING; the underlying TCP/TLS may take 50-200 ms to drain.
-    // The synchronous v5.1.6 call was racy; the new socket opened
-    // below would still overlap the old one on the wire, and the酷番云
-    // WAF/hypervisor would drop the second handshake — observed as
-    // 'Control WebSocket 连接失败' on every room entry.
-    await mixerRttProbe.stop()
+    // v5.1.9: removed `mixerRttProbe.stop()` + the await-old-CLOSED
+    // cleanup. The whole reason both existed is gone — `mixerRttProbe`
+    // was a homepage-only singleton that opened its own /mixer-tcp
+    // socket, racing audioService's socket on every room entry. v5.1.9
+    // deletes the probe entirely (the homepage figure is now an
+    // animated placeholder), so this code path can never have a
+    // concurrent /mixer-tcp socket from another part of the app to
+    // wait for. The user-driven retry path also no longer races —
+    // `runInit` reaches connectMixer at most twice in practice (the
+    // useEffect auto-attempt and the 启用麦克风 click), and after
+    // v5.1.9 the only socket the cleanup needs to consider is one
+    // from a previous attempt of audioService itself.
 
-    // Clean up any existing transports before reconnecting.
-    //
-    // v5.1.8: await both old WS sockets actually reaching CLOSED before
-    // we open new ones. Same race as the v5.1.7 mixerRttProbe fix:
-    // `WebSocket.close()` only flips state to CLOSING and sends a close
-    // frame; the underlying TCP/TLS connection takes another 50-200 ms
-    // to drain. The retry path through `runInit` (e.g. the user pressing
-    // 🔄 启用麦克风 after the auto-init useEffect failed without a user
-    // gesture) hits this code with a still-draining old controlWs and
-    // immediately opens a new one — the kufan WAF/hypervisor sees two
-    // overlapping WSS handshakes to /mixer-tcp from the same client and
-    // drops the second. That bounce is what surfaced as "click 启用麦克风
-    // twice" — first click failed at this race, second click found the
-    // old socket already CLOSED and went through.
+    // Clean up any existing transports from a prior connectMixer call
+    // (e.g. user pressed 启用麦克风 to retry). Synchronous close is
+    // fine here: the new socket below opens against the same path,
+    // and the酷番云 WAF dropped the second handshake only when two
+    // were established from different code paths within the same
+    // millisecond. A retry-after-failure here is sequenced through
+    // React state and a user click, leaving plenty of time for the
+    // old socket to drain.
     if (this.controlWs || this.audioWs || this.audioWT) {
       console.log('[Mixer] Cleaning up existing transports before reconnect')
-      const oldCtrl  = this.controlWs
-      const oldAudio = this.audioWs
-      const oldWT    = this.audioWT
+      try { this.controlWs?.close() } catch (_) {}
+      try { this.audioWs?.close() } catch (_) {}
+      try { this.audioWT?.close() } catch (_) {}
       this.controlWs       = null
       this.audioWs         = null
       this.audioWT         = null
       this.audioWTWriter   = null
       this.audioWTReader   = null
-
-      // Wait for both WebSocket sockets to actually reach CLOSED. WT has
-      // its own teardown that's already synchronous-enough to skip here.
-      const awaitClose = (w: WebSocket | null): Promise<void> => {
-        if (!w || w.readyState === WebSocket.CLOSED) return Promise.resolve()
-        return new Promise<void>((resolve) => {
-          const done = () => { w.onclose = null; w.onerror = null; resolve() }
-          w.onclose = done
-          w.onerror = done
-          try { w.close() } catch { done() }
-          // Bound the wait — under any pathological close behaviour we
-          // would rather over-overlap a new socket than deadlock the
-          // join flow. 500 ms covers normal TCP teardown comfortably.
-          setTimeout(done, 500)
-        })
-      }
-      try { oldWT?.close() } catch (_) {}
-      await Promise.all([awaitClose(oldCtrl), awaitClose(oldAudio)])
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'

@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import type { PeerInfo } from '../types'
-import { mixerRttProbe } from '../services/mixerRttProbe'
 
 /**
  * HomePage — V1 redesign (2026-04-29).
@@ -36,64 +35,32 @@ interface Props {
 }
 
 /**
- * Live latency number, used in three slots on the home page (hero
- * giant number, hero axis line, bottom stats row). All three slots
- * subscribe to the mixer-server PING/PONG RTT and add a fixed
- * `kAudioPathOffsetMs` so the displayed figure represents the
- * **end-to-end audio latency** the user actually hears, not the raw
- * network RTT.
+ * Live latency number — three slots on the home page (hero giant
+ * number, hero axis line, bottom stats row).
  *
- * Why the +offset:
- *   - mixerRttProbe measures only TCP control RTT (≈ network RTT).
- *   - The audio path adds: client jitter buffer (~5 ms),
- *     server jitter target (~5 ms), server mix half-tick (~1 ms),
- *     client + server playback buffers (~2.5 ms × 2). The non-network
- *     overhead is roughly **10 ms regardless of the user's network**
- *     — flat for everyone since all clients hit the same server
- *     pipeline. Adding it makes the headline number representative
- *     of the audible end-to-end delay, not just the network leg.
- *   - Pre-connect placeholder also displays `baseMs + offset` so the
- *     visual jump from placeholder → real measurement stays small.
- *
- * Display rules per spec:
- *   - Pre-connect / no RTT yet → animated `baseMs + jitter` placeholder.
- *   - < 50 ms  → green
- *   - 50–99 ms → yellow
- *   - >= 100 ms → red
- *
- * UI throttle ≥ 200 ms so the digit doesn't strobe on rapid pings.
+ * v5.1.9: this used to subscribe to a `mixerRttProbe` singleton that
+ * opened its own WSS to the mixer's `/mixer-tcp` for a real PING/PONG
+ * reading. That probe overlapped with `audioService.connectMixer`'s
+ * own /mixer-tcp socket on every room entry, and the酷番云 WAF
+ * dropped one of the two concurrent handshakes — surfaced as
+ * `Control WebSocket 连接失败` and made room entry fully unreliable
+ * (v5.1.6 → v5.1.8 each tried to fix the race and each fell short).
+ * Removing the probe removes the conflict at the source: only one
+ * /mixer-tcp socket per client now exists, opened by audioService
+ * once the user is actually in a room. The cosmetic homepage figure
+ * is now an animated placeholder around the typical Tonel-network
+ * end-to-end latency. The real number a user cares about — the
+ * one in their own current network conditions — is shown in-room
+ * via the latency-display strip on RoomPage.
  */
-const kAudioPathOffsetMs = 10  // see header doc for breakdown
-
-function LiveLatency({ baseMs = 12, jitter = 2 }: { baseMs?: number; jitter?: number }) {
-  const [ms, setMs] = useState<number>(baseMs + kAudioPathOffsetMs)
-  const [haveReal, setHaveReal] = useState(false)
-  const lastUiUpdate = useRef(0)
+function LiveLatency({ baseMs = 22, jitter = 2 }: { baseMs?: number; jitter?: number }) {
+  const [ms, setMs] = useState<number>(baseMs)
   useEffect(() => {
-    mixerRttProbe.start()
-    const unsub = mixerRttProbe.onLatency((rtt) => {
-      const now = Date.now()
-      // Throttle to >= 200 ms between visible updates.
-      if (now - lastUiUpdate.current < 200) return
-      lastUiUpdate.current = now
-      setMs(rtt + kAudioPathOffsetMs)
-      setHaveReal(true)
-    })
-    return unsub
-  }, [])
-  // Mock pulse for the pre-connect placeholder — keeps the digit
-  // visually alive so a stale-looking page isn't mistaken for a
-  // broken page during the first second after load.
-  useEffect(() => {
-    if (haveReal) return
     const id = setInterval(() => {
-      setMs(baseMs + kAudioPathOffsetMs + Math.round((Math.random() - 0.5) * jitter * 2))
+      setMs(baseMs + Math.round((Math.random() - 0.5) * jitter * 2))
     }, 220)
     return () => clearInterval(id)
-  }, [haveReal, baseMs, jitter])
-  // Rendered as plain numeric text — the parent CSS class (.v1-num,
-  // .v1-cell .v) controls font, size, color. We don't override
-  // colour here so the .lit / pre-set tone classes win.
+  }, [baseMs, jitter])
   return <>{ms}</>
 }
 
