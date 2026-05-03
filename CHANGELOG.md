@@ -9,6 +9,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.19] - 2026-05-04
+
+### Removed — dead WebRTC / P2P code paths across server, web, and macOS
+
+Sweep companion to v5.1.18 (which deleted the legacy desktop client
+dirs and rewrote docs to drop P2P narrative). v5.1.19 removes the
+matching dead code that was still in the source tree.
+
+#### Server (`signaling_server`)
+
+* **Deleted handlers**: `MIXER_REGISTER`, `MIXER_OFFER`, `MIXER_ICE`,
+  `MIXER_ANSWER`, `MIXER_ICE_RELAY` — these were the relay endpoints
+  for a discontinued `webrtc-mixer-proxy` architecture (last touched
+  early 2026, never live in production for years). No active client
+  sends these messages.
+* **Removed `mixer_ctx_` member** + the `WebRTC mixer proxy disconnected`
+  branch in `on_close`. The whole "mixer proxy registers itself" flow
+  is gone.
+* **Removed `User::ip` and `User::udp_port`** — they were "client's
+  advertised IP/port for P2P punch-hole". The mixer-only architecture
+  doesn't use them. `process_join_room` no longer takes `ip`/`port`
+  arguments. `SimpleJson::ip`, `SimpleJson::port`, and
+  `SimpleJson::extract_int` are gone.
+* **Simplified `make_peer_list`** — now takes `vector<string>` instead
+  of `vector<tuple<string,string,int>>`; serialized PEER_LIST now emits
+  `[{"user_id":"..."}]` instead of `[{"user_id":"...","ip":"...","port":N}]`.
+* **Simplified `make_peer_joined`** — drops `ip`/`port` arguments;
+  emitted PEER_JOINED is now `{type, room_id, user_id}` only.
+* Trimmed unused `<memory>` and `<vector>` includes from the header.
+
+#### Web client
+
+* **Deleted `signalService` mixer-relay senders**: `sendMixerOffer()`,
+  `sendMixerIce()` removed. Their wire types `MIXER_ANSWER` /
+  `MIXER_ICE_RELAY` removed from the `SignalMessage` union.
+* **`signalService.joinRoom` signature**: dropped `ip` and `port`
+  parameters. Callers in `App.tsx` (`handleJoinRoom`, `submitDeepLink`)
+  and `useSignal.joinRoom` updated accordingly.
+* **`PeerInfo` type cleaned**: dropped `ip` and `port` fields. Also
+  deleted the unused exported types `IceCandidateMessage`, `RTCConfig`,
+  `RoomMember`, `SignalingMessage`, `JoinRoomMessage`,
+  `PeerListMessage`, `PeerJoinedMessage`.
+* **`useSignal` hook**: removed type-cast boilerplate that worked
+  around the now-gone polymorphic `SignalingMessage` interface; the
+  `SignalMessage` discriminated-union is enough for TypeScript to
+  narrow each branch correctly.
+* **Stale TODO comment removed** from `audioService.handleMixerMessage`
+  ("RTT measurement disabled — Will re-implement"). RTT IS in fact
+  measured on the control channel via `startPing`/PONG; the TODO was
+  about a different historical attempt, no longer accurate.
+
+#### macOS client (`Tonel-MacOS`)
+
+* `PeerInfo` struct dropped `ip` and `port` fields.
+* `joinRoom()` and the reconnect-replay JOIN_ROOM no longer send
+  `ip: "0.0.0.0"`, `port: 9003` placeholders.
+* `parsePeer` and the PEER_JOINED parser no longer read `ip`/`port`
+  from the wire.
+
+#### Wire-protocol compatibility
+
+A long-running deployed server gracefully ignores `ip`/`port` fields
+on incoming `JOIN_ROOM` messages — older clients (if any) keep working.
+A long-running deployed client gracefully tolerates missing `ip`/`port`
+fields on PEER_LIST / PEER_JOINED — older servers (if any) also keep
+working. Therefore: **no coordinated client/server upgrade required**.
+
+### Files
+
+| File | Change |
+|---|---|
+| `server/src/signaling_server.{h,cpp}` | Dropped `mixer_ctx_`, all `MIXER_*` relay handlers, `extract_int` JSON helper, `ip`/`port` from `SimpleJson` and `process_join_room`/`make_peer_*`. Tightened includes. |
+| `server/src/user.h` | Dropped `ip` / `udp_port` from `User`. |
+| `web/src/types/index.ts` | Trimmed `PeerInfo`; deleted unused `SignalingMessage` / `JoinRoomMessage` / `PeerListMessage` / `PeerJoinedMessage` / `IceCandidateMessage` / `RTCConfig` / `RoomMember` exports. |
+| `web/src/services/signalService.ts` | Trimmed `SignalMessage` union; dropped `sendMixerOffer`/`sendMixerIce`; `joinRoom` no longer takes `ip`/`port`; reconnect replay drops the placeholder fields. |
+| `web/src/hooks/useSignal.ts` | Dropped `SignalingMessage` import + the polymorphic-cast boilerplate. `joinRoom` signature updated. |
+| `web/src/App.tsx` | `handleJoinRoom` / `submitDeepLink` no longer pass `'0.0.0.0'`/`9003`. |
+| `web/src/services/audioService.ts` | Stale TODO comment about disabled RTT measurement reworded to describe the actual current setup. |
+| `Tonel-MacOS/TonelMacOS/Network/SignalClient.swift` | `PeerInfo` shrunk; `joinRoom` and reconnect replay no longer send `ip`/`port`; PEER_JOINED + PEER_LIST parsers simplified. |
+
+No runtime change visible to users.
+
 ## [5.1.18] - 2026-05-04
 
 ### Removed — legacy desktop clients + outdated documentation

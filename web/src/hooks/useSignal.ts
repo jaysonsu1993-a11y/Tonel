@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { signalService } from '../services/signalService'
-import type { PeerInfo, SignalingMessage } from '../types'
+import type { PeerInfo } from '../types'
 
 export function useSignal() {
   const [isConnected, setIsConnected] = useState(false)
@@ -9,22 +9,18 @@ export function useSignal() {
   const [sessionReplaced, setSessionReplaced] = useState(false)
 
   useEffect(() => {
-    const unsub = signalService.onMessage((msg: SignalingMessage) => {
+    const unsub = signalService.onMessage((msg) => {
       if (msg.type === 'PEER_LIST') {
-        const m = msg as { type: string; peers: PeerInfo[] }
-        setPeers(m.peers)
+        setPeers(msg.peers)
       } else if (msg.type === 'PEER_JOINED') {
-        const m = msg as { type: string; peer: PeerInfo }
         setPeers(prev => {
-          if (prev.find(p => p.user_id === m.peer.user_id)) return prev
-          return [...prev, m.peer]
+          if (prev.find(p => p.user_id === msg.peer.user_id)) return prev
+          return [...prev, msg.peer]
         })
       } else if (msg.type === 'PEER_LEFT') {
-        const m = msg as { type: string; user_id: string }
-        setPeers(prev => prev.filter(p => p.user_id !== m.user_id))
+        setPeers(prev => prev.filter(p => p.user_id !== msg.user_id))
       } else if (msg.type === 'ERROR') {
-        const m = msg as { type: string; message: string }
-        setError(m.message)
+        setError(msg.message)
       } else if (msg.type === 'SESSION_REPLACED') {
         // Surface to App so it can route back home with a notice.
         setSessionReplaced(true)
@@ -46,10 +42,10 @@ export function useSignal() {
     }
   }, [])
 
-  const joinRoom = useCallback(async (roomId: string, userId: string, ip: string, port: number, password?: string) => {
+  const joinRoom = useCallback(async (roomId: string, userId: string, password?: string) => {
     try {
       setError(null)
-      await signalService.joinRoom(roomId, userId, ip, port, password)
+      await signalService.joinRoom(roomId, userId, password)
     } catch (err) {
       const msg = err instanceof Error ? err.message : '加入房间失败'
       setError(msg)

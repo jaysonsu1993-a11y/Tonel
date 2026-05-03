@@ -1,9 +1,7 @@
 #pragma once
 
 #include <uv.h>
-#include <memory>
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include <mutex>
 #include "user.h"
@@ -53,7 +51,7 @@ private:
 
     void process_create_room(uv_stream_t* client, const std::string& room_id, const std::string& user_id, const std::string& password);
     void process_join_room(uv_stream_t* client, const std::string& room_id,
-                              const std::string& user_id, const std::string& password, const std::string& ip, int port);
+                              const std::string& user_id, const std::string& password);
     void process_leave_room(uv_stream_t* client, const std::string& room_id, const std::string& user_id);
     void process_list_rooms(uv_stream_t* client);
     void process_heartbeat(uv_stream_t* client, const std::string& user_id);
@@ -71,7 +69,4 @@ private:
     // user_id -> ClientContext map
     std::unordered_map<std::string, ClientContext*> user_id_to_ctx_;
     std::mutex client_map_mutex_;
-
-    // WebRTC mixer proxy relay — single proxy registers via MIXER_REGISTER
-    ClientContext* mixer_ctx_ = nullptr;
 };

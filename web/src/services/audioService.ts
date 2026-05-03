@@ -2828,13 +2828,14 @@ export class AudioService {
       return
     }
 
-    // Binary SPA1 packet from mixer server (mixed audio response)
+    // Binary SPA1 packet from mixer server (mixed audio response).
+    // RTT is measured separately via the `/mixer-tcp` PING/PONG path —
+    // see `startPing` and the `PONG` handler. The SPA1 packet's
+    // `timestamp` field documents an alternative zero-bandwidth scheme
+    // (server echoes the client's send-time), but we don't use it here.
     const header = parseSpa1Header(data)
     if (!header) return
     this.rxCount++
-
-    // TODO: RTT measurement disabled — was causing page freeze due to
-    // timestamp calculation issues. Will re-implement with proper sequenced PING.
 
     switch (header.codec) {
       case SPA1_CODEC_PCM16:

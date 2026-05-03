@@ -14,9 +14,6 @@ type SignalMessage =
   // another device or tab joined with the same identity. The old session
   // must surrender (do not reconnect) or it would race the new one.
   | { type: 'SESSION_REPLACED'; user_id: string }
-  // WebRTC mixer signaling relay
-  | { type: 'MIXER_ANSWER'; target_user_id: string; sdp: string }
-  | { type: 'MIXER_ICE_RELAY'; target_user_id: string; candidate: string; sdpMid: string }
 
 class SignalService {
   private ws: WebSocket | null = null
@@ -67,8 +64,6 @@ class SignalService {
             type:    'JOIN_ROOM',
             room_id: this.roomId,
             user_id: this.userId,
-            ip:      '0.0.0.0',
-            port:    9003,
           })
         }
         resolve()
@@ -97,14 +92,12 @@ class SignalService {
               this.sessionReplaced = true
             }
 
-            // Server sends PEER_JOINED with flat {user_id, ip, port} at top level,
-            // but SignalMessage expects a nested peer object — normalize here.
+            // Server emits PEER_JOINED with flat `{type, room_id, user_id}`
+            // at the top level. The internal SignalMessage shape is a
+            // nested `{type, peer:{user_id}}` — normalize here.
             let msg: SignalMessage
             if (parsed.type === 'PEER_JOINED' && parsed.user_id !== undefined) {
-              msg = {
-                type: 'PEER_JOINED',
-                peer: { user_id: parsed.user_id, ip: parsed.ip ?? '', port: parsed.port ?? 0 },
-              }
+              msg = { type: 'PEER_JOINED', peer: { user_id: parsed.user_id } }
             } else {
               msg = parsed as SignalMessage
             }
@@ -169,11 +162,11 @@ class SignalService {
     return this._latency
   }
 
-  async joinRoom(roomId: string, userId: string, ip: string, port: number, password?: string): Promise<void> {
+  async joinRoom(roomId: string, userId: string, password?: string): Promise<void> {
     await this.ensureConnected()
     this.roomId = roomId
     this.userId = userId
-    const msg: Record<string, unknown> = { type: 'JOIN_ROOM', room_id: roomId, user_id: userId, ip, port }
+    const msg: Record<string, unknown> = { type: 'JOIN_ROOM', room_id: roomId, user_id: userId }
     if (password) msg.password = password
     return this.sendAndWait(msg, 'JOIN_ROOM_ACK')
   }
@@ -229,16 +222,6 @@ class SignalService {
         reject(new Error('未连接到服务器'))
       }
     })
-  }
-
-  // ── WebRTC mixer signaling ───────────────────────────────────────────────
-
-  sendMixerOffer(sdp: string, userId: string): boolean {
-    return this.send({ type: 'MIXER_OFFER', user_id: userId, sdp })
-  }
-
-  sendMixerIce(candidate: string, sdpMid: string, userId: string): boolean {
-    return this.send({ type: 'MIXER_ICE', user_id: userId, candidate, sdpMid })
   }
 
   async leaveRoom(): Promise<void> {

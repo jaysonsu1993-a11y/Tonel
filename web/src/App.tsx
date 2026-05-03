@@ -269,7 +269,7 @@ export default function App() {
   const handleJoinRoom = useCallback(async (id: string, password?: string) => {
     setJoinError(null)
     try {
-      await joinRoom(id, userId, '0.0.0.0', 9003, password)
+      await joinRoom(id, userId, password)
       setRoomId(id)
       setRoomPassword(password)
       setPage('room')
@@ -292,8 +292,7 @@ export default function App() {
     try {
       // joinRoom throws on server error; surface the message inline so the
       // user can retry with a different password without leaving the prompt.
-      await joinRoom(deepLinkRoomId, userId, '0.0.0.0', 9003,
-                     deepLinkPassword || undefined)
+      await joinRoom(deepLinkRoomId, userId, deepLinkPassword || undefined)
       setRoomId(deepLinkRoomId)
       setRoomPassword(deepLinkPassword || undefined)
       setPage('room')

@@ -12,8 +12,6 @@
 struct User {
     std::string user_id;
     std::string room_id;
-    std::string ip;        // Client's advertised IP for P2P
-    int udp_port = 0;      // Client's UDP listen port for P2P
     uv_tcp_t* client;
     std::chrono::steady_clock::time_point last_heartbeat;
     bool is_alive;

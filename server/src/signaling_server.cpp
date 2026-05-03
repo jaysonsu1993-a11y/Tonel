@@ -15,8 +15,6 @@ struct SimpleJson {
     std::string room_id;
     std::string user_id;
     std::string password;
-    std::string ip;
-    int port = 0;
     std::vector<std::string> users;
     std::string message;
 
@@ -27,8 +25,6 @@ struct SimpleJson {
         j.user_id = extract(str, "user_id");
         j.password = extract(str, "password");
         j.message = extract(str, "message");
-        j.ip = extract(str, "ip");
-        j.port = extract_int(str, "port");
 
         size_t users_start = str.find("\"users\"");
         if (users_start != std::string::npos) {
@@ -56,14 +52,6 @@ struct SimpleJson {
         return "";
     }
 
-    static int extract_int(const std::string& str, const std::string& key) {
-        std::string pattern = "\"" + key + "\"\\s*:\\s*(\\d+)";
-        std::regex re(pattern);
-        std::smatch match;
-        if (std::regex_search(str, match, re)) return std::stoi(match[1].str());
-        return 0;
-    }
-
     static std::string json_escape(const std::string& s) {
         std::string r;
         r.reserve(s.size());
@@ -88,30 +76,26 @@ struct SimpleJson {
         return "{\"type\":\"USER_LIST\",\"room_id\":\"" + room_id + "\",\"users\":" + arr + "}";
     }
 
-    // Build PEER_LIST with full user_id, ip, port info (sent to joining client)
+    // Build PEER_LIST sent to a joining client (existing room members).
+    // v5.1.19: dropped ip/port fields — they were part of the dead P2P
+    // path. Identity is the only thing clients consume from this.
     static std::string make_peer_list(
         const std::string& room_id,
-        const std::vector<std::tuple<std::string, std::string, int>>& peers) {
+        const std::vector<std::string>& user_ids) {
         std::string arr = "[";
-        for (size_t i = 0; i < peers.size(); ++i) {
-            arr += "{\"user_id\":\"" + json_escape(std::get<0>(peers[i])) + "\","
-                   "\"ip\":\"" + json_escape(std::get<1>(peers[i])) + "\","
-                   "\"port\":" + std::to_string(std::get<2>(peers[i])) + "}";
-            if (i < peers.size() - 1) arr += ",";
+        for (size_t i = 0; i < user_ids.size(); ++i) {
+            arr += "{\"user_id\":\"" + json_escape(user_ids[i]) + "\"}";
+            if (i < user_ids.size() - 1) arr += ",";
         }
         arr += "]";
         return "{\"type\":\"PEER_LIST\",\"room_id\":\"" + room_id + "\",\"peers\":" + arr + "}";
     }
 
-    // Build PEER_JOINED broadcast when a new peer joins (sent to existing peers)
+    // Broadcast when a new peer joins (sent to other room members).
     static std::string make_peer_joined(const std::string& room_id,
-                                        const std::string& user_id,
-                                        const std::string& ip,
-                                        int port) {
+                                        const std::string& user_id) {
         return "{\"type\":\"PEER_JOINED\",\"room_id\":\"" + room_id + "\","
-               "\"user_id\":\"" + json_escape(user_id) + "\","
-               "\"ip\":\"" + json_escape(ip) + "\","
-               "\"port\":" + std::to_string(port) + "}";
+               "\"user_id\":\"" + json_escape(user_id) + "\"}";
     }
 
     static std::string make_error(const std::string& msg) {
@@ -274,11 +258,6 @@ void SignalingServer::on_close(uv_handle_t* handle) {
         return;
     }
     SignalingServer* server = ctx->server;
-    // If the disconnecting client is the mixer proxy, clear the reference
-    if (server->mixer_ctx_ == ctx) {
-        server->mixer_ctx_ = nullptr;
-        std::cout << "[Mixer] WebRTC mixer proxy disconnected" << std::endl;
-    }
     std::string uid = ctx->user_id;
     // displaced = a newer session for the same uid took over before this
     // close fired. The room/user/uid slots already point at the new ctx;
@@ -377,40 +356,10 @@ void SignalingServer::handle_message(uv_stream_t* client, const std::string& msg
     }
     auto j = SimpleJson::parse(msg);
     if (j.type == "CREATE_ROOM")      process_create_room(client, j.room_id, j.user_id, j.password);
-    else if (j.type == "JOIN_ROOM")   process_join_room(client, j.room_id, j.user_id, j.password, j.ip, j.port);
+    else if (j.type == "JOIN_ROOM")   process_join_room(client, j.room_id, j.user_id, j.password);
     else if (j.type == "LEAVE_ROOM")  process_leave_room(client, j.room_id, j.user_id);
     else if (j.type == "LIST_ROOMS")  process_list_rooms(client);
     else if (j.type == "HEARTBEAT")   process_heartbeat(client, j.user_id);
-    // ── WebRTC mixer proxy relay ────────────────────────────────
-    else if (j.type == "MIXER_REGISTER") {
-        // The webrtc-mixer-proxy registers itself so we know where to relay offers
-        auto* ctx = static_cast<ClientContext*>(client->data);
-        if (ctx) {
-            ctx->user_id = "__mixer__";
-            mixer_ctx_ = ctx;
-        }
-        send_response(client, "{\"type\":\"MIXER_REGISTER_ACK\"}");
-        std::cout << "[Mixer] WebRTC mixer proxy registered" << std::endl;
-    }
-    else if (j.type == "MIXER_OFFER" || j.type == "MIXER_ICE") {
-        // From browser → forward raw message to mixer proxy
-        if (mixer_ctx_) {
-            send_response((uv_stream_t*)&mixer_ctx_->tcp_handle, msg);
-        } else {
-            send_response(client, SimpleJson::make_error("Mixer proxy not connected"));
-        }
-    }
-    else if (j.type == "MIXER_ANSWER" || j.type == "MIXER_ICE_RELAY") {
-        // From mixer proxy → forward to target browser client
-        std::string target = SimpleJson::extract(msg, "target_user_id");
-        if (!target.empty()) {
-            std::lock_guard<std::mutex> lock(client_map_mutex_);
-            auto it = user_id_to_ctx_.find(target);
-            if (it != user_id_to_ctx_.end()) {
-                send_response((uv_stream_t*)&it->second->tcp_handle, msg);
-            }
-        }
-    }
     else send_response(client, SimpleJson::make_error("Unknown message type: " + j.type));
 }
 
@@ -467,9 +416,7 @@ void SignalingServer::process_create_room(uv_stream_t* client,
 void SignalingServer::process_join_room(uv_stream_t* client,
                                         const std::string& room_id,
                                         const std::string& user_id,
-                                        const std::string& password,
-                                        const std::string& ip,
-                                        int port) {
+                                        const std::string& password) {
     if (room_id.empty() || user_id.empty()) {
         send_response(client, SimpleJson::make_error("room_id and user_id required"));
         return;
@@ -513,17 +460,13 @@ void SignalingServer::process_join_room(uv_stream_t* client,
                   << " — old ctx displaced" << std::endl;
     }
 
-    // Store or update user with their P2P address info
+    // Track the user → ctx binding (so SESSION_REPLACED works on next join,
+    // and so on_close knows what to clean up).
     User* existingUser = user_manager_.get_user(user_id);
     if (!existingUser) {
-        auto user = std::make_unique<User>(user_id, &ctx->tcp_handle);
-        user->ip = ip;
-        user->udp_port = port;
-        user_manager_.add_user(std::move(user));
+        user_manager_.add_user(std::make_unique<User>(user_id, &ctx->tcp_handle));
     } else {
         existingUser->client = &ctx->tcp_handle;
-        existingUser->ip = ip;
-        existingUser->udp_port = port;
     }
     {
         std::lock_guard<std::mutex> lock(client_map_mutex_);
@@ -547,29 +490,22 @@ void SignalingServer::process_join_room(uv_stream_t* client,
     }
     send_response(client, SimpleJson::make_ack("JOIN_ROOM", room_id));
 
-    // Send PEER_LIST to the joining client — all existing peers with their P2P addresses
-    if (room) {
-        auto users = room->get_users();
-        std::vector<std::tuple<std::string, std::string, int>> peerInfos;
-        for (const auto& uid : users) {
-            if (uid == user_id) continue; // exclude self
-            User* u = user_manager_.get_user(uid);
-            if (u) {
-                peerInfos.emplace_back(u->user_id, u->ip, u->udp_port);
-            }
-        }
-        if (!peerInfos.empty()) {
-            send_response(client, SimpleJson::make_peer_list(room_id, peerInfos));
-        }
-
-        // Broadcast PEER_JOINED to all existing peers so they can punch-hole to the new peer
-        if (!ip.empty() && port > 0) {
-            auto joinedMsg = SimpleJson::make_peer_joined(room_id, user_id, ip, port);
-            broadcast_to_room(room_id, joinedMsg, user_id);
-        }
+    // Send PEER_LIST to the joining client (existing members, IDs only).
+    auto users = room->get_users();
+    std::vector<std::string> peerIds;
+    peerIds.reserve(users.size());
+    for (const auto& uid : users) {
+        if (uid == user_id) continue;  // exclude self
+        peerIds.push_back(uid);
     }
-    std::cout << "[Room] " << user_id << " joined " << room_id
-              << " (P2P: " << ip << ":" << port << ")" << std::endl;
+    if (!peerIds.empty()) {
+        send_response(client, SimpleJson::make_peer_list(room_id, peerIds));
+    }
+
+    // Notify existing peers that someone joined.
+    broadcast_to_room(room_id, SimpleJson::make_peer_joined(room_id, user_id), user_id);
+
+    std::cout << "[Room] " << user_id << " joined " << room_id << std::endl;
 }
 
 void SignalingServer::process_leave_room(uv_stream_t* client,

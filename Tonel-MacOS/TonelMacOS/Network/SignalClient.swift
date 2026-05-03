@@ -16,8 +16,6 @@ enum SignalMessage {
 
 struct PeerInfo: Equatable, Identifiable {
     let userId: String
-    let ip: String
-    let port: Int
     var id: String { userId }
 }
 
@@ -81,9 +79,7 @@ final class SignalClient: NSObject {
         if !roomId.isEmpty, !userId.isEmpty {
             send(["type": "JOIN_ROOM",
                   "room_id": roomId,
-                  "user_id": userId,
-                  "ip": "0.0.0.0",
-                  "port": 9003])
+                  "user_id": userId])
         }
     }
 
@@ -102,9 +98,7 @@ final class SignalClient: NSObject {
         self.userId = userId
         var msg: [String: Any] = ["type": "JOIN_ROOM",
                                   "room_id": roomId,
-                                  "user_id": userId,
-                                  "ip": "0.0.0.0",
-                                  "port": 9003]
+                                  "user_id": userId]
         if let pw = password { msg["password"] = pw }
         try await sendAndWait(msg, ackType: "JOIN_ROOM_ACK")
     }
@@ -266,9 +260,7 @@ final class SignalClient: NSObject {
             broadcast(.peerList(peers))
         case "PEER_JOINED":
             // Server flattens fields at top level; normalise here (web parity).
-            let peer = PeerInfo(userId: obj["user_id"] as? String ?? "",
-                                ip: obj["ip"] as? String ?? "",
-                                port: obj["port"] as? Int ?? 0)
+            let peer = PeerInfo(userId: obj["user_id"] as? String ?? "")
             broadcast(.peerJoined(peer))
         case "PEER_LEFT":
             broadcast(.peerLeft(userId: obj["user_id"] as? String ?? ""))
@@ -287,9 +279,7 @@ final class SignalClient: NSObject {
 
     private func parsePeer(_ d: [String: Any]) -> PeerInfo? {
         guard let uid = d["user_id"] as? String else { return nil }
-        return PeerInfo(userId: uid,
-                        ip: d["ip"] as? String ?? "",
-                        port: d["port"] as? Int ?? 0)
+        return PeerInfo(userId: uid)
     }
 
     private func broadcast(_ msg: SignalMessage) {
