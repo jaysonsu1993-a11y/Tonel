@@ -9,6 +9,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.8] - 2026-05-03
+
+### Fixed — "click 启用麦克风 twice" on first room entry
+
+User reported that joining a room from the home page consistently
+required clicking the 🔄 启用麦克风 retry button **twice** before audio
+came up. Banner sequence: navigate to `/room/:id` → see
+`麦克风/音频初始化失败:...` → click 启用麦克风 → banner changes to
+`混音服务器连接失败：Control WebSocket 连接失败` → click again → finally
+clears.
+
+Root cause: same TCP-drain race v5.1.7 fixed for `mixerRttProbe`, on a
+different socket. `audioService.connectMixer` cleans up its own
+`controlWs` / `audioWs` from a previous attempt with synchronous
+`ws.close()` calls, then immediately opens new ones.
+`WebSocket.close()` only flips state to CLOSING; the underlying
+TCP/TLS takes another 50-200 ms to drain. On the retry-click path the
+old socket from the auto-init attempt is still in CLOSING when the
+new one opens. The酷番云 hypervisor / WAF in front of nginx sees two
+overlapping handshakes to `/mixer-tcp` from the same client and drops
+the second — `controlWs.onerror` fires on click 1, banner switches to
+the mixer error. Click 2 runs after the old socket has fully drained
+and goes through.
+
+Fix: cleanup now awaits both old WS sockets actually reaching CLOSED
+(via their `onclose`/`onerror` handlers, with a 500 ms safety timeout)
+before any `new WebSocket(...)` runs. Mirrors the v5.1.7 mixerRttProbe
+fix exactly.
+
+Note: this does not eliminate the *first*-click need on browsers where
+`audioContext.resume()` rejects without a user gesture (the auto-init
+in `RoomPage`'s `useEffect`). That gate is a separate browser autoplay
+policy interaction and is now what the single retry click is for. The
+fix collapses two clicks → one.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/audioService.ts` | `connectMixer` cleanup awaits old `controlWs` + `audioWs` reaching CLOSED before opening new ones |
+
 ## [5.1.7] - 2026-05-03
 
 ### Fixed — "Control WebSocket 连接失败" still firing on every room entry

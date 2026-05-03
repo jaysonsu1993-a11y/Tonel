@@ -2593,17 +2593,48 @@ export class AudioService {
     // 'Control WebSocket 连接失败' on every room entry.
     await mixerRttProbe.stop()
 
-    // Clean up any existing transports before reconnecting
+    // Clean up any existing transports before reconnecting.
+    //
+    // v5.1.8: await both old WS sockets actually reaching CLOSED before
+    // we open new ones. Same race as the v5.1.7 mixerRttProbe fix:
+    // `WebSocket.close()` only flips state to CLOSING and sends a close
+    // frame; the underlying TCP/TLS connection takes another 50-200 ms
+    // to drain. The retry path through `runInit` (e.g. the user pressing
+    // 🔄 启用麦克风 after the auto-init useEffect failed without a user
+    // gesture) hits this code with a still-draining old controlWs and
+    // immediately opens a new one — the kufan WAF/hypervisor sees two
+    // overlapping WSS handshakes to /mixer-tcp from the same client and
+    // drops the second. That bounce is what surfaced as "click 启用麦克风
+    // twice" — first click failed at this race, second click found the
+    // old socket already CLOSED and went through.
     if (this.controlWs || this.audioWs || this.audioWT) {
       console.log('[Mixer] Cleaning up existing transports before reconnect')
-      try { this.controlWs?.close() } catch (_) {}
-      try { this.audioWs?.close() } catch (_) {}
-      try { this.audioWT?.close() } catch (_) {}
+      const oldCtrl  = this.controlWs
+      const oldAudio = this.audioWs
+      const oldWT    = this.audioWT
       this.controlWs       = null
       this.audioWs         = null
       this.audioWT         = null
       this.audioWTWriter   = null
       this.audioWTReader   = null
+
+      // Wait for both WebSocket sockets to actually reach CLOSED. WT has
+      // its own teardown that's already synchronous-enough to skip here.
+      const awaitClose = (w: WebSocket | null): Promise<void> => {
+        if (!w || w.readyState === WebSocket.CLOSED) return Promise.resolve()
+        return new Promise<void>((resolve) => {
+          const done = () => { w.onclose = null; w.onerror = null; resolve() }
+          w.onclose = done
+          w.onerror = done
+          try { w.close() } catch { done() }
+          // Bound the wait — under any pathological close behaviour we
+          // would rather over-overlap a new socket than deadlock the
+          // join flow. 500 ms covers normal TCP teardown comfortably.
+          setTimeout(done, 500)
+        })
+      }
+      try { oldWT?.close() } catch (_) {}
+      await Promise.all([awaitClose(oldCtrl), awaitClose(oldAudio)])
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
