@@ -9,6 +9,8 @@
  *   5. Audio relay via /mixer-udp WebSocket (→ proxy → UDP 9003)
  */
 
+import { pickMixerHost, invalidateMixerHostCache } from './mixerHost'
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA1 Packet Constants  (server expects big-endian, 44-byte header)
@@ -2602,12 +2604,16 @@ export class AudioService {
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // Direct connection to Alibaba Cloud server (bypasses Cloudflare Tunnel).
-    // /new path routes to the Guangzhou test mixer; root path stays on production.
-    // This pairing must stay in sync with App.tsx pathPrefix() and
-    // signalService.ts apiHost selection. (Originally added in v4.3.2,
-    // dropped during a v4.3.5 refactor — re-added in v4.3.10.)
-    const host = location.pathname.startsWith('/new') ? 'srv-new.tonel.io' : 'srv.tonel.io'
+    // v5.1.12: host is picked dynamically — `pickMixerHost()` probes
+    // srv.tonel.io (kufan, primary) first and falls back to
+    // srv-new.tonel.io (Aliyun) if kufan's TLS layer is unreachable.
+    // The kufan hypervisor occasionally blocks a client IP for tens of
+    // minutes after seeing too many half-open connections (a tunable
+    // we don't have access to). Without fallback, that lockout would
+    // make tonel.io/ totally unusable for affected users until the
+    // kufan-side timer expires. The pick is cached for 10 min so
+    // subsequent connects in the same session are instant.
+    const host = await pickMixerHost()
     const controlUrl = `${protocol}//${host}/mixer-tcp`
     const audioUrl   = `${protocol}//${host}/mixer-udp`
     // WebTransport listens on UDP 4433 with the same TLS cert as
@@ -2741,6 +2747,10 @@ export class AudioService {
       this.controlWs.onerror = (evt) => {
         console.error('[Mixer] Control WebSocket error:', evt)
         clearTimeout(timer)
+        // The host we just tried is bad — invalidate the cache so the
+        // user-driven retry (or the next connectMixer) re-probes and
+        // can flip to the fallback host on its own.
+        invalidateMixerHostCache()
         reject(new Error('Control WebSocket 连接失败'))
       }
     })

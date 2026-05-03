@@ -9,6 +9,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.12] - 2026-05-03
+
+### Added — auto-fallback from kufan to Aliyun on connect failure
+
+User reported that even after v5.1.11 the homepage probe + WSS
+handshake to `srv.tonel.io` were both failing with `net::ERR_CONNECTION_RESET`.
+Server-side investigation confirmed:
+
+* OS layer is identical between kufan and Aliyun (same Debian 12,
+  nginx 1.22.1, sysctl, srv.tonel.io.conf, certs, and PM2 process
+  set). The only differences are benign (Aliyun has ufw active +
+  aliyun-assist, neither RSTs traffic).
+* No iptables / nft rules, no fail2ban, no nginx limit_req on
+  either box. Nothing on the kufan VM is rejecting the user's IP.
+* nginx access.log on kufan shows the user's IP IP getting **no
+  recent connections at all** — the TLS handshake never reaches the
+  OS. The RST is happening above the VM, in 酷番云's hypervisor /
+  virtual network layer (which the v4.3.11 UDP-burst incident
+  already established has its own quirky behaviour).
+
+We have no inside-the-VM knob for that block. The earlier v5.1.10
+fetch probe to `/mixer-tcp` (which hung server-side) most likely
+tripped the kufan auto-block by leaking half-open connections every
+3 seconds for several minutes. The block is timer-based; it expires
+on its own in tens of minutes.
+
+Without app-level fallback, every kufan-side block makes `tonel.io/`
+totally unusable for affected users until kufan's timer expires.
+
+#### Fix
+
+* New `web/src/services/mixerHost.ts` — `pickMixerHost()` probes
+  `srv.tonel.io` first via a short `fetch('/')`; if it errors out at
+  the TLS layer, returns `srv-new.tonel.io` instead. The choice is
+  cached in `localStorage` for 10 minutes so subsequent connects
+  within a session don't pay the probe cost. When the cache expires,
+  we re-probe and organically flip back to kufan if it's healthy.
+* `audioService.connectMixer` now uses `pickMixerHost()` instead of
+  hardcoding the host. Both `controlWs` and `audioWs` (and the WT
+  URL) follow the picked host. On a `controlWs.onerror`, the cache
+  is invalidated so the user-driven retry re-probes.
+* `mixerRttProbe` uses the same picker — homepage hero RTT and
+  in-room WSS handshake never disagree about which box they're
+  talking to.
+* `RoomPage` shows a soft blue hint when the fallback host is in
+  use ("已自动切换至备用服务器") so the user knows what's happening
+  without seeing a red error banner.
+
+`?host=kufan` and `?host=aliyun` query overrides bypass the picker
+for explicit testing.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/mixerHost.ts` | New — host picker with probe + 10-min cache |
+| `web/src/services/audioService.ts` | `connectMixer` calls `await pickMixerHost()`; `controlWs.onerror` invalidates the cache |
+| `web/src/services/mixerRttProbe.ts` | Probe URL host comes from `pickMixerHost()` |
+| `web/src/pages/RoomPage.tsx` | Soft hint banner when `isUsingFallbackHost()` is true |
+
 ## [5.1.11] - 2026-05-03
 
 ### Fixed — v5.1.10's probe was leaking hung connections to kufan
