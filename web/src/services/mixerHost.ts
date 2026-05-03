@@ -122,6 +122,18 @@ export function invalidateMixerHostCache(): void {
   clearCached()
 }
 
+/**
+ * Persist the host that just successfully completed a WSS handshake.
+ * Probe-based selection alone is unreliable (`GET /` may succeed even
+ * when the WSS upgrade is blocked at the same hop), so audioService
+ * calls this once a connect actually goes through. Subsequent ticks
+ * of the homepage RTT probe and subsequent room joins both then hit
+ * the same proven-good host.
+ */
+export function recordWorkingHost(host: string): void {
+  if (host === KUFAN_HOST || host === ALIYUN_HOST) saveCached(host)
+}
+
 /** Whether the active host is the fallback. UI may want to show a hint. */
 export function isUsingFallbackHost(): boolean {
   const cached = loadCached()

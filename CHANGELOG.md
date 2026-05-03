@@ -9,6 +9,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.13] - 2026-05-03
+
+### Fixed — auto-fallback now retries on the OTHER host on WSS error
+
+v5.1.12 picked the host via a `fetch('/')` probe and then opened the
+WSS — but probing GET / and probing WSS Upgrade are different requests
+through the kufan hypervisor, and `GET /` could succeed when the WSS
+upgrade was still being dropped. Test runs showed 1/3 sessions
+landing on a probe-good but WSS-bad cached choice, surfacing the
+same red banner the v5.1.12 fallback was supposed to prevent.
+
+#### Fix
+
+`audioService.connectMixer` now treats the host as a per-attempt
+choice rather than a one-shot pick:
+
+1. Try `pickMixerHost()` (cached or freshly probed).
+2. If `controlWs.onerror` or `audioWs.onerror` fires, invalidate the
+   cache and **retry once on the other host** within the same
+   `connectMixer` call — the user never sees the failure.
+3. Once a host actually succeeds (both transports ready), call
+   `recordWorkingHost(host)` so subsequent connects + the homepage
+   RTT probe head straight there.
+
+The probe is now an optimisation (skip the dead host on the first
+try where possible), not the source of truth — actual WSS health is.
+
+`?host=kufan` / `?host=aliyun` query overrides still bypass the
+fallback for explicit testing.
+
+#### Files
+
+| File | Change |
+|---|---|
+| `web/src/services/audioService.ts` | Split `connectMixer` into a wrapper that loops over `[primary, fallback]` hosts, plus `_connectMixerToHost(host)` that opens against a single host and rejects cleanly on either `*WebSocket 连接失败` |
+| `web/src/services/mixerHost.ts` | `recordWorkingHost(host)` to persist a host that actually completed a WSS handshake |
+
 ## [5.1.12] - 2026-05-03
 
 ### Added — auto-fallback from kufan to Aliyun on connect failure
