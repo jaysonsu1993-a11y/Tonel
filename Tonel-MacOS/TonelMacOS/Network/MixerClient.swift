@@ -149,20 +149,15 @@ final class MixerClient {
 
     private func sendPing() {
         guard tcpSocket >= 0 else { return }
+        pingLock.lock()
+        pingSentAt = Date().timeIntervalSinceReferenceDate
+        pingLock.unlock()
         let line = "{\"type\":\"PING\"}\n"
-        // Stamp pingSentAt RIGHT AFTER Darwin.send returns (= kernel has
-        // accepted the bytes), not before the async dispatch. Removes the
-        // tcpWriteQueue hop from the measured RTT, which would otherwise
-        // bias the number up by the queue-wakeup latency (typically
-        // sub-millisecond, but visible under contention).
         tcpWriteQueue.async { [weak self] in
             guard let self = self, self.tcpSocket >= 0 else { return }
             _ = line.withCString { cstr in
                 Darwin.send(self.tcpSocket, cstr, strlen(cstr), MSG_DONTWAIT)
             }
-            self.pingLock.lock()
-            self.pingSentAt = Date().timeIntervalSinceReferenceDate
-            self.pingLock.unlock()
         }
     }
 

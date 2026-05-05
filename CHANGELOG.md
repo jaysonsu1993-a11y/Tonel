@@ -9,6 +9,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.2.0] - 2026-05-06
+
+### Changed — Tonel-MacOS branch reconciliation
+
+The `tonel-macos` long-lived branch (last bump 0.1.10) and `main`
+(0.1.3 after v5.1.27) had diverged: `tonel-macos` carried v4.x audio
+optimizations that were never merged back, while `main` accumulated
+the v5.1.26/27 fixes (POSIX MixerClient, bare HALOutput AU, Settings
+persistence) that `tonel-macos` never got. Selective merge — taking
+each file from whichever branch had the better version, then a
+manual interface adapter — instead of a wholesale merge that would
+clobber one side's work.
+
+### Added — JitterBuffer: PLC, target-trim, RT-safe rewrite
+
+`Tonel-MacOS/TonelMacOS/Audio/JitterBuffer.swift` is now the 242-line
+elaborate version from `tonel-macos`. Concretely:
+
+- `PopResult` enum (`.real` / `.plc(decay)` / `.silence`) replaces
+  the previous `[Float]?` return. PLC mirrors web client's
+  `concealDecay = [1.0, 0.7, 0.4, 0.15]`: after a brief gap, hand
+  back the last real frame at progressively decaying gain so the
+  listener hears a soft tail instead of a click.
+- `targetDepth` + `trimMargin` layered on top of the `maxDepth`
+  hard cap. At room-join the OS UDP recv buffer can flush ~370 ms
+  of self-loopback in one burst; without target-trim the buffer
+  fills to `maxDepth=33` and `drop_oldest` fires once per excess
+  packet (real-log evidence: `drop=908` in the first second = 908
+  audible clicks). With target-trim it's ONE concentrated trim
+  per burst, then steady-state at the latency floor.
+- `maxDepth` raised 8 → 33 (matches web's `JITTER_MAX_DEPTH` after
+  v4.3.7). 8-deep at 2.5 ms/frame = 20 ms headroom; CF/WSS bursts
+  delivering 8+ frames at once were dropping the oldest = audible
+  click. 33 absorbs typical burst patterns silently.
+- Pre-allocated fixed-size ring + `os_unfair_lock` for RT-thread
+  safety. `pop()` no longer allocates; the lock is sub-microsecond
+  uncontended (one-writer, one-reader contention pattern).
+- `static var primeMin` / `static var targetDepth` so the
+  AudioDebugSheet sliders tune them live across all per-peer
+  buffers; `trimMargin` is now computed off `targetDepth` so the
+  `target + margin + 1 == maxDepth` invariant holds during tuning.
+
+### Added — MixerClient dedicated network queue
+
+`Tonel-MacOS/TonelMacOS/Network/MixerClient.swift` from `tonel-macos`
+adds `networkQueue` — a userInitiated background DispatchQueue that
+hosts UDP receive callbacks. Previously these landed on `.main` and
+buried the main thread under ~400 packets/sec of PCM16 decode +
+JitterBuffer push. Visible symptom: opening Settings froze the app
+because AVAudioEngine's reconfigure also ran on main and competed
+with the audio firehose. With the dedicated queue, main is freed
+entirely; SwiftUI updates that need main hop via `Task { @MainActor
+in ... }` from inside the handlers.
+
+### Adapter — AudioEngine.fillPlayback now consumes PopResult
+
+`fillPlayback`'s peer-mix loop previously did
+`if let frame = sink.jitter.pop() { mix }`. With the new JitterBuffer
+returning `PopResult`, the loop is a `switch` over `.real` /
+`.plc(frame, decay)` / `.silence`. PLC frames are mixed at
+`outputGain × decay` so the listener hears the last real frame
+attenuated rather than a click during transient gaps.
+
+### Files
+
+| File | Change |
+|------|--------|
+| `Tonel-MacOS/TonelMacOS/Audio/JitterBuffer.swift` | wholesale from `tonel-macos`; primeMin/targetDepth → `static var`; trimMargin → computed |
+| `Tonel-MacOS/TonelMacOS/Network/MixerClient.swift` | wholesale from `tonel-macos`; gains `networkQueue` |
+| `Tonel-MacOS/TonelMacOS/Audio/AudioEngine.swift` | `fillPlayback` peer-mix loop migrated to `PopResult` switch |
+| `Tonel-MacOS/project.yml` | `MARKETING_VERSION` 0.1.3 → 0.1.11 (catches up to `tonel-macos`) |
+
+### Note
+
+`tonel-macos` branch is now effectively merged into `main`. Future
+desktop work continues on `main` via `release: vX.Y.Z` commits per
+the standard pipeline; `tonel-macos` is left as a historical
+reference but no longer the primary working branch.
+
 ## [5.1.27] - 2026-05-06
 
 ### Fixed — Tonel-MacOS output device picker actually works now

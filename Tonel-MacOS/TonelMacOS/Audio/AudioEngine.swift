@@ -693,16 +693,30 @@ final class AudioEngine: ObservableObject {
             for k in keys {
                 peersLock.lock()
                 var sink = peers[k]
-                let frame = sink?.jitter.pop()
-                if let f = frame { sink?.lastFrame = f }
+                let result = sink?.jitter.pop()
+                // Cache lastFrame on real frames so the meter has something
+                // to display during silent stretches; PLC frames also count
+                // since they ARE the most recent real audio.
+                if case .real(let f) = result { sink?.lastFrame = f }
                 if let s = sink { peers[k] = s }
                 peersLock.unlock()
-                guard let f = frame else { continue }
                 if perPeerMuted[k] == true { continue }
                 let g = perPeerGain[k] ?? 1.0
-                let n = min(take, f.count)
-                for i in 0..<n {
-                    out[written + i] += f[i] * g
+                // PopResult cases:
+                //   .real(frame)         — fresh content from the ring
+                //   .plc(frame, decay)   — last real frame, attenuated to
+                //                          mask a brief gap (web parity)
+                //   .silence             — gap exceeds PLC budget; skip
+                switch result {
+                case .real(let f):
+                    let n = min(take, f.count)
+                    for i in 0..<n { out[written + i] += f[i] * g }
+                case .plc(let f, let decay):
+                    let n = min(take, f.count)
+                    let scaled = g * decay
+                    for i in 0..<n { out[written + i] += f[i] * scaled }
+                case .silence, .none:
+                    continue
                 }
             }
             written += take
