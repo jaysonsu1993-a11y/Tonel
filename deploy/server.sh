@@ -215,6 +215,10 @@ deploy_ops() {
     if [ -f "$REPO_ROOT/ops/nginx/srv-hk.tonel.io.conf" ]; then
         rsync_to_remote "$REPO_ROOT/ops/nginx/srv-hk.tonel.io.conf" "/etc/nginx/sites-available/srv-hk.tonel.io"
     fi
+    # api-hk.tonel.io is HK signaling (v5.1.25+, no CF Tunnel); same conditional.
+    if [ -f "$REPO_ROOT/ops/nginx/api-hk.tonel.io.conf" ]; then
+        rsync_to_remote "$REPO_ROOT/ops/nginx/api-hk.tonel.io.conf" "/etc/nginx/sites-available/api-hk.tonel.io"
+    fi
     # Self-healing symlinks (v5.1.23+): only enable a site whose
     # ssl_certificate path exists on this box. The four nginx configs
     # cover all server roles (kufan, Aliyun, HK, CF Pages origin); each
@@ -222,7 +226,7 @@ deploy_ops() {
     # all four blindly causes `nginx -t` to fail and the deploy aborts.
     ssh_exec '
         set -e
-        for conf in srv.tonel.io srv-new.tonel.io tonel.io srv-hk.tonel.io; do
+        for conf in srv.tonel.io srv-new.tonel.io tonel.io srv-hk.tonel.io api-hk.tonel.io; do
             avail=/etc/nginx/sites-available/$conf
             link=/etc/nginx/sites-enabled/$conf
             [ -f "$avail" ] || continue

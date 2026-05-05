@@ -35,8 +35,15 @@ class SignalService {
   async connect(): Promise<void> {
     // Use wss if page is https, else ws
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // /new path routes to the Guangzhou test signaling; root path stays on production.
-    const apiHost = window.location.pathname.startsWith('/new') ? 'api-new.tonel.io' : 'api.tonel.io'
+    // v5.1.25: signaling host follows the same three-way path scheme
+    // as audioService.ts and mixerRttProbe.ts:
+    //   `/`    → api.tonel.io     (酷番云 / HK after DNS flip; CF Tunnel)
+    //   `/new` → api-new.tonel.io (Aliyun fallback; CF Tunnel)
+    //   `/hk`  → api-hk.tonel.io  (HK new prod, direct nginx, no tunnel)
+    const _path = window.location.pathname
+    const apiHost = _path.startsWith('/new') ? 'api-new.tonel.io'
+                  : _path.startsWith('/hk')  ? 'api-hk.tonel.io'
+                  :                             'api.tonel.io'
     const url = `${protocol}//${apiHost}/signaling`
 
     return new Promise((resolve, reject) => {

@@ -9,6 +9,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.25] - 2026-05-05
+
+### Fixed — `/hk` couldn't enter rooms (signaling on dead host)
+
+After v5.1.24 fixed the URL-stays-on-`/hk` issue, room entry still
+failed because `signalService.ts` only knew about `/new` for picking
+the signaling host — `/hk` fell through to `api.tonel.io`, which is
+the CF Tunnel CNAME for the now-banned 酷番云 box. Connection 530
+on every WS open.
+
+Fix in three parts:
+
+1. **Web client.** `signalService.ts` extended to a three-way path
+   table mirroring audioService.ts / mixerRttProbe.ts:
+     - `/`    → `api.tonel.io`
+     - `/new` → `api-new.tonel.io`
+     - `/hk`  → `api-hk.tonel.io`
+
+2. **HK box nginx.** New `ops/nginx/api-hk.tonel.io.conf` proxies
+   `/signaling` directly to `127.0.0.1:9004` (ws-proxy → signaling
+   :9001). HK doesn't run cloudflared, so this serves the role the
+   CF Tunnel ingress plays on Aliyun/kufan.
+
+3. **TLS cert.** `srv.tonel.io` SAN cert expanded to also cover
+   `api-hk.tonel.io` (now: srv + srv-hk + api-hk; one renewal updates
+   all three).
+
+#### DNS (operator action)
+
+Added `api-hk.tonel.io  A  38.76.186.215` (DNS only / grey cloud).
+Without this the cert presents fine but the browser can't resolve.
+
 ## [5.1.24] - 2026-05-05
 
 ### Fixed — `/hk` URL got immediately rewritten to `/` on first paint
