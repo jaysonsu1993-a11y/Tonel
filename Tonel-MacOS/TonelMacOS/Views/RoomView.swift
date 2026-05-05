@@ -601,6 +601,36 @@ struct AudioDebugSheet: View {
                 Spacer()
                 Button("关闭") { dismiss() }.buttonStyle(.borderless)
             }
+
+            // ── CLIENT — per-peer JitterBuffer ───────────────────────────
+            Text("CLIENT — per-peer jitter buffer")
+                .bold().foregroundStyle(Color.green.opacity(0.85))
+            slider(label: "primeMin",
+                   value: Binding(get: { Double(audio.clientPrimeMin) },
+                                  set: { audio.clientPrimeMin = Int($0) }),
+                   range: 1...16, step: 1,
+                   display: "\(audio.clientPrimeMin) fr · \(String(format: "%.1f", Double(audio.clientPrimeMin) * AudioWire.frameMs)) ms")
+
+            Divider().background(Color.green.opacity(0.4))
+
+            // ── SERVER — MIXER_TUNE ───────────────────────────────────────
+            Text("SERVER — per-user jitter buffer (MIXER_TUNE)")
+                .bold().foregroundStyle(Color.green.opacity(0.85))
+            slider(label: "jitterTarget",
+                   value: Binding(get: { Double(audio.serverJitterTarget) },
+                                  set: { audio.serverJitterTarget = Int($0) }),
+                   range: 1...16, step: 1,
+                   display: "\(audio.serverJitterTarget) fr · \(String(format: "%.1f", Double(audio.serverJitterTarget) * AudioWire.frameMs)) ms")
+            slider(label: "jitterMaxDepth",
+                   value: Binding(get: { Double(audio.serverJitterMaxDepth) },
+                                  set: { audio.serverJitterMaxDepth = Int($0) }),
+                   range: 1...64, step: 1,
+                   display: "\(audio.serverJitterMaxDepth) fr · \(String(format: "%.1f", Double(audio.serverJitterMaxDepth) * AudioWire.frameMs)) ms cap")
+
+            Divider().background(Color.green.opacity(0.4))
+
+            // ── LIVE readouts ─────────────────────────────────────────────
+            Text("LIVE").bold().foregroundStyle(Color.green.opacity(0.85))
             Group {
                 row("running",  "\(audio.isRunning)")
                 row("input lvl", String(format: "%.3f", audio.inputLevel))
@@ -615,13 +645,31 @@ struct AudioDebugSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 360)
+        .frame(width: 380)
         .background(Color.black)
         .foregroundStyle(.green)
         .font(.system(size: 12, design: .monospaced))
+        // NOTE: do NOT call syncServerTuningFromMixer here — that would
+        // overwrite user edits every reopen. Initial sync happens once
+        // in AppState.joinRoom right after mixer.connect.
     }
     private func row(_ k: String, _ v: String) -> some View {
         HStack { Text(k).foregroundStyle(Color.green.opacity(0.6)); Spacer(); Text(v) }
+    }
+    private func slider(label: String,
+                        value: Binding<Double>,
+                        range: ClosedRange<Double>,
+                        step: Double,
+                        display: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                Spacer()
+                Text(display).foregroundStyle(.yellow)
+            }
+            Slider(value: value, in: range, step: step)
+                .tint(.green)
+        }
     }
 }
 

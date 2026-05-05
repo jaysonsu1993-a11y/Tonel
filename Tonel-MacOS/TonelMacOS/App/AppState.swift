@@ -68,6 +68,7 @@ final class AppState: ObservableObject {
     }
 
     func joinRoom(_ roomId: String, password: String? = nil, create: Bool = false) async {
+        AppLog.log("[AppState] joinRoom called — roomId=\(roomId) create=\(create) currentUserId=\(userId.isEmpty ? "<empty>" : userId)")
         // Create flow doesn't require phone login — mint an ephemeral uid
         // on the fly. Matches web `LoginPage.tsx` ephemeral-uid behaviour.
         if userId.isEmpty {
@@ -81,18 +82,27 @@ final class AppState: ObservableObject {
         defer { isJoining = false }
 
         do {
+            AppLog.log("[AppState] step1: signal.connect()")
             try await signal.connect()
+            AppLog.log("[AppState] step2: signal.\(create ? "createRoom" : "joinRoom")")
             if create {
                 try await signal.createRoom(roomId: roomId, userId: userId, password: password)
             } else {
                 try await signal.joinRoom(roomId: roomId, userId: userId, password: password)
             }
+            AppLog.log("[AppState] step3: mixer.connect()")
             try await mixer.connect(roomId: roomId, userId: userId)
+            // Pull JOIN_ACK defaults into the AudioDebugSheet sliders ONCE
+            // per join. Re-syncing on sheet open would clobber user edits.
+            audio.syncServerTuningFromMixer()
+            AppLog.log("[AppState] step4: audio.start()")
             try audio.start()
             self.roomId = roomId
             self.screen = .room
             statusText = "已连接"
+            AppLog.log("[AppState] joinRoom DONE")
         } catch {
+            AppLog.log("[AppState] joinRoom ERROR: \(error)")
             lastError = error.localizedDescription
             mixer.disconnect()
             audio.stop()

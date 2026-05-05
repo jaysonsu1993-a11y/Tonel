@@ -10,7 +10,10 @@ import Foundation
 /// web `primeTarget` minimum from the v4.3.8 panel-drag invariant.
 final class JitterBuffer {
     static let maxDepth   = 8     // hard cap
-    static let primeMin   = 2     // start drain after this many frames
+    /// Cold-start prime threshold (frames). `static var` so the
+    /// AudioDebugSheet sliders can tune it live across all per-peer
+    /// buffers without recreating them.
+    static var primeMin   = 2     // start drain after this many frames
 
     private let lock = NSLock()
     private var frames: [[Float]] = []

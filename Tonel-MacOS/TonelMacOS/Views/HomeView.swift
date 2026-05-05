@@ -9,7 +9,6 @@ struct HomeView: View {
     @State private var presentJoin = false
     @State private var presentCreate = false
     @State private var presentSettings = false
-    @State private var promptLogin = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -56,26 +55,14 @@ struct HomeView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // Top-right login chip.
-            CornerLoginView()
-                .padding(16)
+            // Top-right login chip removed — joinRoom mints an ephemeral
+            // userId on the fly, so the corner login was only ever a UI
+            // affordance for setting the phone label. Pulling it to rule
+            // out interaction with the join flow during debug.
         }
         .sheet(isPresented: $presentJoin)   { JoinRoomSheet() }
         .sheet(isPresented: $presentCreate) { CreateRoomSheet() }
         .sheet(isPresented: $presentSettings) { HomeSettingsSheet() }
-        .alert("请先登录",
-               isPresented: $promptLogin) {
-            Button("好") {}
-        } message: {
-            Text("请在右上角输入手机号登录后再进入房间。")
-        }
-    }
-
-    @discardableResult
-    private func requireLogin() -> Bool {
-        if state.isLoggedIn { return true }
-        promptLogin = true
-        return false
     }
 }
 

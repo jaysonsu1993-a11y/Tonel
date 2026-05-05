@@ -9,6 +9,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.26] - 2026-05-06
+
+### Fixed — Tonel-MacOS regression: NWConnection blocked by Clash-style proxies
+
+`Tonel-MacOS/TonelMacOS/Network/MixerClient.swift` on `main` was using
+`NWConnection` (Apple Network framework) for the mixer TCP control
+channel. On any Mac running Clash / mihomo / similar transparent
+proxies (PF/utun-based traffic interception), the connection silently
+timed out — the proxy black-holes / re-routes Network framework
+flows but lets BSD raw sockets through. Web users were unaffected
+because their TLS WSS path is on the proxy whitelist; desktop users
+saw "服务器错误: connect timeout" with no other diagnostic.
+
+Restored the POSIX raw-socket implementation that was on the
+`tonel-macos` branch (`Darwin.socket(AF_INET, SOCK_STREAM, 0)` +
+`Darwin.send` / `Darwin.recv` on a dedicated `Thread`). UDP audio
+transport stays on `NWConnection` for now — if the same proxy issue
+shows up there, it'll need the same treatment.
+
+Also restored the desktop `Endpoints.mixerHost = "8.163.21.207"`
+(Aliyun) per `project_desktop_client` memory; main had it pointing
+to the kufan box (`42.240.163.172`) which is unreachable from the
+typical CN home-broadband path.
+
+### Added — Audio Debug panel: live tunable knobs (3-tap room id)
+
+The macOS `AudioDebugSheet` was readout-only, while web has had
+slider tuning since v4.x. Brought it to feature parity for the
+knobs that actually map to the desktop pipeline:
+
+- `clientPrimeMin` (1…16 fr) — `JitterBuffer` cold-start prime
+  threshold. Backed by `static var` on `JitterBuffer` so live
+  edits apply across all per-peer buffers without recreating them.
+- `serverJitterTarget` (1…16 fr) — server per-user jitter buffer
+  depth target. Sends `MIXER_TUNE` over TCP 9002.
+- `serverJitterMaxDepth` (1…64 fr) — server per-user jitter buffer
+  cap. Same `MIXER_TUNE` plumbing.
+
+Web's three rate-scaling knobs (`maxScale`/`minScale`/`rateStep`)
+have no destination on desktop because CoreAudio drives the output
+clock — they're intentionally not exposed.
+
+`AppState.joinRoom` calls `AudioEngine.syncServerTuningFromMixer()`
+once after `MIXER_JOIN_ACK` so sliders open at the actual server
+defaults; the sheet's `onAppear` does NOT re-sync, which avoids
+clobbering user edits when the panel is reopened mid-session.
+
+### Changed — e2e latency formula aligned with web `audioE2eLatency`
+
+Two of the seven terms in `AudioEngine.computeE2eLatencyMs()` were
+off-by-half-frame relative to the web client, and the client-jitter
+term was a static `primeMin × frameMs = 5 ms` constant that never
+moved regardless of actual buffer fill.
+
+| Term         | Before                      | After                                          |
+|--------------|-----------------------------|------------------------------------------------|
+| server-jitter | `target × frameMs`          | `(target − 0.5) × frameMs` (avg wait)          |
+| server-tick   | `frameMs / 2` (half tick)   | `frameMs` (full tick)                          |
+| client-jitter | `primeMin × frameMs` static | `currentJitterDepthFrames() × frameMs` live    |
+
+Sum of `server-jitter + server-tick` is unchanged — the split is
+just relabeled to match web. The client-jitter change is the one
+that matters: the reported e2e number now floats with real buffer
+depth instead of staying linear in RTT alone, so the desktop number
+behaves like web's (still differs in absolute value because device
+HAL latency is included on desktop and not on web).
+
+### Removed — Top-right login chip in HomeView
+
+`CornerLoginView` was a phone-stub that only ever set an ephemeral
+userId — the same userId that `joinRoom` mints on demand. It added
+a side-effect (UI flips to "已登录") that confused debugging when
+join failed silently. Removed; `joinRoom` still mints uid so phone
+login is not required to enter rooms.
+
+### Changed — POSIX `sendPing` timestamps RTT after `Darwin.send`
+
+`MixerClient.sendPing` was stamping `pingSentAt` before the
+`tcpWriteQueue.async` hand-off, so the measured RTT included the
+queue wakeup latency. Moved the timestamp into the dispatched
+block, immediately after `Darwin.send` returns (kernel has
+accepted the bytes). Sub-millisecond improvement under typical
+load, larger under contention.
+
+### Memory
+
+New: `project_macos_posix_socket.md` — records the POSIX-vs-
+NWConnection failure mode and the hard rule that desktop must
+not switch back to Network.framework. Index entry added to
+`MEMORY.md`.
+
+### Files
+
+| File | Change |
+|------|--------|
+| `Tonel-MacOS/TonelMacOS/Network/MixerClient.swift` | NWConnection → POSIX socket impl |
+| `Tonel-MacOS/TonelMacOS/Network/Endpoints.swift` | `mixerHost` → 8.163.21.207 (Aliyun) |
+| `Tonel-MacOS/TonelMacOS/Audio/AudioEngine.swift` | e2e formula align + tuning Published mirrors + `currentJitterDepthFrames` |
+| `Tonel-MacOS/TonelMacOS/Audio/JitterBuffer.swift` | `primeMin` `static let` → `static var` |
+| `Tonel-MacOS/TonelMacOS/Views/RoomView.swift` | `AudioDebugSheet` rebuilt with sliders |
+| `Tonel-MacOS/TonelMacOS/Views/HomeView.swift` | Drop `CornerLoginView` chip |
+| `Tonel-MacOS/TonelMacOS/App/AppState.swift` | call `syncServerTuningFromMixer` after join + diagnostic AppLogs |
+| `Tonel-MacOS/project.yml` | `MARKETING_VERSION` 0.1.1 → 0.1.2 |
+
 ## [5.1.25] - 2026-05-05
 
 ### Fixed — `/hk` couldn't enter rooms (signaling on dead host)

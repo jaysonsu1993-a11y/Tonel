@@ -6,8 +6,10 @@ import Foundation
 ///   `audioService.ts`  → mixer TCP/UDP host (9002/9003)
 ///   `signalService.ts` → wss://api.tonel.io/signaling
 enum Endpoints {
-    /// 酷番云 v5 main mixer host (per memory `project_v5_migration`).
-    static let mixerHost   = "42.240.163.172"
+    /// Aliyun mixer host — desktop client 固定走 Aliyun,绕过 WSS/WT proxy
+    /// (per memory `project_desktop_client` / `project_v5_migration`).
+    /// 酷番云 (42.240.163.172) 是 web 主路径,desktop 不走它。
+    static let mixerHost   = "8.163.21.207"
     static let mixerTCPPort: UInt16 = 9002      // MIXER_JOIN/LEAVE/TUNE
     static let mixerUDPPort: UInt16 = 9003      // SPA1 audio + handshake
 

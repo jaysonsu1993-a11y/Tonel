@@ -33,9 +33,28 @@ final class MixerClient {
     /// "room_id:user_id" — what goes in the SPA1 userId slot.
     private(set) var userIdKey = ""
 
-    private var tcp: NWConnection?
+    // TCP now uses POSIX sockets to bypass system proxies (Clash, etc.)
+    // that add 300-400ms latency to NWConnection.
+    private var tcpSocket: Int32 = -1
+    private var tcpReadThread: Thread?
+    private var tcpWriteQueue = DispatchQueue(label: "io.tonel.tcpwrite", qos: .userInitiated)
     private var udp: NWConnection?
     private var udpPort: UInt16 = Endpoints.mixerUDPPort
+
+    /// **Critical: dedicated network queue (NOT main).**
+    ///
+    /// Previously TCP+UDP started with `queue: .main`, which routed every
+    /// audio receive callback through the main thread. At 400 packets/sec
+    /// (PCM16 decode + JitterBuffer.push + Task hop per packet) the main
+    /// thread was buried under continuous audio work — especially under
+    /// any UI re-render. The visible symptom: opening the output-device
+    /// picker froze the app, because AVAudioEngine's reconfigure on
+    /// device-change ALSO ran on main and competed with the packet
+    /// firehose. Moving the receives to a userInitiated background queue
+    /// frees main entirely; SwiftUI updates that need main still hop via
+    /// `Task { @MainActor in ... }` from inside the handlers.
+    private let networkQueue = DispatchQueue(label: "io.tonel.network",
+                                              qos: .userInitiated)
 
     private var sequence: UInt16 = 0
     private var packetHandlers: [(UUID, PacketHandler)] = []
@@ -95,9 +114,19 @@ final class MixerClient {
                         "user_id": userId])
         }
         stopPing()
-        tcp?.cancel(); tcp = nil
+        closeTCPSocket()
         udp?.cancel(); udp = nil
         state = .disconnected
+    }
+
+    private func closeTCPSocket() {
+        if tcpSocket >= 0 {
+            Darwin.shutdown(tcpSocket, SHUT_RDWR)
+            Darwin.close(tcpSocket)
+            tcpSocket = -1
+        }
+        tcpReadThread?.cancel()
+        tcpReadThread = nil
     }
 
     // MARK: - Audio RTT (PING/PONG over mixer TCP)
@@ -119,13 +148,22 @@ final class MixerClient {
     }
 
     private func sendPing() {
-        guard let conn = tcp else { return }
-        pingLock.lock()
-        pingSentAt = Date().timeIntervalSinceReferenceDate
-        pingLock.unlock()
+        guard tcpSocket >= 0 else { return }
         let line = "{\"type\":\"PING\"}\n"
-        conn.send(content: line.data(using: .utf8),
-                  completion: .contentProcessed { _ in })
+        // Stamp pingSentAt RIGHT AFTER Darwin.send returns (= kernel has
+        // accepted the bytes), not before the async dispatch. Removes the
+        // tcpWriteQueue hop from the measured RTT, which would otherwise
+        // bias the number up by the queue-wakeup latency (typically
+        // sub-millisecond, but visible under contention).
+        tcpWriteQueue.async { [weak self] in
+            guard let self = self, self.tcpSocket >= 0 else { return }
+            _ = line.withCString { cstr in
+                Darwin.send(self.tcpSocket, cstr, strlen(cstr), MSG_DONTWAIT)
+            }
+            self.pingLock.lock()
+            self.pingSentAt = Date().timeIntervalSinceReferenceDate
+            self.pingLock.unlock()
+        }
     }
 
     // MARK: - Control (TCP JSON)
@@ -168,53 +206,100 @@ final class MixerClient {
         })
     }
 
-    // MARK: - TCP
+    // MARK: - TCP (POSIX sockets — bypasses system proxies)
 
     private func openTCP() async throws {
-        let host = NWEndpoint.Host(Endpoints.mixerHost)
-        let port = NWEndpoint.Port(integerLiteral: Endpoints.mixerTCPPort)
-        let params = NWParameters.tcp
-        // Realtime path: disable Nagle so a 2.5 ms frame goes out immediately.
-        if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
-            tcpOptions.noDelay = true
-            tcpOptions.connectionTimeout = 5
+        AppLog.log("[Mixer] openTCP (POSIX) → \(Endpoints.mixerHost):\(Endpoints.mixerTCPPort)")
+        
+        // Create socket
+        let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else {
+            throw MixerError.serverError("socket creation failed")
         }
-        let conn = NWConnection(host: host, port: port, using: params)
-        self.tcp = conn
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            conn.stateUpdateHandler = { st in
-                switch st {
-                case .ready:  cont.resume()
-                case .failed(let e): cont.resume(throwing: e)
-                case .cancelled: cont.resume(throwing: MixerError.cancelled)
-                default: break
-                }
+        
+        // Disable Nagle
+        var noDelay: Int32 = 1
+        Darwin.setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+        
+        // Set non-blocking for connect timeout
+        var flags = Darwin.fcntl(sock, F_GETFL, 0)
+        Darwin.fcntl(sock, F_SETFL, flags | O_NONBLOCK)
+        
+        // Resolve host
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = Endpoints.mixerTCPPort.bigEndian
+        addr.sin_addr.s_addr = inet_addr(Endpoints.mixerHost)
+        
+        // Connect
+        let connResult = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
-            conn.start(queue: .main)
         }
-        conn.stateUpdateHandler = nil
+        
+        if connResult < 0 && errno != EINPROGRESS {
+            Darwin.close(sock)
+            throw MixerError.serverError("connect failed: \(String(cString: strerror(errno)))")
+        }
+        
+        // Wait for connection with 5s timeout
+        var pollfd = Darwin.pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
+        let pollResult = Darwin.poll(&pollfd, 1, 5000)
+        
+        if pollResult <= 0 || (pollfd.revents & Int16(POLLOUT)) == 0 {
+            Darwin.close(sock)
+            throw MixerError.serverError("connect timeout")
+        }
+        
+        // Check connection success
+        var soError: Int32 = 0
+        var soErrLen = socklen_t(MemoryLayout<Int32>.size)
+        Darwin.getsockopt(sock, SOL_SOCKET, SO_ERROR, &soError, &soErrLen)
+        if soError != 0 {
+            Darwin.close(sock)
+            throw MixerError.serverError("connect error: \(String(cString: strerror(Int32(soError))))")
+        }
+        
+        // Set back to blocking mode for simpler read logic
+        flags = Darwin.fcntl(sock, F_GETFL, 0)
+        Darwin.fcntl(sock, F_SETFL, flags & ~O_NONBLOCK)
+        
+        tcpSocket = sock
+        AppLog.log("[Mixer] TCP connected (POSIX) fd=\(sock)")
     }
 
     private func sendJoinAndAwaitAck() async throws {
         let join = "{\"type\":\"MIXER_JOIN\",\"room_id\":\"\(roomId)\",\"user_id\":\"\(userId)\"}\n"
-        guard let conn = tcp else { throw MixerError.notConnected }
-        conn.send(content: join.data(using: .utf8), completion: .contentProcessed { err in
-            if let err = err { AppLog.log("[Mixer] MIXER_JOIN send err: \(err)") }
-        })
-        // Read until we have a newline-terminated JSON line (the ACK), or 8s timeout.
-        let deadline = Date().addingTimeInterval(8)
-        var accum = ""
-        while !accum.contains("\n") && Date() < deadline {
-            let chunk: String = try await withCheckedThrowingContinuation { cont in
-                conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, err in
-                    if let err = err { cont.resume(throwing: err); return }
-                    cont.resume(returning: String(data: data ?? Data(), encoding: .utf8) ?? "")
-                }
-            }
-            if chunk.isEmpty { throw MixerError.serverError("ACK closed") }
-            accum.append(chunk)
+        guard tcpSocket >= 0 else { throw MixerError.notConnected }
+        
+        // Send JOIN
+        _ = join.withCString { cstr in
+            Darwin.send(tcpSocket, cstr, strlen(cstr), 0)
         }
-        let line = accum.split(separator: "\n").first.map(String.init) ?? accum
+        
+        // Read ACK with 8s timeout
+        let deadline = Date().addingTimeInterval(8)
+        var accum = Data()
+        let bufferSize = 4096
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        
+        while !accum.contains(where: { $0 == 10 }) && Date() < deadline {
+            let bytesRead = Darwin.recv(tcpSocket, &buffer, bufferSize, MSG_DONTWAIT)
+            if bytesRead > 0 {
+                accum.append(contentsOf: buffer.prefix(Int(bytesRead)))
+            } else if bytesRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK {
+                throw MixerError.serverError("recv error: \(String(cString: strerror(errno)))")
+            } else {
+                // No data yet, small sleep to avoid busy-wait
+                try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+            }
+        }
+        
+        guard let line = String(data: accum, encoding: .utf8)?.split(separator: "\n").first.map(String.init) else {
+            throw MixerError.serverError("ACK timeout or invalid")
+        }
+        
         AppLog.log("[Mixer] ACK: \(line)")
         if line.contains("\"error\"") {
             throw MixerError.serverError(line)
@@ -237,24 +322,39 @@ final class MixerClient {
     }
 
     private func startTCPRead() {
-        guard let conn = tcp else { return }
-        func loop() {
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, err in
-                guard let self = self else { return }
-                let recvAt = Date().timeIntervalSinceReferenceDate
-                if let err = err { AppLog.log("[Mixer] TCP recv err: \(err)"); return }
-                if let data = data, !data.isEmpty,
-                   let s = String(data: data, encoding: .utf8) {
-                    self.handleTCPChunk(s, recvAt: recvAt)
-                }
-                if isComplete {
+        guard tcpSocket >= 0 else { return }
+        
+        let thread = Thread { [weak self] in
+            guard let self = self else { return }
+            let sock = self.tcpSocket
+            let bufferSize = 8192
+            var buffer = [UInt8](repeating: 0, count: bufferSize)
+            
+            while !Thread.current.isCancelled && self.tcpSocket >= 0 {
+                let bytesRead = Darwin.recv(sock, &buffer, bufferSize, 0)
+                if bytesRead > 0 {
+                    let data = Data(buffer.prefix(Int(bytesRead)))
+                    if let s = String(data: data, encoding: .utf8) {
+                        let recvAt = Date().timeIntervalSinceReferenceDate
+                        self.handleTCPChunk(s, recvAt: recvAt)
+                    }
+                } else if bytesRead == 0 {
+                    // Connection closed
                     Task { @MainActor in self.state = .disconnected }
-                    return
+                    break
+                } else {
+                    // Error
+                    if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR {
+                        AppLog.log("[Mixer] TCP read error: \(String(cString: strerror(errno)))")
+                        Task { @MainActor in self.state = .disconnected }
+                        break
+                    }
                 }
-                loop()
             }
         }
-        loop()
+        thread.name = "io.tonel.tcpread"
+        thread.start()
+        tcpReadThread = thread
     }
 
     /// Buffer TCP bytes into newline-separated JSON lines and dispatch each.
@@ -283,11 +383,16 @@ final class MixerClient {
     @MainActor private func notifyRttChanged(_ rtt: Int) {}
 
     private func send(json obj: [String: Any]) {
-        guard let conn = tcp,
+        guard tcpSocket >= 0,
               let data = try? JSONSerialization.data(withJSONObject: obj),
               var s = String(data: data, encoding: .utf8) else { return }
         s += "\n"
-        conn.send(content: s.data(using: .utf8), completion: .contentProcessed { _ in })
+        tcpWriteQueue.async { [weak self] in
+            guard let self = self, self.tcpSocket >= 0 else { return }
+            _ = s.withCString { cstr in
+                Darwin.send(self.tcpSocket, cstr, strlen(cstr), MSG_DONTWAIT)
+            }
+        }
     }
 
     // MARK: - UDP
@@ -299,7 +404,7 @@ final class MixerClient {
         params.serviceClass = .interactiveVoice    // QoS hint for low-latency RT
         let conn = NWConnection(host: host, port: port, using: params)
         self.udp = conn
-        conn.start(queue: .main)
+        conn.start(queue: networkQueue)
     }
 
     private func sendHandshake() {

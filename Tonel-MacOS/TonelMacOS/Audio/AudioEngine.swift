@@ -59,6 +59,56 @@ final class AudioEngine: ObservableObject {
     @Published private(set) var ringDropCount: Int = 0
     @Published private(set) var e2eLatencyMs: Int = 0
 
+    // ── Live tuning (mirrors web AudioDebugPanel) ──────────────────────────
+    /// Client-side jitter prime threshold (frames). Setter routes to the
+    /// `static var` on `JitterBuffer` so existing per-peer buffers pick it
+    /// up immediately. Range exposed in the panel: 1…16.
+    @Published var clientPrimeMin: Int = JitterBuffer.primeMin {
+        didSet { JitterBuffer.primeMin = clientPrimeMin }
+    }
+    /// Server-side per-user jitter target (frames). Setter sends MIXER_TUNE
+    /// over the mixer TCP control. Initial value is overwritten by the
+    /// MIXER_JOIN_ACK value via `syncServerTuningFromMixer()` after join.
+    @Published var serverJitterTarget: Int = 2 {
+        didSet {
+            guard serverJitterTarget != oldValue else { return }
+            mixer?.sendMixerTune(["jitter_target": serverJitterTarget])
+        }
+    }
+    /// Server-side per-user jitter cap (frames). Same MIXER_TUNE plumbing.
+    @Published var serverJitterMaxDepth: Int = 8 {
+        didSet {
+            guard serverJitterMaxDepth != oldValue else { return }
+            mixer?.sendMixerTune(["jitter_max_depth": serverJitterMaxDepth])
+        }
+    }
+
+    /// Pull current values from MixerClient (post-JOIN_ACK) into the
+    /// `@Published` mirrors so sliders open at the actual server defaults.
+    /// Called once from `AppState.joinRoom` after `mixer.connect`. Don't
+    /// re-call on every sheet open — that would clobber user edits.
+    func syncServerTuningFromMixer() {
+        guard let m = mixer else { return }
+        if serverJitterTarget != m.serverJitterTargetFrames {
+            serverJitterTarget = m.serverJitterTargetFrames
+        }
+        if serverJitterMaxDepth != m.serverJitterMaxFrames {
+            serverJitterMaxDepth = m.serverJitterMaxFrames
+        }
+    }
+
+    /// Sum of current per-peer jitter buffer depths (for the e2e formula's
+    /// realtime client-jitter term). Falls back to `clientPrimeMin × 1`
+    /// when no peers have joined yet so the display is non-zero before
+    /// the first packet lands. Reads under `peersLock`.
+    func currentJitterDepthFrames() -> Int {
+        peersLock.lock(); defer { peersLock.unlock() }
+        guard !peers.isEmpty else { return clientPrimeMin }
+        // Average across peers — same dimension as web's `playRingFill`.
+        let sum = peers.values.reduce(0) { $0 + $1.jitter.depth }
+        return sum / peers.count
+    }
+
     // ── Wiring ──────────────────────────────────────────────────────────────
     private weak var mixer: MixerClient?
     private let engine = AVAudioEngine()
@@ -629,9 +679,16 @@ final class AudioEngine: ObservableObject {
         let frameMs = AudioWire.frameMs
         let captureBufMs = Double(captureHwFrames) / Double(AudioWire.sampleRate) * 1000
         let outputBufMs  = Double(outputHwFrames)  / Double(AudioWire.sampleRate) * 1000
-        let serverJitterMs   = Double(serverJitterTargetFrames) * frameMs
-        let serverMixWaitMs  = frameMs / 2.0   // average half-tick wait
-        let clientJitterMs   = Double(JitterBuffer.primeMin) * frameMs
+        // Aligned with web `audioE2eLatency`:
+        //   server-jitter avg wait = (target − 0.5) × frameMs
+        //   server-tick           = frameMs (full tick, not half)
+        // Total invariant vs the previous (target × F + F/2) split.
+        let serverJitterMs   = max(0, (Double(serverJitterTargetFrames) - 0.5) * frameMs)
+        let serverMixWaitMs  = frameMs
+        // Realtime client-jitter = current JitterBuffer fill, mirroring
+        // web's `playRingFill / sr`. Was static `primeMin × frameMs`,
+        // i.e. a dead 5 ms that never reflected actual buffer depth.
+        let clientJitterMs   = Double(currentJitterDepthFrames()) * frameMs
         let total = Double(deviceInputLatencyMs)
                   + captureBufMs
                   + Double(audioRttMs)
@@ -648,9 +705,9 @@ final class AudioEngine: ObservableObject {
         let frameMs = AudioWire.frameMs
         let cap = Int((Double(captureHwFrames) / Double(AudioWire.sampleRate) * 1000).rounded())
         let out = Int((Double(outputHwFrames)  / Double(AudioWire.sampleRate) * 1000).rounded())
-        let srvJ = Int((Double(serverJitterTargetFrames) * frameMs).rounded())
-        let srvT = Int((frameMs / 2.0).rounded())
-        let cliJ = Int((Double(JitterBuffer.primeMin) * frameMs).rounded())
+        let srvJ = Int((max(0, (Double(serverJitterTargetFrames) - 0.5) * frameMs)).rounded())
+        let srvT = Int(frameMs.rounded())
+        let cliJ = Int((Double(currentJitterDepthFrames()) * frameMs).rounded())
         return [
             ("dev-in",   deviceInputLatencyMs),
             ("cap-buf",  cap),
