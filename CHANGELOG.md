@@ -9,6 +9,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.24] - 2026-05-05
+
+### Fixed — `/hk` URL got immediately rewritten to `/` on first paint
+
+v5.1.22 added `/hk` to `audioService.ts` + `mixerRttProbe.ts` host
+routing, but missed the URL-sync logic in `App.tsx`:
+
+- `pathPrefix()` only knew about `/new` — for `/hk` it returned `''`.
+- `parseRoomPath` regex only matched `(?:\/new)?\/room\/<id>`, not
+  `\/hk\/room\/<id>`.
+
+Result: visiting `tonel.io/hk` triggered the `useEffect` at
+`App.tsx:180` on mount, which computed `targetPath = '/'` (since
+prefix was empty and roomId was '') and `pushState`'d the URL back
+to `/` within milliseconds. UX: **browser appeared to redirect to
+home immediately**.
+
+Fix: extend `pathPrefix` return type to `'/new' | '/hk' | ''` and
+extend `parseRoomPath` regex to `(?:\/(?:new|hk))?\/room\/...`.
+Symmetric with how `/new` was handled before.
+
 ## [5.1.23] - 2026-05-05
 
 ### Fixed — v5.1.22 deploy aborted on the fresh HK box

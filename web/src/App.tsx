@@ -60,21 +60,27 @@ function makeLoggedInUserId(base: string): string {
 const USER_API_BASE = import.meta.env.VITE_USER_API_URL || 'https://api.tonel.io'
 
 // Deep-link parsing — `/room/<id>` is the canonical room URL.
-// `/new` is a parallel namespace pointing the audio + signaling at the
-// Guangzhou test mixer (see audioService.ts / signalService.ts);
-// `/new/room/<id>` is its room form. Both produce the same room id.
+// `/new` and `/hk` are parallel namespaces pointing the audio + signaling
+// at alternate mixer hosts (see audioService.ts / signalService.ts).
+// `/new/room/<id>` and `/hk/room/<id>` are their room forms. All three
+// produce the same room id.
 // Returns the room id if the path matches, else null.
 function parseRoomPath(pathname: string): string | null {
-  const m = pathname.match(/^(?:\/new)?\/room\/([A-Za-z0-9_-]+)\/?$/)
+  const m = pathname.match(/^(?:\/(?:new|hk))?\/room\/([A-Za-z0-9_-]+)\/?$/)
   return m ? m[1] : null
 }
 
-// `/new` test-deployment prefix. Audio + signaling services route to
-// new-server hosts when this prefix is present (see audioService.ts).
+// Test/staging-deployment prefix. Audio + signaling services route to
+// alternate hosts when this prefix is present (see audioService.ts).
 // Centralized here so URL-rewrite logic (room transitions, deep-link
 // cancel) preserves the prefix instead of clobbering it back to `/`.
-function pathPrefix(): '/new' | '' {
-  return window.location.pathname.startsWith('/new') ? '/new' : ''
+//   `/new` → Aliyun fallback (srv-new.tonel.io)
+//   `/hk`  → HK new prod (srv-hk.tonel.io, v5.1.22+)
+function pathPrefix(): '/new' | '/hk' | '' {
+  const p = window.location.pathname
+  if (p.startsWith('/new')) return '/new'
+  if (p.startsWith('/hk'))  return '/hk'
+  return ''
 }
 
 export default function App() {
