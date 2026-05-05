@@ -9,6 +9,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.22] - 2026-05-05
+
+### Changed — primary backend moved from 酷番云广州 to HK (cognetcloud)
+
+The previous primary at 酷番云 (`42.240.163.172`) was banned by the
+IDC's compliance scan on 2026-05-04: all TCP ports were RST'd from
+the public internet while ICMP stayed up — the classic 中国 IDC
+封禁 signature for hosting a non-备案 foreign TLD (`.io`). Rather
+than wait 1-2 weeks for `tonel.cc` ICP filing, this release moves
+the primary backend to a new HK box (`38.76.186.215`). HK doesn't
+require ICP filing; estimated end-to-end latency increase for
+mainland users is +15-30 ms (跨境 link, no further amplification
+since traffic stays out of GFW filter chains).
+
+Aliyun (`8.163.21.207`) keeps serving the `/new` fallback path AND
+the Tonel-MacOS desktop client (raw UDP 9003) — no change.
+
+#### New `/hk` URL path for staged validation
+
+Added a third routing tier to the web client (mirrors the
+`/`+`/new` pattern from v5.0.0):
+
+  | path  | host                  | server     |
+  | ----- | --------------------- | ---------- |
+  | `/`   | `srv.tonel.io`        | 酷番云 (DNS still here, will flip to HK) |
+  | `/new`| `srv-new.tonel.io`    | Aliyun fallback |
+  | `/hk` | `srv-hk.tonel.io`     | HK new prod (validation) |
+
+`/hk` lets users opt into the HK box explicitly before `srv.tonel.io`
+DNS is flipped. After validation clears, DNS flips and `/hk` becomes
+redundant (will be removed in a follow-up release).
+
+`audioService.ts` and `mixerRttProbe.ts` updated symmetrically.
+
+#### Deploy tooling — HK-aware
+
+- `deploy/.env.deploy` re-pointed to HK (was 酷番云). The kufan
+  target is now reachable only via inline override.
+- `deploy/lib/common.sh`: `ENV_FILE` is now overridable from the
+  environment (`ENV_FILE=deploy/.env.deploy.aliyun deploy/server.sh`).
+- `deploy/server.sh` `deploy_ops()`:
+  - Picks up `ops/nginx/srv-hk.tonel.io.conf` automatically.
+  - `TONEL_CF_TUNNEL_ID` empty → entire cloudflared block is
+    skipped (HK doesn't use CF Tunnel; nginx terminates 80/443).
+  - `nginx -t` failure on first deploy now warns instead of aborts
+    (certs may not yet exist on a fresh box).
+- New `ops/nginx/srv-hk.tonel.io.conf` — mirror of
+  `srv.tonel.io.conf` with `server_name srv-hk.tonel.io`. Uses the
+  same `srv.tonel.io` cert lineage (SAN cert covers both names) so
+  one certbot renewal updates both.
+
+#### Pretest skipped (justified)
+
+Pretest was `SKIP_PRETEST=1` for this release because its Layer 3
+health check pings the production endpoint, which is the very thing
+this release is fixing — there's no useful state to validate against.
+Layer 1/1.5/2 audio tests remain run-locally and are clean.
+
 ## [5.1.21] - 2026-05-04
 
 ### Fixed — homepage hero RTT showing ~2× the in-room RTT

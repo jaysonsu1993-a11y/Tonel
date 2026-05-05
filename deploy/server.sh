@@ -211,39 +211,51 @@ deploy_ops() {
     rsync_to_remote "$REPO_ROOT/ops/nginx/srv.tonel.io.conf"     "/etc/nginx/sites-available/srv.tonel.io"
     rsync_to_remote "$REPO_ROOT/ops/nginx/srv-new.tonel.io.conf" "/etc/nginx/sites-available/srv-new.tonel.io"
     rsync_to_remote "$REPO_ROOT/ops/nginx/tonel.io.conf"         "/etc/nginx/sites-available/tonel.io"
+    # srv-hk.tonel.io is HK-staging only (v5.1.22+); shipped if the conf exists.
+    if [ -f "$REPO_ROOT/ops/nginx/srv-hk.tonel.io.conf" ]; then
+        rsync_to_remote "$REPO_ROOT/ops/nginx/srv-hk.tonel.io.conf" "/etc/nginx/sites-available/srv-hk.tonel.io"
+    fi
     ssh_exec "
         set -e
         ln -sf /etc/nginx/sites-available/srv.tonel.io     /etc/nginx/sites-enabled/srv.tonel.io
         ln -sf /etc/nginx/sites-available/srv-new.tonel.io /etc/nginx/sites-enabled/srv-new.tonel.io
         ln -sf /etc/nginx/sites-available/tonel.io         /etc/nginx/sites-enabled/tonel.io
-        nginx -t
-        systemctl reload nginx
+        [ -f /etc/nginx/sites-available/srv-hk.tonel.io ] && \
+            ln -sf /etc/nginx/sites-available/srv-hk.tonel.io /etc/nginx/sites-enabled/srv-hk.tonel.io || true
+        # Don't run nginx -t / reload here — certs may not exist yet on a
+        # fresh box. Caller is expected to sign certs first, then reload.
+        if nginx -t 2>/dev/null; then systemctl reload nginx; else
+            warn '[ops] nginx -t failed (likely missing certs); skipping reload'
+        fi
     "
 
-    log "[ops] apply cloudflared config"
-    [ -n "${TONEL_CF_TUNNEL_ID:-}" ] || die "TONEL_CF_TUNNEL_ID not set in .env.deploy"
-    local tmp; tmp=$(mktemp)
-    # Substitute ${TUNNEL_ID} only on non-comment lines (preserves docs/examples).
-    awk -v id="$TONEL_CF_TUNNEL_ID" '
-        /^[[:space:]]*#/ { print; next }
-        { gsub(/\$\{TUNNEL_ID\}/, id); print }
-    ' "$REPO_ROOT/ops/cloudflared/config.yml.template" > "$tmp"
-    rsync_to_remote "$tmp" "/root/.cloudflared/config.yml"
-    rm -f "$tmp"
+    if [ -n "${TONEL_CF_TUNNEL_ID:-}" ]; then
+        log "[ops] apply cloudflared config (TONEL_CF_TUNNEL_ID=$TONEL_CF_TUNNEL_ID)"
+        local tmp; tmp=$(mktemp)
+        # Substitute ${TUNNEL_ID} only on non-comment lines (preserves docs/examples).
+        awk -v id="$TONEL_CF_TUNNEL_ID" '
+            /^[[:space:]]*#/ { print; next }
+            { gsub(/\$\{TUNNEL_ID\}/, id); print }
+        ' "$REPO_ROOT/ops/cloudflared/config.yml.template" > "$tmp"
+        rsync_to_remote "$tmp" "/root/.cloudflared/config.yml"
+        rm -f "$tmp"
 
-    # Install systemd drop-in extending Start/StopSec to 180s. cloudflared's
-    # upstream unit ships with TimeoutStartSec=15 (way too short for re-
-    # establishing 4 edge connections); the v5.1.0 release deploy hit this
-    # and aborted with a timeout. Drop-in survives `cloudflared service
-    # install` upgrades, unlike editing the unit file. Path is fixed at
-    # /etc/systemd/system/cloudflared.service.d/ per systemd conventions.
-    log "[ops] install cloudflared.service.d/ drop-in (TimeoutStart/Stop=180)"
-    ssh_exec "mkdir -p /etc/systemd/system/cloudflared.service.d"
-    rsync_to_remote "$REPO_ROOT/ops/cloudflared/cloudflared.service.d/timeout.conf" \
-        "/etc/systemd/system/cloudflared.service.d/timeout.conf"
-    ssh_exec "systemctl daemon-reload"
+        # Install systemd drop-in extending Start/StopSec to 180s. cloudflared's
+        # upstream unit ships with TimeoutStartSec=15 (way too short for re-
+        # establishing 4 edge connections); the v5.1.0 release deploy hit this
+        # and aborted with a timeout. Drop-in survives `cloudflared service
+        # install` upgrades, unlike editing the unit file. Path is fixed at
+        # /etc/systemd/system/cloudflared.service.d/ per systemd conventions.
+        log "[ops] install cloudflared.service.d/ drop-in (TimeoutStart/Stop=180)"
+        ssh_exec "mkdir -p /etc/systemd/system/cloudflared.service.d"
+        rsync_to_remote "$REPO_ROOT/ops/cloudflared/cloudflared.service.d/timeout.conf" \
+            "/etc/systemd/system/cloudflared.service.d/timeout.conf"
+        ssh_exec "systemctl daemon-reload"
 
-    ssh_exec "systemctl restart cloudflared"
+        ssh_exec "systemctl restart cloudflared"
+    else
+        log "[ops] TONEL_CF_TUNNEL_ID empty — skipping cloudflared config (HK direct-IP target)"
+    fi
 
     log "[ops] save PM2 process list (so it survives reboot)"
     ssh_exec "pm2 save"

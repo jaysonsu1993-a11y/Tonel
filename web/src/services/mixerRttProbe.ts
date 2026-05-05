@@ -93,7 +93,11 @@ class MixerRttProbe {
 
   private connect(): void {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host     = location.pathname.startsWith('/new') ? 'srv-new.tonel.io' : 'srv.tonel.io'
+    // v5.1.22: mirror audioService.ts host routing (/, /new, /hk).
+    const _path    = location.pathname
+    const host     = _path.startsWith('/new') ? 'srv-new.tonel.io'
+                   : _path.startsWith('/hk')  ? 'srv-hk.tonel.io'
+                   :                             'srv.tonel.io'
     const url      = `${protocol}//${host}/mixer-tcp`
 
     let ws: WebSocket

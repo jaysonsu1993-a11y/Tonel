@@ -12,7 +12,7 @@ REPO_ROOT="$(cd "$DEPLOY_DIR/.." && pwd)"                       # repo root
 # the repo root; some external scripts may still source this).
 GIT_DIR="$REPO_ROOT"
 
-ENV_FILE="$DEPLOY_DIR/.env.deploy"
+ENV_FILE="${ENV_FILE:-$DEPLOY_DIR/.env.deploy}"
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 

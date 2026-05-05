@@ -2642,12 +2642,16 @@ export class AudioService {
     }
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // v5.1.14: hosts are independent — `/` traffic stays on kufan
-    // (srv.tonel.io), `/new` traffic stays on Aliyun (srv-new.tonel.io).
-    // No auto-fallback between them. Operator's product decision: each
-    // server has its own purpose and is allocated to a specific user
-    // segment; cross-host failover would mix audiences.
-    const host = location.pathname.startsWith('/new') ? 'srv-new.tonel.io' : 'srv.tonel.io'
+    // v5.1.22: three independent hosts, no auto-fallback. Operator's
+    // product decision — each segment lives on its own server:
+    //   `/`    → srv.tonel.io     (酷番云 / HK after DNS flip)
+    //   `/new` → srv-new.tonel.io (Aliyun fallback)
+    //   `/hk`  → srv-hk.tonel.io  (HK staging; new prod under validation)
+    // Cross-host failover would mix audiences, so we don't.
+    const path = location.pathname
+    const host = path.startsWith('/new') ? 'srv-new.tonel.io'
+               : path.startsWith('/hk')  ? 'srv-hk.tonel.io'
+               :                            'srv.tonel.io'
     const controlUrl = `${protocol}//${host}/mixer-tcp`
     const audioUrl   = `${protocol}//${host}/mixer-udp`
     // WebTransport listens on UDP 4433 with the same TLS cert as
