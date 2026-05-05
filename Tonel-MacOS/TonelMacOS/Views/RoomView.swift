@@ -497,8 +497,16 @@ struct SettingsSheet: View {
     @State private var outputDevices: [AudioDeviceInfo] = []
     @State private var selectedOutput: AudioDeviceID = 0
     @State private var requestedRate: Double? = nil
+    @State private var outputError: String? = nil
+    @AppStorage(AudioEngine.bufferFramesKey) private var bufferFrames: Int = AudioWire.frameSamples
+    @State private var deviceFrameRange: (Int, Int) = (15, 4096)
 
     private let supportedRates: [Double] = [44100, 48000, 96000]
+    /// Common IO buffer sizes shown in the picker. Each value is the
+    /// "official" size for typical low-latency audio drivers — picking
+    /// outside these is fine but rarely useful. Sample rate is 48 kHz so
+    /// the ms readout is `frames / 48`.
+    private let bufferOptions: [Int] = [32, 64, 96, 120, 128, 240, 256, 480, 512, 1024, 2048, 4096]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -519,10 +527,51 @@ struct SettingsSheet: View {
                         }
                     }
                     .labelsHidden()
-                    .onChange(of: selectedOutput) { _, new in
-                        try? audio.setOutputDevice(new)
+                    .onChange(of: selectedOutput) { old, new in
+                        // Skip the spurious onChange that fires when we
+                        // seed `selectedOutput` to the current device on
+                        // appear — old==0 is the SwiftUI initial state
+                        // before `.onAppear` runs.
+                        guard old != 0, old != new else { return }
+                        do {
+                            try audio.setOutputDevice(new)
+                        } catch {
+                            AppLog.log("[Settings] setOutputDevice(\(new)) failed: \(error)")
+                            outputError = error.localizedDescription
+                        }
                     }
                 }
+                if let outputError = outputError {
+                    Text("输出切换失败: \(outputError)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                }
+            }
+
+            section("硬件缓冲块大小") {
+                row("frames") {
+                    Picker("", selection: $bufferFrames) {
+                        // Filter to options the driver can actually accept;
+                        // anything outside [min, max] gets silently clamped
+                        // by CoreAudio so showing it would mislead the user.
+                        ForEach(bufferOptions.filter {
+                            $0 >= deviceFrameRange.0 && $0 <= deviceFrameRange.1
+                        }, id: \.self) { f in
+                            Text("\(f) (\(String(format: "%.1f", Double(f) / 48.0)) ms)")
+                                .tag(f)
+                        }
+                    }
+                    .labelsHidden()
+                    .onChange(of: bufferFrames) { _, new in
+                        audio.applyBufferFrames(new)
+                    }
+                }
+                Text("实际：input \(audio.captureHwFrames) / output \(audio.outputHwFrames) (\(String(format: "%.1f", Double(audio.captureHwFrames) / 48.0)) / \(String(format: "%.1f", Double(audio.outputHwFrames) / 48.0)) ms)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(white: 0.6))
+                Text("设备允许范围：\(deviceFrameRange.0) – \(deviceFrameRange.1) frames。值越小延迟越低，但越容易出现 underrun 破音；笔记本内置麦/扬声器通常需要 256+。修改立即生效，重启 app 后保留。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(white: 0.45))
             }
 
             section("采样率") {
@@ -562,7 +611,22 @@ struct SettingsSheet: View {
         .background(Color(red: 0.10, green: 0.10, blue: 0.12))
         .onAppear {
             outputDevices = AudioEngine.listOutputDevices()
-            if let first = outputDevices.first { selectedOutput = first.id }
+            // Seed selectedOutput to the device the AU is currently using,
+            // not just the first enumerated one — otherwise picking the
+            // current device looks like a no-op (onChange doesn't fire
+            // when value stays the same).
+            let current = audio.currentOutputDeviceID()
+            if outputDevices.contains(where: { $0.id == current }) {
+                selectedOutput = current
+            } else if let first = outputDevices.first {
+                selectedOutput = first.id
+            }
+            deviceFrameRange = audio.bufferFrameRange()
+            // Restore the user's last sample-rate choice from UserDefaults.
+            // 0 (or missing) means "auto" → leave requestedRate=nil so the
+            // Binding's get returns -1.0 and the "自动" tag gets selected.
+            let savedRate = UserDefaults.standard.double(forKey: AudioEngine.sampleRateKey)
+            requestedRate = savedRate > 0 ? savedRate : nil
         }
     }
 

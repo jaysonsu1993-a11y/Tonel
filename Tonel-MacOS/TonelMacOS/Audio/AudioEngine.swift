@@ -112,6 +112,15 @@ final class AudioEngine: ObservableObject {
     // ── Wiring ──────────────────────────────────────────────────────────────
     private weak var mixer: MixerClient?
     private let engine = AVAudioEngine()
+    /// Standalone HAL output AudioUnit (kAudioUnitSubType_HALOutput).
+    /// Replaces the AVAudioEngine sourceNode → mainMixerNode → outputNode
+    /// chain for playback. The reason: AVAudioEngine on macOS uses a
+    /// shared internal HAL AU for I/O which refuses CurrentDevice
+    /// changes (returns -10851 / -19851) regardless of stop()/Uninit
+    /// sequencing. A bare AUHAL we own outright accepts the standard
+    /// Uninitialize → SetProperty(CurrentDevice) → Initialize dance.
+    /// Capture stays on AVAudioEngine — only output is migrated.
+    private var outputAU: AudioUnit?
     private var sourceNode: AVAudioSourceNode!
     /// Capture sink — runs per HW IO buffer (5–10 ms granularity), unlike
     /// `installTap` which aggregates ~100 ms. Replacing the tap drops
@@ -210,20 +219,22 @@ final class AudioEngine: ObservableObject {
 
         applyMonitor()                       // initial monitor gain (no-op now)
 
-        // 3) Peer mix lane: sourceNode (peer audio) → mainMixerNode.
-        sourceNode = AVAudioSourceNode(format: wireFormat) {
-            [weak self] _, _, frameCount, audioBufferList -> OSStatus in
-            self?.fillPlayback(frameCount: Int(frameCount), abl: audioBufferList)
-            return noErr
-        }
-        engine.attach(sourceNode)
-        engine.connect(sourceNode, to: engine.mainMixerNode, format: wireFormat)
+        // 3) Peer mix lane — driven by a STANDALONE HAL output AU now.
+        // sourceNode left nil for the legacy AVAudioEngine path; nothing
+        // references it after the rewrite.
+        try setupOutputAU(wireFormat: wireFormat)
 
-        // Match HW IO buffer to the wire frame (120 samples / 2.5 ms): every
-        // sinkNode callback produces exactly one SPA1 packet, capture
-        // accumulator stays empty, and monitor latency = 1× HW buffer ≈ 2.5 ms.
-        // macOS clamps to the device's allowed range — SSL 2+ accepts 15.
-        setHardwareBufferFrames(target: UInt32(AudioWire.frameSamples))
+        // HW IO buffer size: user-tunable via Settings (`hwBufferFrames`
+        // in UserDefaults). Default = wire frame (120 samples / 2.5 ms),
+        // every sinkNode callback produces exactly one SPA1 packet,
+        // monitor latency = 1× HW buffer. macOS clamps to the device's
+        // allowed range — SSL 2+ accepts 15, MacBook builtin needs 256+.
+        let saved = UserDefaults.standard.integer(forKey: AudioEngine.bufferFramesKey)
+        let target = saved > 0 ? saved : AudioWire.frameSamples
+        setHardwareBufferFrames(target: UInt32(target))
+
+        // Output device choice is handled inside `setupOutputAU` —
+        // bare AUHAL accepts the standard Uninit/Set/Init dance.
 
         engine.prepare()
         try engine.start()
@@ -249,7 +260,7 @@ final class AudioEngine: ObservableObject {
     private func readDeviceLatencies() {
         deviceInputLatencyMs = readDeviceLatencyMs(unit: engine.inputNode.audioUnit,
                                                    inputScope: true)
-        deviceOutputLatencyMs = readDeviceLatencyMs(unit: engine.outputNode.audioUnit,
+        deviceOutputLatencyMs = readDeviceLatencyMs(unit: outputAU ?? engine.outputNode.audioUnit,
                                                     inputScope: false)
     }
 
@@ -304,12 +315,139 @@ final class AudioEngine: ObservableObject {
         return Int(Double(total) / Double(AudioWire.sampleRate) * 1000.rounded())
     }
 
+    /// Build the standalone HAL output AU. Configured once per `start()`,
+    /// torn down in `stop()`. Stream format on the input scope of bus 0
+    /// is our wire format (48 kHz mono Float32) — AUHAL's internal
+    /// AudioConverter handles the conversion to whatever the device wants.
+    private func setupOutputAU(wireFormat: AVAudioFormat) throws {
+        // 1. Find the HAL output component.
+        var desc = AudioComponentDescription(
+            componentType:         kAudioUnitType_Output,
+            componentSubType:      kAudioUnitSubType_HALOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags:        0,
+            componentFlagsMask:    0)
+        guard let comp = AudioComponentFindNext(nil, &desc) else {
+            throw NSError(domain: "Tonel", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "HAL output component not found"])
+        }
+        var au: AudioUnit?
+        var st = AudioComponentInstanceNew(comp, &au)
+        guard st == noErr, let au = au else {
+            throw NSError(domain: "Tonel", code: Int(st),
+                          userInfo: [NSLocalizedDescriptionKey: "AudioComponentInstanceNew failed (\(st))"])
+        }
+
+        // 2. HALOutput defaults to "input disabled, output enabled". On
+        // bus 0 (output side) input scope = output scope = output. Make
+        // sure output is enabled and input is disabled — explicit so the
+        // AU never tries to grab a microphone.
+        var enable: UInt32 = 1
+        AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO,
+                             kAudioUnitScope_Output, 0,
+                             &enable, UInt32(MemoryLayout<UInt32>.size))
+        var disable: UInt32 = 0
+        AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO,
+                             kAudioUnitScope_Input, 1,
+                             &disable, UInt32(MemoryLayout<UInt32>.size))
+
+        // 3. Choose the device. Saved preference → fallback to system
+        // default output if the saved ID isn't valid anymore (device
+        // unplugged since last run).
+        let saved = AudioDeviceID(UserDefaults.standard.integer(forKey: AudioEngine.outputDeviceIDKey))
+        let device = (saved != 0 && AudioEngine.deviceExists(saved, scope: kAudioDevicePropertyScopeOutput))
+            ? saved : AudioEngine.systemDefaultOutputDevice()
+        if device != 0 {
+            var did = device
+            st = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                      kAudioUnitScope_Global, 0,
+                                      &did, UInt32(MemoryLayout<AudioDeviceID>.size))
+            if st != noErr {
+                AppLog.log("[AudioEngine] outputAU initial CurrentDevice=\(device) failed status=\(st)")
+            }
+        }
+
+        // 4. Stream format on input scope of bus 0 = what we render.
+        // AUHAL converts to device's native format internally.
+        var asbd = wireFormat.streamDescription.pointee
+        st = AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat,
+                                  kAudioUnitScope_Input, 0,
+                                  &asbd, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
+        if st != noErr {
+            AppLog.log("[AudioEngine] outputAU set wire format failed status=\(st)")
+        }
+
+        // 5. Render callback. Pass `self` via Unmanaged so the trampoline
+        // can call back into `fillPlayback` without ARC retain cycles.
+        var cb = AURenderCallbackStruct(
+            inputProc: { (refCon, _, _, _, frameCount, ioData) -> OSStatus in
+                guard let abl = ioData else { return noErr }
+                let me = Unmanaged<AudioEngine>.fromOpaque(refCon).takeUnretainedValue()
+                me.fillPlayback(frameCount: Int(frameCount), abl: UnsafePointer(abl))
+                return noErr
+            },
+            inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
+        st = AudioUnitSetProperty(au, kAudioUnitProperty_SetRenderCallback,
+                                  kAudioUnitScope_Input, 0,
+                                  &cb, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        if st != noErr {
+            AppLog.log("[AudioEngine] outputAU set render callback failed status=\(st)")
+        }
+
+        // 6. Initialize and start.
+        st = AudioUnitInitialize(au)
+        if st != noErr {
+            AppLog.log("[AudioEngine] outputAU init failed status=\(st)")
+        }
+        st = AudioOutputUnitStart(au)
+        if st != noErr {
+            AppLog.log("[AudioEngine] outputAU start failed status=\(st)")
+        }
+        outputAU = au
+        AppLog.log("[AudioEngine] outputAU running on device=\(device)")
+    }
+
+    /// Tear down the bare HAL output AU. Symmetric counterpart to setupOutputAU.
+    private func teardownOutputAU() {
+        guard let au = outputAU else { return }
+        AudioOutputUnitStop(au)
+        AudioUnitUninitialize(au)
+        AudioComponentInstanceDispose(au)
+        outputAU = nil
+    }
+
+    /// Read the system's current default output device.
+    /// Used as a fallback when no preference saved or the saved one
+    /// no longer exists.
+    private static func systemDefaultOutputDevice() -> AudioDeviceID {
+        var id: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
+        return id
+    }
+
+    /// Sanity check a saved deviceID — devices can be unplugged between runs.
+    private static func deviceExists(_ id: AudioDeviceID, scope: AudioObjectPropertyScope) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        let st = AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size)
+        return st == noErr && size > 0
+    }
+
     /// No-op now that monitor is mixed in the playback callback. Kept as a
     /// hook for future device-side gain adjustments.
     private func applyMonitor() {}
 
     func stop() {
         guard isRunning else { return }
+        teardownOutputAU()      // standalone HAL output AU
         engine.stop()
         if let s = sourceNode {
             engine.disconnectNodeInput(s)
@@ -602,15 +740,67 @@ final class AudioEngine: ObservableObject {
         }
     }
 
+    /// UserDefaults key for the persisted HW IO buffer size (frames).
+    /// 0 / missing = use `AudioWire.frameSamples` (120) default.
+    static let bufferFramesKey   = "tonel.audio.hwBufferFrames"
+    /// UserDefaults key for the persisted output device ID. Read at
+    /// `start()` so the engine comes up routed to the user's choice
+    /// even before `setOutputDevice()` is called explicitly.
+    static let outputDeviceIDKey = "tonel.audio.outputDeviceID"
+    /// UserDefaults key for the persisted requested sample rate (Double).
+    /// 0 / missing = "auto" (use device's first available rate).
+    static let sampleRateKey     = "tonel.audio.sampleRate"
+
+    /// Public setter — applies a new HW IO buffer size live (no engine
+    /// restart needed; CoreAudio accepts the property change on the
+    /// running device) AND persists it for the next launch. The actual
+    /// applied value is read back into `captureHwFrames` / `outputHwFrames`
+    /// (both may differ from the requested value if the device clamps).
+    func applyBufferFrames(_ frames: Int) {
+        UserDefaults.standard.set(frames, forKey: AudioEngine.bufferFramesKey)
+        setHardwareBufferFrames(target: UInt32(frames))
+    }
+
+    /// Read the device's `kAudioDevicePropertyBufferFrameSizeRange`. Picker
+    /// in Settings filters its options against this so the user can't ask
+    /// for something the driver will silently clamp anyway.
+    /// Returns `(min, max)` in frames, or `(15, 4096)` as a safe fallback
+    /// when the device can't be queried.
+    func bufferFrameRange() -> (Int, Int) {
+        // Prefer the bare outputAU's device. Fall back to whatever
+        // AVAudioEngine reports if outputAU isn't up yet (Home screen
+        // with engine stopped — we can still query a sensible range
+        // through the AVAudioEngine outputNode placeholder).
+        let au = outputAU ?? engine.outputNode.audioUnit
+        guard let au = au else { return (15, 4096) }
+        var deviceID: AudioDeviceID = 0
+        var devSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                   kAudioUnitScope_Global, 0, &deviceID, &devSize) == noErr,
+              deviceID != 0 else { return (15, 4096) }
+        var range = AudioValueRange()
+        var rangeSize = UInt32(MemoryLayout<AudioValueRange>.size)
+        var rangeAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyBufferFrameSizeRange,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(deviceID, &rangeAddr, 0, nil, &rangeSize, &range) == noErr
+        else { return (15, 4096) }
+        return (Int(range.mMinimum), Int(range.mMaximum))
+    }
+
     /// Drive the actual Core Audio device's IO buffer frame size as low as
     /// the device will permit — macOS will silently clamp if our target is
     /// outside the device's range. 256 frames ≈ 5.3 ms @ 48 kHz, suitable
     /// for live monitoring on USB pro interfaces (SSL 2+, RME, etc.).
     /// AVAudioEngine on its own often leaves this at 4096+ for power.
     private func setHardwareBufferFrames(target: UInt32) {
+        // Output side now uses the standalone HAL AU; fall back to
+        // AVAudioEngine.outputNode only if outputAU isn't up yet.
+        let outputAUForBuffer = outputAU ?? engine.outputNode.audioUnit
         for which in [
             (engine.inputNode.audioUnit,  "input"),
-            (engine.outputNode.audioUnit, "output"),
+            (outputAUForBuffer,            "output"),
         ] {
             guard let au = which.0 else { continue }
             var deviceID: AudioDeviceID = 0
@@ -785,12 +975,60 @@ final class AudioEngine: ObservableObject {
         return result
     }
 
+    /// Current output device the AU is routed to. The Settings picker
+    /// reads this on appear so it shows the actual device, not just the
+    /// first one in the enumeration. Returns 0 on failure.
+    func currentOutputDeviceID() -> AudioDeviceID {
+        // Prefer the live outputAU's CurrentDevice (running engine);
+        // fall back to UserDefaults when the engine isn't started yet
+        // so the picker on Home page can still seed the right value.
+        if let au = outputAU {
+            return currentAUDeviceID(unit: au)
+        }
+        let saved = AudioDeviceID(UserDefaults.standard.integer(forKey: AudioEngine.outputDeviceIDKey))
+        if saved != 0 { return saved }
+        return AudioEngine.systemDefaultOutputDevice()
+    }
+    func currentInputDeviceID() -> AudioDeviceID {
+        currentAUDeviceID(unit: engine.inputNode.audioUnit)
+    }
+    private func currentAUDeviceID(unit: AudioUnit?) -> AudioDeviceID {
+        guard let au = unit else { return 0 }
+        var deviceID: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0, &deviceID, &size)
+        return status == noErr ? deviceID : 0
+    }
+
     /// Switch the engine's playback device.
-    /// AVAudioEngine on macOS allows hot-swapping the AUHAL's CurrentDevice
-    /// while running; the engine re-negotiates formats on the fly.
+    ///
+    /// Earlier versions assumed AVAudioEngine could hot-swap the AUHAL's
+    /// `kAudioOutputUnitProperty_CurrentDevice` live. In practice the AU
+    /// returns `-19851` on macOS once it's been initialized — even when
+    /// the engine is "stopped" the underlying AU may still be in an
+    /// initialized state from a previous prepare(). The reliable pattern
+    /// is the same one `setInputDevice` already uses: stop the engine,
+    /// swap the device, restart. Persist the choice (via UserDefaults
+    /// in the caller) so it survives across launches.
     func setOutputDevice(_ deviceID: AudioDeviceID) throws {
-        try setAUDevice(unit: engine.outputNode.audioUnit, deviceID: deviceID,
-                        label: "output")
+        // Persist immediately so the choice survives a restart even
+        // when the engine isn't running (Home screen, before any join).
+        UserDefaults.standard.set(Int(deviceID), forKey: AudioEngine.outputDeviceIDKey)
+        // If we have a live HAL output AU, swap its device in place via
+        // the documented Uninit/Set/Init dance. We OWN this AU outright
+        // so it actually uninitializes when asked (unlike the AVAudioEngine
+        // outputNode which kept stealing our state).
+        if let au = outputAU {
+            AudioOutputUnitStop(au)
+            try setAUDevice(unit: au, deviceID: deviceID, label: "output")
+            let st = AudioOutputUnitStart(au)
+            if st != noErr {
+                AppLog.log("[AudioEngine] outputAU restart after device swap failed: \(st)")
+            }
+        }
+        // No-op when engine isn't running yet — the saved preference
+        // gets read on the next `start()` → `setupOutputAU`.
     }
 
     /// Switch the engine's input device (the mic feeding inputNode).
@@ -810,27 +1048,101 @@ final class AudioEngine: ObservableObject {
             throw NSError(domain: "Tonel", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "\(label) AudioUnit 不可用"])
         }
+        // CurrentDevice can only be changed when the AU is uninitialized.
+        // `engine.stop()` pauses IO but doesn't uninitialize the AU on
+        // macOS, so a naive set returns -10851 (InvalidPropertyValue) /
+        // -19851 from AUHAL. Explicitly bracket the write with
+        // Uninitialize / Initialize. The Uninitialize/Initialize calls
+        // are idempotent and tolerate "already in this state" — checking
+        // the return is informational only.
+        let uninit = AudioUnitUninitialize(au)
         var did = deviceID
         let status = AudioUnitSetProperty(au,
                                           kAudioOutputUnitProperty_CurrentDevice,
                                           kAudioUnitScope_Global,
                                           0, &did,
                                           UInt32(MemoryLayout<AudioDeviceID>.size))
+        // Re-initialize regardless so we don't leave the AU in a
+        // half-baked state when the set fails.
+        let reinit = AudioUnitInitialize(au)
         if status != noErr {
             throw NSError(domain: "Tonel", code: Int(status),
                           userInfo: [NSLocalizedDescriptionKey:
-                              "切换 \(label) 设备失败 (status=\(status))"])
+                              "切换 \(label) 设备失败 (status=\(status), uninit=\(uninit), reinit=\(reinit))"])
         }
-        AppLog.log("[AudioEngine] switched \(label) device → id=\(deviceID)")
+        AppLog.log("[AudioEngine] switched \(label) device → id=\(deviceID) uninit=\(uninit) reinit=\(reinit)")
     }
 
-    /// Force a different device sample-rate (Core Audio device-side; the
-    /// engine's wire format stays at 48 kHz). 0 / nil means restore default.
+    /// Force a different device sample-rate via CoreAudio HAL's
+    /// `kAudioDevicePropertyNominalSampleRate`. Applied to the input
+    /// device the engine is currently routed to. The engine's wire
+    /// format stays at 48 kHz — if the device sample rate doesn't match,
+    /// AVAudioEngine inserts a linear resampler between the AU and the
+    /// tap (visible as `mic native fmt: <rate>` in the audio log).
+    ///
+    /// `nil` = restore the device's default rate (typically the system
+    /// preference set in Audio MIDI Setup).
     func setInputDeviceSampleRate(_ rate: Double?) {
-        // Setting per-device sample rate via HAL is intricate and platform
-        // version-sensitive; for now this is a hook the UI can flip but the
-        // actual Core Audio call is a TODO. The wire frame size never changes.
-        actualSampleRate = rate ?? Double(AudioWire.sampleRate)
+        // Persist immediately. nil → 0 sentinel meaning "auto".
+        UserDefaults.standard.set(rate ?? 0, forKey: AudioEngine.sampleRateKey)
+        // Take a snapshot of which device we're talking to. Reading
+        // the AU property each time means the picker can drive a rate
+        // change after the user swapped the input device too.
+        guard let au = engine.inputNode.audioUnit else {
+            AppLog.log("[AudioEngine] setInputDeviceSampleRate: no inputNode AU")
+            return
+        }
+        var deviceID: AudioDeviceID = 0
+        var devSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let getStatus = AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                             kAudioUnitScope_Global, 0, &deviceID, &devSize)
+        guard getStatus == noErr, deviceID != 0 else {
+            AppLog.log("[AudioEngine] setInputDeviceSampleRate: getCurrentDevice err \(getStatus)")
+            return
+        }
+
+        // Resolve target rate. nil → first available rate from the device's
+        // declared list as a "default" fallback (HAL doesn't expose a
+        // single 'preferred' rate).
+        let targetRate: Double = rate ?? deviceDefaultSampleRate(deviceID: deviceID)
+                                           ?? Double(AudioWire.sampleRate)
+
+        var newRate = targetRate
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let setStatus = AudioObjectSetPropertyData(deviceID, &addr, 0, nil,
+                                                   UInt32(MemoryLayout<Double>.size), &newRate)
+        if setStatus != noErr {
+            AppLog.log("[AudioEngine] setInputDeviceSampleRate(\(targetRate)) failed status=\(setStatus) device=\(deviceID)")
+            return
+        }
+        // Read back what the device actually applied (it may clamp or
+        // pick the closest supported rate).
+        var actual: Double = 0
+        var actualSize = UInt32(MemoryLayout<Double>.size)
+        AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &actualSize, &actual)
+        AppLog.log("[AudioEngine] device=\(deviceID) sample rate set: req=\(targetRate) actual=\(actual)")
+        Task { @MainActor in self.actualSampleRate = actual > 0 ? actual : targetRate }
+    }
+
+    /// Read the device's first available rate from
+    /// `kAudioDevicePropertyAvailableNominalSampleRates`. Used as a
+    /// fallback for the "auto" picker option.
+    private func deviceDefaultSampleRate(deviceID: AudioDeviceID) -> Double? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &addr, 0, nil, &size) == noErr,
+              size > 0 else { return nil }
+        let count = Int(size) / MemoryLayout<AudioValueRange>.size
+        var ranges = [AudioValueRange](repeating: AudioValueRange(), count: count)
+        guard AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &ranges) == noErr
+        else { return nil }
+        return ranges.first?.mMinimum
     }
 }
 

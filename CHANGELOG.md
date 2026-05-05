@@ -9,6 +9,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.27] - 2026-05-06
+
+### Fixed — Tonel-MacOS output device picker actually works now
+
+The Settings sheet's output device Picker called
+`audio.setOutputDevice()` which in turn poked
+`kAudioOutputUnitProperty_CurrentDevice` on
+`AVAudioEngine.outputNode.audioUnit`. macOS rejected this with
+`-10851` (`kAudioUnitErr_InvalidPropertyValue`) — and earlier with
+`-19851` from AUHAL — even after `engine.stop()` and an explicit
+`AudioUnitUninitialize` round-trip. The reason: AVAudioEngine's
+internal HAL unit on macOS does not actually release ownership of
+its `CurrentDevice` slot when the engine is paused; AVAudioEngine
+keeps re-asserting it through KVO, so the SetProperty either
+never lands or lands on a re-initialized AU and gets rejected.
+
+The fix: stop using AVAudioEngine for output entirely. Output is
+now driven by a standalone `kAudioUnitSubType_HALOutput` AU
+(`AudioEngine.outputAU`) that we own outright. Capture stays on
+AVAudioEngine — only the playback half is migrated.
+
+| File | Change |
+|------|--------|
+| `Tonel-MacOS/TonelMacOS/Audio/AudioEngine.swift` | `setupOutputAU` / `teardownOutputAU` build a bare HALOutput; `setOutputDevice` swaps via `Stop → Uninit → Set → Init → Start` on the bare AU; `currentOutputDeviceID`, `bufferFrameRange`, `readDeviceLatencies`, and the HW-buffer-set loop all read from `outputAU` with AVAudioEngine fallback |
+
+Render callback is an `AURenderCallback` trampoline that reuses the
+existing `fillPlayback` mix logic verbatim — peers + monitor +
+selfLoop logic is unchanged. Wire format (48 kHz mono Float32) is
+set on the AU's input scope bus 0; AUHAL's internal AudioConverter
+handles the device-side format conversion (e.g. 44.1 / 96 kHz
+output devices).
+
+### Fixed — Sample rate Picker now persists across Settings reopens
+
+`setInputDeviceSampleRate` was previously a stub that only updated
+the displayed `actualSampleRate` field — and the SettingsSheet's
+`requestedRate` reset to nil on every `.onAppear`, so the picker
+always showed "自动" when reopened. Now writes a real
+`kAudioDevicePropertyNominalSampleRate` to the input device's HAL,
+reads back the actual rate (drivers may clamp), persists the
+choice in `UserDefaults` (`tonel.audio.sampleRate`), and the sheet
+seeds `requestedRate` from that key on appear.
+
+### Added — Output device choice persisted across launches
+
+`setOutputDevice` writes the selected device ID to
+`UserDefaults` (`tonel.audio.outputDeviceID`). `setupOutputAU`
+reads it on `start()` and routes the bare HALOutput AU there
+directly. If the saved ID is no longer present (e.g. AirPods
+disconnected since last run), falls back to the system default
+output via `kAudioHardwarePropertyDefaultOutputDevice`.
+
+### Added — Settings sheet shared between Home and Room
+
+`HomeSettingsSheet` was a placeholder ("占位 — 后续接入..."). Both
+the home and room settings buttons now present the same
+full-featured `SettingsSheet`, so users can configure output
+device / sample rate / HW buffer size before joining a room. The
+audio engine instance lives on `AppState` regardless of room
+state, so the persistence path works identically from either
+entry point.
+
+### Added — Hardware IO buffer size in Settings
+
+New "硬件缓冲块大小" section. Lets the user pick from typical
+low-latency buffer sizes (32 / 64 / 96 / 120 / 128 / 240 / 256 /
+480 / 512 / 1024 / 2048 / 4096 frames), filtered against the
+device's actual `kAudioDevicePropertyBufferFrameSizeRange`.
+Default 120 frames (2.5 ms = 1 wire frame) for USB pro
+interfaces; MacBook builtin typically clamps to 256+. The choice
+is persisted (`tonel.audio.hwBufferFrames`) and re-applied on
+the next `start()`. Live-readback of the actual applied value
+shown so users can see clamping behaviour.
+
+| File | Change |
+|------|--------|
+| `Tonel-MacOS/TonelMacOS/Views/RoomView.swift` | `SettingsSheet` adds buffer-size + sample-rate persistence + sample-rate-pick logic; `.onAppear` seeds picker state from `UserDefaults` |
+| `Tonel-MacOS/TonelMacOS/Views/HomeView.swift` | drops `HomeSettingsSheet` placeholder, presents `SettingsSheet` from home too |
+| `Tonel-MacOS/project.yml` | `MARKETING_VERSION` 0.1.2 → 0.1.3 |
+
 ## [5.1.26] - 2026-05-06
 
 ### Fixed — Tonel-MacOS regression: NWConnection blocked by Clash-style proxies

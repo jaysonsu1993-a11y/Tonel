@@ -62,7 +62,13 @@ struct HomeView: View {
         }
         .sheet(isPresented: $presentJoin)   { JoinRoomSheet() }
         .sheet(isPresented: $presentCreate) { CreateRoomSheet() }
-        .sheet(isPresented: $presentSettings) { HomeSettingsSheet() }
+        // Home 和 Room 共用同一个 SettingsSheet (RoomView.swift)。
+        // HomeSettingsSheet 是早期占位,留 dead code 作为过渡前的引用,
+        // 但已不再挂载。AudioEngine 实例从 state 注入,即使没进房间
+        // 也能调输出设备 / 采样率 / 硬件 buffer。
+        .sheet(isPresented: $presentSettings) {
+            SettingsSheet(audio: state.audio).environmentObject(state)
+        }
     }
 }
 
@@ -158,21 +164,8 @@ private struct CreateRoomSheet: View {
     }
 }
 
-private struct HomeSettingsSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        SheetCard(title: "设置") {
-            Text("（占位 — 后续接入输入/输出设备选择、jitter / prime 调参面板）")
-                .foregroundStyle(.secondary)
-                .font(.callout)
-        } footer: {
-            HStack {
-                Spacer()
-                Button("好") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-        }
-    }
-}
+// HomeSettingsSheet 删除 — 详见上面 .sheet 的注释,共用 RoomView 的
+// SettingsSheet。
 
 // ─── Reusable sheet primitives ────────────────────────────────────────────────
 
