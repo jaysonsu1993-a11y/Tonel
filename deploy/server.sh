@@ -215,19 +215,31 @@ deploy_ops() {
     if [ -f "$REPO_ROOT/ops/nginx/srv-hk.tonel.io.conf" ]; then
         rsync_to_remote "$REPO_ROOT/ops/nginx/srv-hk.tonel.io.conf" "/etc/nginx/sites-available/srv-hk.tonel.io"
     fi
-    ssh_exec "
+    # Self-healing symlinks (v5.1.23+): only enable a site whose
+    # ssl_certificate path exists on this box. The four nginx configs
+    # cover all server roles (kufan, Aliyun, HK, CF Pages origin); each
+    # box only has certs for the subset it actually serves. Symlinking
+    # all four blindly causes `nginx -t` to fail and the deploy aborts.
+    ssh_exec '
         set -e
-        ln -sf /etc/nginx/sites-available/srv.tonel.io     /etc/nginx/sites-enabled/srv.tonel.io
-        ln -sf /etc/nginx/sites-available/srv-new.tonel.io /etc/nginx/sites-enabled/srv-new.tonel.io
-        ln -sf /etc/nginx/sites-available/tonel.io         /etc/nginx/sites-enabled/tonel.io
-        [ -f /etc/nginx/sites-available/srv-hk.tonel.io ] && \
-            ln -sf /etc/nginx/sites-available/srv-hk.tonel.io /etc/nginx/sites-enabled/srv-hk.tonel.io || true
-        # Don't run nginx -t / reload here — certs may not exist yet on a
-        # fresh box. Caller is expected to sign certs first, then reload.
-        if nginx -t 2>/dev/null; then systemctl reload nginx; else
-            warn '[ops] nginx -t failed (likely missing certs); skipping reload'
+        for conf in srv.tonel.io srv-new.tonel.io tonel.io srv-hk.tonel.io; do
+            avail=/etc/nginx/sites-available/$conf
+            link=/etc/nginx/sites-enabled/$conf
+            [ -f "$avail" ] || continue
+            cert=$(awk "/^[[:space:]]*ssl_certificate[[:space:]]/ { gsub(/;/,\"\"); print \$2; exit }" "$avail")
+            if [ -z "$cert" ] || [ -f "$cert" ]; then
+                ln -sf "$avail" "$link"
+            else
+                echo "[ops] skipping $conf — cert $cert not present on this box"
+                rm -f "$link"
+            fi
+        done
+        if nginx -t 2>&1; then
+            systemctl reload nginx
+        else
+            echo "[ops] WARN: nginx -t failed; not reloading"
         fi
-    "
+    '
 
     if [ -n "${TONEL_CF_TUNNEL_ID:-}" ]; then
         log "[ops] apply cloudflared config (TONEL_CF_TUNNEL_ID=$TONEL_CF_TUNNEL_ID)"

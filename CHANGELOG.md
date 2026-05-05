@@ -9,6 +9,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.23] - 2026-05-05
+
+### Fixed — v5.1.22 deploy aborted on the fresh HK box
+
+Two real bugs in the v5.1.22 `deploy/server.sh` `deploy_ops()`
+rewrite, both surfaced on the very first deploy to the HK box:
+
+1. **`warn` is a local function, not a remote command.** The remote
+   ssh_exec heredoc invoked `warn '[ops] nginx -t failed ...'` which
+   only existed in `deploy/lib/common.sh` on the operator's machine,
+   not on the box. Replaced with `echo "[ops] WARN: ..."`.
+
+2. **Blind symlink for all four nginx sites.** The fresh HK box only
+   has the `srv.tonel.io` SAN cert (covers `srv.tonel.io` +
+   `srv-hk.tonel.io`), not the certs `srv-new.tonel.io` (Aliyun)
+   or `tonel.io` (legacy CF Pages origin) reference. `nginx -t`
+   immediately failed when those symlinks pointed at config files
+   whose `ssl_certificate` paths didn't exist.
+
+   Fix: `deploy_ops` now self-heals — for each of the four known
+   nginx confs, it parses out the `ssl_certificate` path, checks
+   whether that file exists on the remote, and only enables the
+   symlink if so (or if the conf has no ssl_certificate line at
+   all). Boxes auto-converge to the right subset.
+
+This also unblocks future first-time deploys to any new region,
+not just HK — the same self-heal logic applies regardless.
+
 ## [5.1.22] - 2026-05-05
 
 ### Changed — primary backend moved from 酷番云广州 to HK (cognetcloud)
