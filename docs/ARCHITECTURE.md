@@ -127,7 +127,7 @@ Native clients (Tonel-MacOS) skip the proxies entirely and speak SPA1 to
 |---|---|---|
 | 0 | 4 | magic = 0x53415031 ("SPA1") |
 | 4 | 2 | sequence (u16) |
-| 6 | 2 | timestamp (u16, ms low-16 units) |
+| 6 | 2 | timestamp (u16, 100 ms units; documented but unused — RTT goes via TCP PING/PONG) |
 | 8 | 64 | userId (null-terminated, "roomId:userId" format) |
 | 72 | 1 | codec (0=PCM16, 1=Opus, 0xFF=handshake) |
 | 73 | 2 | dataSize (u16) |

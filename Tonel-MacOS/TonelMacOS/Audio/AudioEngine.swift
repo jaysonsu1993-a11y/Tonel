@@ -8,7 +8,7 @@ import Combine
 ///
 /// Pipeline (matches web `audioService.ts` behaviour):
 ///   mic → engine.inputNode (48k float, any block size)
-///       → tap → re-block to 120-sample frames → PCM16 → MixerClient.sendAudio
+///       → tap → re-block to AudioWire.frameSamples (32 at v6.0.0) → PCM16 → MixerClient.sendAudio
 ///
 ///   MixerClient.onPacket(...) → JitterBuffer per peer
 ///       → mix all peer frames → AVAudioSourceNode → engine.outputNode
@@ -147,7 +147,7 @@ final class AudioEngine: ObservableObject {
     private static let selfLoopMaxSamples = 9600
     private var captureLogCounter: Int = 0
 
-    // Capture re-blocking — accumulate until we have 120 samples.
+    // Capture re-blocking — accumulate until we have AudioWire.frameSamples (32 at v6.0.0).
     private var captureAccum: [Float] = []
     private var captureSeq: UInt32   = 0  // for diagnostics only
     private var startWallClockMs: UInt64 = 0
@@ -225,10 +225,11 @@ final class AudioEngine: ObservableObject {
         try setupOutputAU(wireFormat: wireFormat)
 
         // HW IO buffer size: user-tunable via Settings (`hwBufferFrames`
-        // in UserDefaults). Default = wire frame (120 samples / 2.5 ms),
-        // every sinkNode callback produces exactly one SPA1 packet,
-        // monitor latency = 1× HW buffer. macOS clamps to the device's
-        // allowed range — SSL 2+ accepts 15, MacBook builtin needs 256+.
+        // in UserDefaults). Default = wire frame (32 samples / 0.667 ms
+        // at v6.0.0; was 120 / 2.5 ms pre-v6); every sinkNode callback
+        // produces exactly one SPA1 packet, monitor latency = 1× HW
+        // buffer. macOS clamps to the device's allowed range — SSL 2+
+        // accepts 15, MacBook builtin needs 256+.
         let saved = UserDefaults.standard.integer(forKey: AudioEngine.bufferFramesKey)
         let target = saved > 0 ? saved : AudioWire.frameSamples
         setHardwareBufferFrames(target: UInt32(target))
@@ -549,7 +550,7 @@ final class AudioEngine: ObservableObject {
             for i in 0..<frame.count { frame[i] = 0 }
         }
 
-        // Append and emit fixed-size 120-sample frames.
+        // Append and emit fixed-size frames (AudioWire.frameSamples = 32 at v6.0.0).
         captureAccum.append(contentsOf: frame)
         let frameSize = AudioWire.frameSamples
         var sent = 0
@@ -679,7 +680,7 @@ final class AudioEngine: ObservableObject {
         // ── Peer mix ──────────────────────────────────────────────────────
         // Pull a full frame from each peer; mix in. We pop at most one frame
         // per playback callback from each peer, sized to AudioWire.frameSamples.
-        // If frameCount > 120, we run the loop multiple times.
+        // If frameCount > AudioWire.frameSamples, we run the loop multiple times.
         var written = 0
         let frameSize = AudioWire.frameSamples
         while written < frameCount {
@@ -755,7 +756,7 @@ final class AudioEngine: ObservableObject {
     }
 
     /// UserDefaults key for the persisted HW IO buffer size (frames).
-    /// 0 / missing = use `AudioWire.frameSamples` (120) default.
+    /// 0 / missing = use `AudioWire.frameSamples` (32 at v6.0.0) default.
     static let bufferFramesKey   = "tonel.audio.hwBufferFrames"
     /// UserDefaults key for the persisted output device ID. Read at
     /// `start()` so the engine comes up routed to the user's choice

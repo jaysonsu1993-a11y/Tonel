@@ -20,9 +20,12 @@ Offset  Size  Type      Field        Notes
 ─────────────────────────────────────────────────────────────────────
 0       4     u32 BE    magic        0x53415031 ('SPA1')
 4       2     u16 BE    sequence     packet sequence (incremented)
-6       2     u16 BE    timestamp    sender's local ms low-16, server
-                                     echoes back unchanged for RTT
-                                     measurement (see below)
+6       2     u16 BE    timestamp    sender's local 100 ms units low-16,
+                                     server echoes back unchanged. Documented
+                                     for the zero-bandwidth RTT scheme below
+                                     but production clients use TCP PING/PONG
+                                     instead — this field is unused on the
+                                     receive path.
 8       64    char[64]  userId       null-terminated "roomId:userId"
 72      1     u8        codec        0=PCM16, 1=Opus, 0xFF=Handshake
 73      2     u16 BE    dataSize     payload byte length (≤ 1356)
@@ -39,7 +42,7 @@ Offset  Size  Type      Field        Notes
 |---|---|---|---|
 | `magic` | u32 BE | 0 | Always `0x53415031`; rejects malformed packets |
 | `sequence` | u16 BE | 4 | Per-stream incrementing; receiver detects gaps |
-| `timestamp` | u16 BE | 6 | Client's send-time low-16 ms, mirrored by server for RTT |
+| `timestamp` | u16 BE | 6 | Client's send-time in 100 ms units (low-16), mirrored by server. Unused on the receive path — production clients measure RTT via TCP PING/PONG. |
 | `userId` | char[64] | 8 | `"roomId:userId"`, null-terminated |
 | `codec` | u8 | 72 | `0` = PCM16, `1` = Opus, `0xFF` = handshake |
 | `dataSize` | u16 BE | 73 | `payload` size in bytes (max 1356) |
@@ -111,19 +114,32 @@ SPA1Packet {
 }
 ```
 
-## Audio RTT measurement (zero-bandwidth)
+## Audio RTT measurement
 
-`timestamp` is mirrored by the server, so each broadcast packet a client
+**Production path: TCP PING/PONG over the mixer's TCP control channel
+(`:9002` direct, or `wss://srv.tonel.io/mixer-tcp` for browsers).** Both
+the macOS client (`MixerClient.startPing` → `audioRttMs`) and the web
+client (`AudioService.startPing` → `_audioLatency`) measure RTT this way.
+The TCP control channel rides the same physical path as the SPA1 UDP
+stream, so the figure is meaningful for the e2e latency display.
+
+The SPA1 `timestamp` field documents an alternative zero-bandwidth scheme
+(server echoes the client's send-time, so each broadcast packet a client
 receives carries the timestamp of whatever client packet caused that mix
-tick. Round-trip latency:
+tick):
 
 ```
-RTT_ms = (now_ms_low16 - rxPacket.timestamp) & 0xFFFF
+// 100 ms units, low-16 wrapping window
+sent_units    = (sender_now_ms / 100) & 0xFFFF
+RTT_units     = (recv_now_units - rxPacket.timestamp) & 0xFFFF
+RTT_ms        = RTT_units * 100
 ```
 
-EMA-smoothed on the client. Values > 10000 are dropped as outliers. Costs
-zero extra bytes (reuses an otherwise idle 16-bit field) and measures the
-real audio-path latency, not just signaling RTT.
+EMA-smoothed on the client. Values > 10000 ms are dropped as outliers.
+Costs zero extra bytes but quantises to 100 ms, so the resolution is
+poor for the typical 5–30 ms RTT range — which is why production uses
+the TCP PING/PONG path instead. The field is filled by both clients but
+ignored on the receive path.
 
 ## Control plane — TCP JSON
 

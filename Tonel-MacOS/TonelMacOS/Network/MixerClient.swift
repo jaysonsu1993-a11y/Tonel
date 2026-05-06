@@ -187,7 +187,8 @@ final class MixerClient {
 
     // MARK: - Outgoing audio
 
-    /// Send one 2.5 ms PCM16 frame (240 bytes payload).
+    /// Send one PCM16 frame (`AudioWire.frameSamples × 2` bytes payload —
+    /// 64 bytes / 0.667 ms at v6.0.0; was 240 bytes / 2.5 ms pre-v6).
     func sendAudio(pcm: Data, timestampMs: UInt16) {
         guard case .connected = state, let udp = udp else { return }
         let pkt = SPA1.build(payload: pcm,

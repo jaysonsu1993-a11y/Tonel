@@ -9,6 +9,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.2] - 2026-05-07
+
+### Docs / comments — RTT/latency review follow-up
+
+User-requested audit of the macOS client's RTT and e2e-latency
+algorithms found the math correct (all components scale via
+`AudioWire.frameMs`, so v6's drop from 2.5 ms → 0.667 ms applies
+uniformly), but turned up two cosmetic issues. No runtime change.
+
+**SPA1 `timestamp` field unit clarified — was wrong in the spec.**
+Code (both web `audioService.ts` and macOS `AudioEngine.swift:560`)
+encodes timestamps in **100 ms units** (`(now_ms / 100) & 0xFFFF`).
+SPA1_PROTOCOL.md and ARCHITECTURE.md previously said "low-16 ms",
+which never matched the implementation. Both docs now say 100 ms
+units, and SPA1_PROTOCOL.md's "Audio RTT measurement" section
+clarifies that production clients use TCP PING/PONG (not the
+SPA1 timestamp echo) — the field is filled but ignored on receive.
+The 100 ms quantisation is the reason: useless for the typical
+5–30 ms RTT range.
+
+**Stale "120 sample / 2.5 ms" comments swept** in
+`Tonel-MacOS/TonelMacOS/Audio/AudioEngine.swift` (4 sites) and
+`Tonel-MacOS/TonelMacOS/Network/MixerClient.swift` (1 site). These
+comments described the v5 wire format; the code already used
+`AudioWire.frameSamples` / `AudioWire.frameMs`, so behaviour was
+correct, but the comments would mislead a future reader.
+
 ## [6.0.1] - 2026-05-07
 
 ### Docs
