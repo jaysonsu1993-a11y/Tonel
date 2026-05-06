@@ -158,24 +158,6 @@ final class AppState: ObservableObject {
         return true
     }
 
-    // MARK: - Identity reset
-
-    /// Wipe the saved identity and force a reconnect with fresh ids.
-    /// Triggered by the Settings 重置身份 button. Useful if the user
-    /// wants to "start over" or is in a stuck state on the server side
-    /// (e.g. a session-replaced loop).
-    func resetIdentity() {
-        Task { @MainActor in
-            AppLog.log("[AppState] resetIdentity")
-            await self.tearDownSession()
-            Identity.reset()
-            let fresh = Identity.loadOrCreate()
-            self.userId   = fresh.userId
-            self.myRoomId = fresh.myRoomId
-            await self.enterRoom(fresh.myRoomId)
-        }
-    }
-
     // MARK: - Room switching
 
     /// Switch to a different room. Used by the "切换房间" sheet — type

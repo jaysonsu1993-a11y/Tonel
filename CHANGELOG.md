@@ -9,6 +9,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.1] - 2026-05-07
+
+### Changed — UI tidy-up (per user feedback)
+
+- 服务器选择 picker 的显示名简化：`广州1（阿里云）` / `广州2（酷番云
+  · 暂不可用）` → `广州1` / `广州2`. 用户偏好简短标签；广州2 的
+  unavailable 状态仍由 `.foregroundStyle(.secondary)` 灰显呈现。
+- 删除 设置 → 身份 里的 "重置身份" 按钮 + `AppState.resetIdentity()`
+  方法。Identity 文件里的 `Identity.reset()` 静态方法保留为内部 API
+  （未来可能从命令行 / 调试入口需要）但 UI 不再暴露。
+
+`Endpoints.guangzhou1.displayName` / `guangzhou2.displayName` 是
+唯一的真改动；其它都是删除。无运行时行为变化。
+
 ## [6.2.0] - 2026-05-07
 
 ### Changed — Tonel-MacOS: no more home page, auto-bootstrap into a room

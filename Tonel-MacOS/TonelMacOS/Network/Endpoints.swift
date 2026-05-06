@@ -69,7 +69,7 @@ enum Endpoints {
     /// `project_macos_posix_socket` for why we hold a literal IP.
     static let guangzhou1 = ServerLocation(
         id: "guangzhou1",
-        displayName: "广州1（阿里云）",
+        displayName: "广州1",
         mixerHost: "8.163.21.207",
         mixerTCPPort: 9002,
         mixerUDPPort: 9003,
@@ -86,7 +86,7 @@ enum Endpoints {
     /// flips back on; do not delete.
     static let guangzhou2 = ServerLocation(
         id: "guangzhou2",
-        displayName: "广州2（酷番云 · 暂不可用）",
+        displayName: "广州2",
         mixerHost: "42.240.163.172",
         mixerTCPPort: 9002,
         mixerUDPPort: 9003,

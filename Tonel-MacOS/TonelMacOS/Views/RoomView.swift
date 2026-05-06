@@ -581,12 +581,8 @@ struct SettingsSheet: View {
             }
 
             // ── 身份 (v6.2.0) ─────────────────────────────────────────
-            // The user has a persistent local identity (userId +
-            // myRoomId) generated on first launch. 重置身份 wipes both
-            // and forces a reconnect with fresh ids — useful when
-            // bandmates' clients are stuck on the user's old uid
-            // (session-replaced loops) or the user just wants a new
-            // personal room number.
+            // Read-only — the user has a persistent local identity
+            // (userId + myRoomId) generated on first launch.
             section("身份") {
                 row("用户ID") {
                     Text(state.userId)
@@ -607,15 +603,6 @@ struct SettingsSheet: View {
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
                 }
-                Button {
-                    state.resetIdentity()
-                    dismiss()
-                } label: {
-                    Text("重置身份（生成新的用户 ID 与房间号）")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.red)
-                }
-                .buttonStyle(.borderless)
             }
 
             section("音频设备") {
