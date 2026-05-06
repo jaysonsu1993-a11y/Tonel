@@ -64,13 +64,31 @@ to count PLC events without a detection threshold.
 ### Frame size
 
 Server's `audio_frames_` parameter sets the canonical frame size. Production
-config (since v4.2.0):
+config:
 
-- **120 samples / 2.5 ms @ 48 kHz**
-- PCM16 payload = `120 × 2 = 240 bytes`
-- Opus payload = ~10–40 bytes (variable)
+- **v6.0.0+ default — 32 samples / 0.667 ms @ 48 kHz** (PCM16)
+- PCM16 payload = `32 × 2 = 64 bytes`
+- Wire packet rate ≈ 1500 fps per direction
+- Server mix tick (`mix_interval_us_`) is derived from `audio_frames_`,
+  so the broadcast cadence stays locked to the wire frame size.
 
-The server mix tick matches at 2.5 ms.
+When Opus support is enabled (codec=1), libopus's minimum frame size of
+120 samples (2.5 ms @ 48 kHz) forces that path back to 120-sample frames;
+the PCM16 path stays at 32 samples regardless.
+
+History:
+
+| Release | Samples | Duration | PCM16 bytes | Reason |
+|---------|---------|----------|-------------|--------|
+| v3.x    | 240     | 5 ms     | 480         | Original Phase A baseline |
+| v4.2.0  | 120     | 2.5 ms   | 240         | Phase B latency optimisation |
+| v6.0.0  |  32     | 0.667 ms |  64         | UDP-default native client roadmap |
+
+**Wire-protocol breaking change at v6.0.0:** v6 client must talk to v6
+server. The SPA1 magic stays `'SPA1'`; what changes is the canonical
+`dataSize` (240 → 64 for PCM16) and the server-side jitter buffer
+constants (target 2 → 8, cap 33 → 124, scaled by 120/32 = 3.75× to keep
+the ms-equivalent latency floor and burst headroom unchanged).
 
 ### Handshake packet
 

@@ -77,15 +77,19 @@ constexpr size_t SPA1_PCM16_FRAME_SIZE = 1920;
 
 class MixerServer {
 public:
-    // audio_frames: number of PCM samples per audio packet (default 120
-    // for 2.5 ms @ 48 kHz). Phase B v4.2.0 halved this from 240 (5 ms)
-    // to cut capture-side and mix-tick latency by 2.5 ms each (~5 ms
-    // total e2e). Cost: packet rate 200 → 400 fps, header overhead
-    // share doubles. Worth it because the absolute bandwidth is still
-    // < 1 Mbps and the latency budget at this stage is dominated by
-    // per-frame buffering. Native AppKit clients (which assume 240)
-    // will need a corresponding update — see CHANGELOG v4.2.0.
-    explicit MixerServer(uv_loop_t* loop, int tcp_port, int udp_port, int audio_frames = 120);
+    // audio_frames: number of PCM samples per audio packet.
+    //
+    //   v4.2.0 — 240 → 120 (5 ms → 2.5 ms): halved per-frame buffering.
+    //   v6.0.0 — 120 → 32  (2.5 ms → 0.667 ms): pushes packetization
+    //            latency to the floor for the UDP-default native
+    //            client roadmap. PCM16 wire frame = 64 bytes, packet
+    //            rate ≈ 1500 fps, payload bandwidth 1.3 Mbps wire.
+    //            UDP handles 1500 pps without HOL; WSS path carries
+    //            the same packets but pays head-of-line cost on
+    //            burst — accepted as the unified standard. When
+    //            Opus is added later, frame size reverts to 120
+    //            (libopus minimum) for the codec=1 path only.
+    explicit MixerServer(uv_loop_t* loop, int tcp_port, int udp_port, int audio_frames = 32);
     ~MixerServer();
 
     void start();
@@ -164,13 +168,18 @@ private:
     //           audibly. cap=33 (~83 ms) absorbs without drop. A
     //           target=2 (5 ms) gives the controller a bit more
     //           cushion than the cap=8/target=1 of v1.0.38 era.
-    static constexpr int JITTER_TARGET_DEFAULT    = 2;
-    static constexpr int JITTER_MAX_DEPTH_DEFAULT = 33;
+    //   v6.0.0  scaled all four constants by 120/32 = 3.75× to keep
+    //           the same ms-equivalent latency floor / cap / ceilings
+    //           after the wire frame size dropped from 120 to 32.
+    //           target=8 (~5.3 ms), cap=124 (~82.7 ms),
+    //           target_max=60 (40 ms), cap_max=240 (160 ms).
+    static constexpr int JITTER_TARGET_DEFAULT    = 8;    // ~5.3 ms (was 2 at 120-sample frames)
+    static constexpr int JITTER_MAX_DEPTH_DEFAULT = 124;  // ~82.7 ms (was 33 at 120-sample frames)
     // Hard ceilings the server will refuse to exceed (defensive — keeps a
     // tuning slider from running latency up unbounded or driving allocator
     // pressure with a 10000-frame deque).
-    static constexpr int JITTER_TARGET_MAX        = 16;   // 80 ms target ceiling
-    static constexpr int JITTER_MAX_DEPTH_MAX     = 64;   // 320 ms cap ceiling
+    static constexpr int JITTER_TARGET_MAX        = 60;   // 40 ms target ceiling (was 16 at 120-sample)
+    static constexpr int JITTER_MAX_DEPTH_MAX     = 240;  // 160 ms cap ceiling   (was 64 at 120-sample)
 
     // ── Room state ──────────────────────────────────────────
     struct Room {
@@ -268,7 +277,12 @@ private:
     uint16_t   mix_sequence_       = 0;
     int        level_tick_counter_ = 0;  // throttle level broadcasts to ~20Hz
     uint64_t   mix_next_deadline_us_ = 0;  // wall-clock target for next broadcast (us, uv_hrtime base)
-    static constexpr uint64_t MIX_INTERVAL_US = 2500;  // 2.5 ms in microseconds
+    // v6.0.0: derived from audio_frames_ at construction so the broadcast
+    // tick stays locked to the wire frame size. At 32 samples / 48 kHz
+    // this is 666 µs (rate error ≈ 0.1 % vs the ideal 666.667 µs — well
+    // within the client's dynamic-resampling tolerance). At the legacy
+    // 120-sample setting it equals 2500 µs exactly.
+    uint64_t   mix_interval_us_ = 2500;  // initialized in MixerServer ctor
 
     // Recording
     RecordingManager recording_manager_;

@@ -35,14 +35,16 @@ const CODEC_PCM16      = 0;
 const CODEC_HANDSHAKE  = 0xFF;
 
 const SAMPLE_RATE      = 48000;
-// Phase B v4.2.0: server now ticks at 2.5 ms (audio_frames=120). Test
-// must produce frames at the SAME cadence the server consumes, otherwise
-// the jitter buffer over/underfills and the SNR/THD measurement degrades
-// for reasons unrelated to actual audio quality. Keep this in sync with
-// `MIX_INTERVAL_US` in `mixer_server.h` and `FRAME_MS` in audioService.ts.
-const FRAME_SAMPLES    = 120;          // 2.5 ms @ 48 kHz mono
+// v6.0.0: server ticks at 0.667 ms (audio_frames=32). Test must produce
+// frames at the SAME cadence the server consumes, otherwise the jitter
+// buffer over/underfills and the SNR/THD measurement degrades for
+// reasons unrelated to actual audio quality. Keep this in sync with
+// `mix_interval_us_` in `mixer_server.h` and `FRAME_SAMPLES` in
+// audioService.ts. Pre-v6 was 120 samples / 2.5 ms; pre-v4.2.0 was
+// 240 samples / 5 ms.
+const FRAME_SAMPLES    = 32;            // 0.667 ms @ 48 kHz mono
 const FRAME_BYTES      = FRAME_SAMPLES * 2;
-const FRAME_INTERVAL_MS = 2.5;
+const FRAME_INTERVAL_MS = 32 / 48;       // 0.6667
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -638,7 +640,7 @@ async function main() {
   const clk = detectClicks(window);
 
   // Measure the server's actual broadcast rate from receive timestamps.
-  // Should be ~400/s with v4.2.0's 2.5 ms tick (was 200/s pre-Phase B).
+  // Should be ~1500/s with v6.0.0's 0.667 ms tick (was 400/s in v4.2-v5).
   // Nominal rate = 1000 / FRAME_INTERVAL_MS, derived so this stays
   // correct across future tick changes. Significant deviation indicates
   // timer drift has crept back in (the absolute-deadline scheduler

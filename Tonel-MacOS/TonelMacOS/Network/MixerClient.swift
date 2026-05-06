@@ -6,7 +6,7 @@ struct MixerPacket {
     let userId: String      // composite "room_id:user_id" — strip room prefix as needed
     let sequence: UInt16
     let timestamp: UInt16
-    let pcm: Data           // raw PCM16 LE bytes (240 bytes for a 2.5 ms frame)
+    let pcm: Data           // raw PCM16 LE bytes (64 bytes for a 0.667 ms frame at v6.0.0; was 240 at 120-sample frames)
 }
 
 /// Mixer transport.

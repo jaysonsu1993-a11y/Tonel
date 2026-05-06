@@ -209,6 +209,7 @@ MixerServer::MixerServer(uv_loop_t* loop, int tcp_port, int udp_port, int audio_
     , tcp_port_(tcp_port)
     , udp_port_(udp_port)
     , audio_frames_(audio_frames)
+    , mix_interval_us_(static_cast<uint64_t>(audio_frames) * 1'000'000ULL / 48000ULL)
     , recording_manager_()
 {
     // Set recording output directory (uses default ./recordings/ if unset)
@@ -258,9 +259,12 @@ void MixerServer::start() {
     // re-arms with a one-shot delay computed against the absolute
     // deadline, not against "now after the previous fire". The
     // alternating 2/3-ms rounding averages exactly 2.5 ms.
-    mix_next_deadline_us_ = uv_hrtime() / 1000ULL + MIX_INTERVAL_US;
-    uv_timer_start(&mix_timer_, &MixerServer::on_mix_timer, 2, 0);
-    std::cout << "[MixerServer] Timed mixing enabled (2.5ms interval, "
+    mix_next_deadline_us_ = uv_hrtime() / 1000ULL + mix_interval_us_;
+    // First fire: round up to >=1 ms so libuv doesn't treat it as "immediately".
+    uint64_t first_delay_ms = std::max<uint64_t>(1, (mix_interval_us_ + 500) / 1000);
+    uv_timer_start(&mix_timer_, &MixerServer::on_mix_timer, first_delay_ms, 0);
+    std::cout << "[MixerServer] Timed mixing enabled ("
+              << (mix_interval_us_ / 1000.0) << "ms interval, "
               << audio_frames_ << " samples/packet, absolute-deadline scheduled)" << std::endl;
 }
 
@@ -1022,7 +1026,9 @@ void MixerServer::handle_mix_timer() {
     while (now_us >= mix_next_deadline_us_) {
         bool send_levels = false;
         level_tick_counter_++;
-        if (level_tick_counter_ >= 20) {  // every 20 ticks @ 2.5ms = 50 ms ≈ 20 Hz
+        // v6.0.0: was `>= 20` at 2.5ms tick. Scale to 75 to keep ~20 Hz at the
+        // new 0.667 ms tick (75 × 0.667 = 50 ms).
+        if (level_tick_counter_ >= 75) {
             level_tick_counter_ = 0;
             send_levels = true;
         }
@@ -1070,7 +1076,7 @@ void MixerServer::handle_mix_timer() {
             }
         }
 
-        mix_next_deadline_us_ += MIX_INTERVAL_US;
+        mix_next_deadline_us_ += mix_interval_us_;
         now_us = uv_hrtime() / 1000ULL;  // refresh — broadcasts can take a moment
     }
 

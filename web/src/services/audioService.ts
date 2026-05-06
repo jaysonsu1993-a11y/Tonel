@@ -24,15 +24,22 @@ const SPA1_CODEC_HANDSHAKE = 0xFF  // special codec for UDP address registration
 const SAMPLE_RATE = 48000
 const CHANNELS    = 1
 
-// Frame size: 2.5 ms of audio for lower latency.
-// Phase B v4.2.0: halved from 5 ms (240) to 2.5 ms (120). Saves
-// ~2.5 ms of capture-side buffering. Server-side mix tick was halved
-// to match (mixer_server.h MIX_INTERVAL_US = 2500). Combined with
-// the matching server tick, total e2e win is ~5 ms. Cost: packet
-// rate 200 → 400 fps; native AppKit clients (which assume 240) need
-// a corresponding update — see CHANGELOG v4.2.0.
-const FRAME_MS      = 2.5
-const FRAME_SAMPLES = Math.floor(SAMPLE_RATE * FRAME_MS / 1000)  // 120 samples @ 48kHz
+// Frame size: 0.667 ms (32 samples @ 48 kHz). v6.0.0 standard.
+//
+// History:
+//   v4.2.0: 240 → 120 (5 ms → 2.5 ms). ~5 ms e2e latency win.
+//   v6.0.0: 120 →  32 (2.5 ms → 0.667 ms). UDP-default native client
+//           roadmap pushes packetization to the floor; server mix
+//           tick derives from audio_frames (mixer_server.h
+//           mix_interval_us_). PCM16 wire payload = 64 bytes; packet
+//           rate ≈ 1500 fps. WSS path pays head-of-line cost on
+//           burst — handled by the scaled-up jitter cap.
+//
+// Wire-protocol breaking change: v6 client must talk to v6 server.
+// When Opus support lands later, codec=1 path reverts to 120 samples
+// (libopus minimum); PCM16 stays at 32.
+const FRAME_MS      = 32 / 48     // 0.6667
+const FRAME_SAMPLES = 32           // 32 samples @ 48 kHz
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA1 Packet Builder  (matches server's SPA1Packet struct)
@@ -381,7 +388,15 @@ export class AudioService {
   //     into the audible "听觉上的叠加" the user reported on v4.3.7.
   //     Discard old slots so anyone who explored down to 144 in the
   //     panel doesn't carry that into v4.3.8.
-  private static readonly TUNING_SCHEMA_VERSION = 7
+  //   v8 (v6.0.0) — wire frame size dropped from 120 → 32. DEFAULT_SRV
+  //     scaled 3.75× (jitterTarget 2 → 8, jitterMaxDepth 33 → 124) to
+  //     keep the same ms-equivalent latency floor and burst headroom.
+  //     DEFAULT_PB unchanged because primeTarget/primeMin are in
+  //     SAMPLES (frame-size independent). Old slots discarded so a
+  //     v5 user's saved jitterMaxDepth=33 isn't carried into v6
+  //     (33 frames × 0.667 ms = 22 ms cap → would dropOldest under
+  //     normal WSS burst).
+  private static readonly TUNING_SCHEMA_VERSION = 8
   private tuningSaveTimer: ReturnType<typeof setTimeout> | null = null
   private static tuningStorageKey(roomId: string, userId: string): string {
     return `${AudioService.TUNING_KEY_PREFIX}${roomId}:${userId}`
@@ -422,7 +437,9 @@ export class AudioService {
     rateStep: 0.00002,
   })
   private static readonly DEFAULT_SRV = Object.freeze({
-    jitterTarget: 2, jitterMaxDepth: 33,
+    // v6.0.0: scaled 3.75× from (2, 33) to keep ms-equivalent floor / cap
+    // after the wire frame size dropped from 120 → 32 samples.
+    jitterTarget: 8, jitterMaxDepth: 124,
   })
 
   // ── Live tuning knobs ────────────────────────────────────────────────────

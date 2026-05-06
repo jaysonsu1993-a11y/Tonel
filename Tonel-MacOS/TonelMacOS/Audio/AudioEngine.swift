@@ -69,14 +69,14 @@ final class AudioEngine: ObservableObject {
     /// Server-side per-user jitter target (frames). Setter sends MIXER_TUNE
     /// over the mixer TCP control. Initial value is overwritten by the
     /// MIXER_JOIN_ACK value via `syncServerTuningFromMixer()` after join.
-    @Published var serverJitterTarget: Int = 2 {
+    @Published var serverJitterTarget: Int = 8 {     // v6.0.0: was 2 at 120-sample frames; ~5 ms steady-state floor
         didSet {
             guard serverJitterTarget != oldValue else { return }
             mixer?.sendMixerTune(["jitter_target": serverJitterTarget])
         }
     }
     /// Server-side per-user jitter cap (frames). Same MIXER_TUNE plumbing.
-    @Published var serverJitterMaxDepth: Int = 8 {
+    @Published var serverJitterMaxDepth: Int = 124 {  // v6.0.0: was 8 at 120-sample frames; ~82 ms cap matching server default
         didSet {
             guard serverJitterMaxDepth != oldValue else { return }
             mixer?.sendMixerTune(["jitter_max_depth": serverJitterMaxDepth])

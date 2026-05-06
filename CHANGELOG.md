@@ -9,6 +9,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.0] - 2026-05-07
+
+### Changed — SPA1 wire frame size 120 → 32 samples (BREAKING)
+
+The PCM16 wire frame drops from **120 samples / 2.5 ms** to
+**32 samples / 0.667 ms** at 48 kHz. This is a wire-protocol breaking
+change: a v6 client must talk to a v6 server. The SPA1 magic stays
+`'SPA1'`; what changes is the canonical PCM16 `dataSize` (240 → 64
+bytes) and the broadcast cadence (400 → 1500 fps). Driver: prepares
+the codebase for the upcoming UDP-default native client roadmap by
+pushing packetisation latency to the floor.
+
+When Opus support lands later, the codec=1 path will revert to
+120 samples (libopus minimum); PCM16 stays at 32 regardless.
+
+### Changed — Server: derived mix interval, scaled jitter constants
+
+`mixer_server.h` no longer carries a `constexpr MIX_INTERVAL_US = 2500`.
+The interval is now a per-instance member (`mix_interval_us_`) computed
+in the constructor as `audio_frames_ * 1'000'000 / 48000`, so the
+broadcast cadence stays locked to the wire frame size for any future
+adjustment without another constant edit.
+
+Per-user jitter constants scaled by `120 / 32 = 3.75×` to keep the
+ms-equivalent latency floor and burst headroom unchanged:
+
+| Constant                     | Before | After |
+|------------------------------|--------|-------|
+| `JITTER_TARGET_DEFAULT`      | 2      | 8     |
+| `JITTER_MAX_DEPTH_DEFAULT`   | 33     | 124   |
+| `JITTER_TARGET_MAX`          | 16     | 60    |
+| `JITTER_MAX_DEPTH_MAX`       | 64     | 240   |
+
+The level-broadcast tick counter (`>= 20` at the 2.5 ms tick → ~20 Hz)
+is now `>= 75` to maintain ~20 Hz at the new 0.667 ms tick.
+
+### Changed — Tonel-MacOS
+
+- `AudioWire.frameSamples`: 120 → 32. PCM16 payload: 240 → 64 bytes.
+  `AudioWire.frameMs` updated to `32 / 48 = 0.6667`.
+- `JitterBuffer.maxDepth`: 33 → 124 (`primeMin` 2 → 8, `targetDepth`
+  2 → 8) to keep ~82 ms burst headroom at the smaller frame size.
+- `AudioEngine.serverJitterTarget`: 2 → 8 placeholder; `serverJitterMaxDepth`:
+  8 → 124 placeholder. Both still get overwritten by `MIXER_JOIN_ACK`
+  values via `syncServerTuningFromMixer()`.
+
+### Changed — Web
+
+- `audioService.ts FRAME_SAMPLES`: 120 → 32; `FRAME_MS`: 2.5 → 0.6667.
+- `DEFAULT_SRV`: `(jitterTarget=2, jitterMaxDepth=33)` →
+  `(jitterTarget=8, jitterMaxDepth=124)`.
+- `TUNING_SCHEMA_VERSION`: 7 → 8. Existing user `localStorage` slots
+  with `v: 7` are discarded on next load and current defaults applied,
+  so a v5 user's saved `jitterMaxDepth=33` is not carried into v6
+  (33 frames × 0.667 ms = 22 ms cap → would `drop_oldest` under normal
+  WSS burst). State-migration test (`server/test/browser/state_migration_test.js`)
+  parameterises off `TUNING_SCHEMA_VERSION` and so picks up the bump
+  automatically; no new scenario needed.
+
+### Audio quality regression test
+
+| Metric | v5 (120 samples) | v6 (32 samples) | Threshold |
+|--------|------------------|-----------------|-----------|
+| Broadcast rate | 401.02 / s | 1503.66 / s | ±5000 ppm ✅ |
+| SNR    | 63.60 dB | 55.39 dB | ≥ 40 ✅ |
+| THD    | 0.066 % | 0.170 % | ≤ 1.00 ✅ |
+| PLC fires | 4.18 / s | 10.16 / s | (no threshold) |
+| Click rate | 4.18 / s | 12.00 / s | (no threshold) |
+
+Both pass the audio-quality-e2e thresholds. The PLC/click increase is
+partly a synthetic-sender artefact under libuv's 1 ms timer granularity
+at the new 0.667 ms tick — real production audio engines are properly
+paced.
+
+### Deferred to v6.1.0
+
+The original v6 ask included a multi-server selector
+(广州1 = Aliyun / 广州2 = 酷番云) and a transport-mode selector
+(UDP default / WSS user-selectable fallback) on Tonel-MacOS. Those
+are substantial Swift work and did not ship in v6.0.0; the wire-protocol
+change alone justifies the major-version bump. v6.1.0 plan:
+`Endpoints` becomes a list, `TransportMode` enum drives mixer client
+selection, new `WSSMixerClient.swift` parallel to `MixerClient.swift`
+talking SPA1 over `wss://srv.tonel.io/mixer-{tcp,udp}`, Settings UI
+sheet adds the two pickers. No auto-fallback — connection failure
+shows an error dialog and the user manually switches.
+
+### Rollout order
+
+Server first, then client. v6 client ↔ v5 server is broken silently
+(mismatched `dataSize`); v5 client ↔ v6 server is broken loudly
+(jitter buffer overflows because client sends at 400 fps but server
+expects 1500 fps).
+
 ## [5.2.0] - 2026-05-06
 
 ### Changed — Tonel-MacOS branch reconciliation

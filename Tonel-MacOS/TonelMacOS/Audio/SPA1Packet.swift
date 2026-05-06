@@ -116,11 +116,19 @@ enum SPA1 {
 }
 
 /// Wire-format audio params shared with web (`audioService.ts`).
+///
+/// v6.0.0: frame size dropped from 120 → 32 samples (2.5 ms → 0.667 ms).
+/// Wire-protocol breaking change — v6 client must talk to v6 server. PCM16
+/// payload shrinks from 240 → 64 bytes; packet rate rises from 400 → 1500
+/// pps. UDP handles the rate trivially; WSS path pays head-of-line cost on
+/// burst arrivals and depends on the new larger jitter cap (124 vs 33) to
+/// absorb without drop. When Opus support is added later, the codec=1
+/// path will revert to 120 samples (libopus minimum); PCM16 stays at 32.
 enum AudioWire {
-    static let sampleRate     = 48_000
-    static let frameSamples   = 120              // 2.5 ms at 48 kHz mono
-    static let frameMs        = 2.5
-    static let frameBytesPCM16 = frameSamples * 2  // 240 bytes payload
+    static let sampleRate      = 48_000
+    static let frameSamples    = 32              // 0.667 ms at 48 kHz mono — v6.0.0 standard
+    static let frameMs         = 32.0 / 48.0     // 0.6667
+    static let frameBytesPCM16 = frameSamples * 2  // 64 bytes payload
 }
 
 /// PCM16 (LE) ↔ Float32 sample conversion. Matches web encode/decode rules:

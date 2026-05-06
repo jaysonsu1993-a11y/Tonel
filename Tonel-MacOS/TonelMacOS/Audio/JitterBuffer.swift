@@ -23,24 +23,24 @@ import os.lock
 ///     client's `lastBlock` replay budget. Listener hears a soft tail
 ///     instead of a click.
 ///
-/// **Capacity:** `maxDepth = 33` matches the web client's `JITTER_MAX_DEPTH`
-/// after the v4.3.7 raise (was 8 in v1.0.38; `8` was actively dropping
-/// frames under WSS-burst-style delivery, which is what reintroduced the
-/// 破音 the user reported on macOS). At 2.5 ms/frame this is ~82.5 ms of
-/// burst headroom — the server occasionally batches 8+ frames at a time
-/// when running through Cloudflare WSS, and an 8-deep queue dumps the
-/// oldest = an audible click. 33 absorbs the burst silently.
+/// **Capacity:** `maxDepth = 124` matches the v6.0.0 server's
+/// `JITTER_MAX_DEPTH_DEFAULT`. Scaled 3.75× from the v4.3.7-era 33 to
+/// preserve ~82 ms of burst headroom after the wire frame size dropped
+/// from 120 → 32 samples (0.667 ms each). The cap exists for the same
+/// WSS-burst-pattern reason: production WSS path occasionally batches
+/// many frames at once; an undersized cap would `drop_oldest` and
+/// reintroduce the 破音 originally fixed in v1.0.38.
 ///
 /// **PLC budget:** mirrors web `concealDecay = [1.0, 0.7, 0.4, 0.15]`. After
 /// 4 consecutive empty pops the listener hears silence (the network
 /// outage is real; PLC alone will sound stuttery beyond 4×).
 final class JitterBuffer {
-    static let maxDepth      = 33    // absolute cap (~82.5 ms) — disaster ceiling
+    static let maxDepth      = 124   // absolute cap (~82.7 ms) — disaster ceiling (v6.0.0; was 33 at 120-sample frames)
     /// Cold-start prime threshold (frames). `static var` so the
     /// AudioDebugSheet sliders tune it live across all per-peer
     /// buffers without recreating them.
-    static var primeMin      = 2     // start drain after this many frames
-    static let frameSamples  = 120   // SPA1 wire frame size (informational)
+    static var primeMin      = 8     // start drain after this many frames (v6.0.0; was 2 at 120-sample)
+    static let frameSamples  = 32    // SPA1 wire frame size (informational)
     /// v0.1.7: target steady-state depth. When a push lands the buffer
     /// above `targetDepth + trimMargin`, we trim **down to targetDepth
     /// in one shot** (instead of relying on `drop_oldest` per push to
@@ -66,7 +66,7 @@ final class JitterBuffer {
     /// Steady-state floor (frames). `static var` so the AudioDebugSheet
     /// can tune it live; `trimMargin` below is computed off this value
     /// so the `target + margin + 1 == maxDepth` invariant always holds.
-    static var targetDepth   = 2     // primeMin = 5 ms steady-state floor
+    static var targetDepth   = 8     // ~5 ms steady-state floor (v6.0.0; was 2 at 120-sample)
     /// Generous headroom — only trim when buffer is near `maxDepth`.
     /// Each trim is one audible discontinuity regardless of how many
     /// frames it drops; we want **one fat trim per burst** rather than
