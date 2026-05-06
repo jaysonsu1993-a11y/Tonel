@@ -41,12 +41,45 @@ import Foundation
 final class WSSMixerClient: MixerTransport {
     typealias PacketHandler = (MixerPacket) -> Void
 
-    enum WSError: Error {
+    enum WSError: LocalizedError {
         case notConnected
         case missingURL(String)
         case ackTimeout
         case ackInvalid(String)
         case wsClosed(URLSessionWebSocketTask.CloseCode)
+        case connectTimeout(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notConnected:        return "未连接"
+            case .missingURL(let id):  return "服务器 \(id) 未配置 WSS 路径"
+            case .ackTimeout:          return "MIXER_JOIN 等待 ACK 超时"
+            case .ackInvalid(let s):   return "MIXER_JOIN_ACK 解析失败：\(s)"
+            case .wsClosed(let c):     return "WebSocket 关闭：\(c.rawValue)"
+            case .connectTimeout(let h): return "WSS 连接超时（DNS 或握手不通）：\(h)"
+            }
+        }
+    }
+
+    /// Race the body against a deadline. `URLSessionWebSocketTask`'s
+    /// async `send` / `receive` honour neither `URLSessionConfiguration
+    /// .timeoutIntervalForRequest` nor `for resource:` reliably — they
+    /// can hang indefinitely on a DNS-NXDOMAIN target (which is exactly
+    /// the bug v6.2.1 hit when `srv-new.tonel.io` had no DNS record).
+    /// This helper makes any `connect()` step bounded.
+    private static func withDeadline<T>(_ seconds: TimeInterval,
+                                        host: String,
+                                        _ body: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await body() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw WSError.connectTimeout(host)
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 
     // MARK: - Identity & endpoints
@@ -108,34 +141,53 @@ final class WSSMixerClient: MixerTransport {
               let audURL = serverLocation.wssMixerUDPURL else {
             throw WSError.missingURL(serverLocation.id)
         }
+        let host = ctlURL.host ?? "<no-host>"
 
         AppLog.log("[WSSMixer] connect → \(ctlURL.absoluteString) (control)")
         AppLog.log("[WSSMixer]            \(audURL.absoluteString) (audio)")
 
-        // 1. Control WS
-        let ctl = session.webSocketTask(with: ctlURL)
-        ctl.resume()
-        controlTask = ctl
+        // The whole connect flow (control upgrade + JOIN + audio
+        // upgrade + handshake) is bounded by a single 8s deadline. The
+        // dominant failure modes (NXDOMAIN, dropped TCP, server not
+        // running the proxy) all hang URLSessionWebSocketTask
+        // indefinitely without this; the user would see the picker
+        // change apply forever with no error.
+        do {
+            try await Self.withDeadline(8.0, host: host) {
+                // 1. Control WS
+                let ctl = self.session.webSocketTask(with: ctlURL)
+                ctl.resume()
+                self.controlTask = ctl
 
-        // 2. MIXER_JOIN + ACK
-        try await sendJoinAndAwaitAck()
-        AppLog.log("[WSSMixer] MIXER_JOIN_ACK received")
+                // 2. MIXER_JOIN + ACK
+                try await self.sendJoinAndAwaitAck()
+                AppLog.log("[WSSMixer] MIXER_JOIN_ACK received")
 
-        // 3. Audio WS
-        let aud = session.webSocketTask(with: audURL)
-        aud.resume()
-        audioTask = aud
+                // 3. Audio WS
+                let aud = self.session.webSocketTask(with: audURL)
+                aud.resume()
+                self.audioTask = aud
 
-        // 4. Handshake (binary SPA1, codec=0xFF, dataSize=0)
-        let hs = SPA1.build(payload: Data(),
-                            codec: .handshake,
-                            sequence: 0,
-                            timestamp: 0,
-                            userId: userIdKey)
-        try await aud.send(.data(hs))
-        AppLog.log("[WSSMixer] SPA1 handshake sent")
+                // 4. Handshake (binary SPA1, codec=0xFF, dataSize=0)
+                let hs = SPA1.build(payload: Data(),
+                                    codec: .handshake,
+                                    sequence: 0,
+                                    timestamp: 0,
+                                    userId: self.userIdKey)
+                try await aud.send(.data(hs))
+                AppLog.log("[WSSMixer] SPA1 handshake sent")
+            }
+        } catch {
+            // Clean up half-open WS tasks so the next attempt starts
+            // from a known state. AppState surfaces the error via its
+            // own catch.
+            controlTask?.cancel(with: .goingAway, reason: nil); controlTask = nil
+            audioTask?.cancel(with: .goingAway, reason: nil);   audioTask = nil
+            throw error
+        }
 
-        // 5. Receive loops + PING
+        // 5. Receive loops + PING (started AFTER the bounded handshake
+        // so the ping timer doesn't fire on a half-open connection).
         startControlReceive()
         startAudioReceive()
         startPing()

@@ -9,6 +9,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.2] - 2026-05-07
+
+### Fixed — WSS transport switch hangs the app indefinitely
+
+Switching the Settings 协议 picker from UDP → WSS on Tonel-MacOS made
+the app appear frozen. Root cause: `URLSessionWebSocketTask`'s async
+`send` / `receive` honour neither `URLSessionConfiguration
+.timeoutIntervalForRequest` nor `for resource:` reliably, so an
+unreachable target (typically NXDOMAIN — see infrastructure note
+below) hangs the connect flow forever with no error surfaced.
+
+Fix: `WSSMixerClient.connect()` now wraps the entire connect
+sequence (control-WS upgrade + MIXER_JOIN + audio-WS upgrade +
+SPA1 handshake) in a single 8-second deadline via a new
+`withDeadline(_:host:_:)` TaskGroup-race helper. On timeout the
+half-open WS tasks are cancelled cleanly; the user sees the
+existing 连接失败 alert ("WSS 连接超时（DNS 或握手不通）：<host>")
+and can switch back to UDP.
+
+### Infrastructure — `srv-new.tonel.io` DNS is missing
+
+While debugging the freeze the WSS endpoint was found to have no
+DNS record at all (`nslookup srv-new.tonel.io` → "No answer"). The
+v6.1.0 design assumed this hostname pointed at the Aliyun mixer's
+nginx; it apparently never got a DNS record (or one was removed).
+Until DNS is set up, **the WSS transport on 广州1 will always fail**.
+
+Workarounds the user can pursue (none of which are code changes):
+1. Add an A record for `srv-new.tonel.io` → `8.163.21.207` in the
+   tonel.io DNS provider, install matching cert in Aliyun's nginx.
+2. Or switch the WSS host in `Endpoints.swift` to a different
+   already-working hostname that proxies to Aliyun's mixer.
+
+Today's release just makes the failure visible and recoverable
+instead of hanging the app — the WSS option still appears in the
+Settings picker but selecting it surfaces the timeout error.
+
 ## [6.2.1] - 2026-05-07
 
 ### Changed — UI tidy-up (per user feedback)
