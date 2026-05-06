@@ -4,6 +4,23 @@ import SwiftUI
 struct TonelMacOSApp: App {
     @StateObject private var state = AppState()
 
+    init() {
+        // POSIX `send()` on a closed TCP socket fires SIGPIPE by default,
+        // which kills the process. v6.2.0+ tears down + recreates the
+        // mixer when the user changes 协议 or 服务器 in Settings, so
+        // there's a real race window where an in-flight write to the
+        // old socket coincides with `closeTCPSocket()`. macOS doesn't
+        // have Linux's `MSG_NOSIGNAL` flag, so the per-call fix
+        // requires `setsockopt(SO_NOSIGPIPE)` on every socket; ignoring
+        // SIGPIPE process-wide is simpler, has the same effect, and is
+        // what Network.framework / URLSession do internally anyway.
+        // The send() returns -1 with errno=EPIPE instead of crashing,
+        // and the existing "tcpSocket >= 0" guards skip the write
+        // cleanly. See v6.3.1 CHANGELOG for the symptom (app SIGPIPE
+        // on UDP→WS transport switch).
+        signal(SIGPIPE, SIG_IGN)
+    }
+
     var body: some Scene {
         WindowGroup("Tonel") {
             RootView()

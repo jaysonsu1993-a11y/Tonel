@@ -9,6 +9,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.1] - 2026-05-07
+
+### Fixed — Tonel-MacOS hard exit on UDP → WS transport switch (SIGPIPE)
+
+Switching 协议 from UDP to WS reliably killed the app. Cause: the
+v6.2.0 `applyTransportSelection` flow tears the old `MixerClient`
+down (`closeTCPSocket`) while a queued POSIX `send()` may be
+inflight on `tcpWriteQueue`. macOS sends `SIGPIPE` to the process
+when `send()` runs on a closed TCP socket, and Swift apps don't
+install a default handler — so the process dies with no useful
+crash report (TonelMacOS launchd log: `exited due to SIGPIPE |
+sent by TonelMacOS, ran for 64360ms`).
+
+Fix: install `signal(SIGPIPE, SIG_IGN)` in `TonelMacOSApp.init()`.
+The failed `send()` now returns `-1` with `errno=EPIPE`; the
+existing `tcpSocket >= 0` guards in `MixerClient`'s write paths
+already skip cleanly when the socket is closed. This is how
+`Network.framework` / `URLSession` handle the same problem
+internally; macOS doesn't have Linux's `MSG_NOSIGNAL` flag, so
+ignoring globally is the standard idiom.
+
+The bug was latent since v6.2.0 (when `applyTransportSelection`
+started swapping mixers mid-session); v6.3.0 reproduced it more
+reliably because the user actually had a working WS path to
+switch to.
+
 ## [6.3.0] - 2026-05-07
 
 ### Changed — Tonel-MacOS WS-fallback now goes plain `ws://` directly to the box
