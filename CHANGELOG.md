@@ -9,6 +9,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.4.0] - 2026-05-07
+
+### Changed — JOIN_ROOM auto-creates on missing; client drops CREATE_ROOM
+
+The signaling server's `process_join_room` now auto-creates the
+room (with empty password) when it doesn't exist, instead of
+returning "Room not found". Tonel-MacOS's `AppState.enterRoom`
+correspondingly drops the `preferCreate` parameter and always
+calls `signal.joinRoom` — never `createRoom`. The "Room already
+exists" alert that used to surface on every transport switch /
+reconnect (because v6.2.0+ retried CREATE on rooms that lived
+through the previous tear-down) is gone — server can no longer
+emit it on the JOIN path.
+
+Web client unaffected: it uses explicit CREATE_ROOM for
+password-protected rooms; that path is unchanged.
+
+#### Server change
+
+`server/src/signaling_server.cpp::process_join_room`:
+
+```cpp
+Room* room = room_manager_.get_room(room_id);
+if (!room) {
+    room = room_manager_.create_room(room_id, user_id, "");
+    // ... continue as if the room already existed
+}
+```
+
+The auto-created room has no password. To create a
+password-protected room the explicit CREATE_ROOM path is still
+the only option.
+
+#### Client change
+
+`AppState.enterRoom(_:preferCreate:)` → `enterRoom(_:)`. Single
+JOIN call, no CREATE-then-fallback dance, no spurious error
+swallowing. ~25 lines simpler.
+
+#### Rollout
+
+Server-side change is the critical one — must deploy before any
+v6.4.0 client tries to connect (a v6.4.0 client to a v6.3.x
+server would hit "Room not found" on first launch when the
+personal room hadn't been pre-created). Server v6.4.0 deploy
+done at release time.
+
 ## [6.3.1] - 2026-05-07
 
 ### Fixed — Tonel-MacOS hard exit on UDP → WS transport switch (SIGPIPE)

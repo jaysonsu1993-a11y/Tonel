@@ -473,11 +473,31 @@ void SignalingServer::process_join_room(uv_stream_t* client,
         user_id_to_ctx_[user_id] = ctx;
     }
 
-    // Verify password if room is password-protected
+    // v6.4.0: JOIN_ROOM auto-creates the room if missing. The native
+    // client (Tonel-MacOS v6.2.0+) auto-bootstraps into a persistent
+    // personal room on every launch — when the server's 30-minute
+    // idle GC has reaped the room, the next reconnect would
+    // otherwise surface "Room not found" as a modal. Folding the
+    // create+join into one server-side step also eliminates the
+    // CREATE-then-JOIN dance the client used to have to perform
+    // (and the spurious "Room already exists" error the dance
+    // produced under reconnect).
+    //
+    // Web client still uses explicit CREATE_ROOM for password-
+    // protected rooms — that path is unchanged. Auto-create here
+    // produces an unprotected room (empty password); a real password
+    // would have to be set via CREATE_ROOM before the first JOIN.
     Room* room = room_manager_.get_room(room_id);
     if (!room) {
-        send_response(client, SimpleJson::make_error("Room not found"));
-        return;
+        room = room_manager_.create_room(room_id, user_id, "");
+        if (!room) {
+            // create_room returning nullptr at this point means an
+            // internal map error (race?). Surface as a generic error.
+            send_response(client, SimpleJson::make_error("Room not found"));
+            return;
+        }
+        std::cout << "[Room] Auto-created on JOIN: " << room_id
+                  << " by " << user_id << std::endl;
     }
     if (room->has_password() && !room->check_password(password)) {
         send_response(client, SimpleJson::make_error("Incorrect room password"));

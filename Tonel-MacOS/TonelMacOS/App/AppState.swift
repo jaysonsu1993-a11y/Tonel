@@ -173,7 +173,7 @@ final class AppState: ObservableObject {
         }
         Task { @MainActor in
             await self.tearDownSession()
-            await self.enterRoom(trimmed, preferCreate: false)
+            await self.enterRoom(trimmed)
         }
     }
 
@@ -189,13 +189,13 @@ final class AppState: ObservableObject {
 
     // MARK: - Connection lifecycle
 
-    /// Connect signal + mixer + audio for the given room. Tries
-    /// `CREATE_ROOM` first (so first-launch users implicitly create
-    /// their own room), falls back to `JOIN_ROOM` if the server says
-    /// it already exists. `preferCreate=false` skips the create
-    /// attempt — used for switching to someone else's room.
-    private func enterRoom(_ roomId: String, preferCreate: Bool = true) async {
-        AppLog.log("[AppState] enterRoom roomId=\(roomId) preferCreate=\(preferCreate) userId=\(userId)")
+    /// Connect signal + mixer + audio for the given room. v6.4.0+
+    /// always uses `JOIN_ROOM` — the server auto-creates the room
+    /// when it doesn't exist, eliminating the CREATE-then-fallback
+    /// dance and the spurious "Room already exists" alert it
+    /// produced on reconnect.
+    private func enterRoom(_ roomId: String) async {
+        AppLog.log("[AppState] enterRoom roomId=\(roomId) userId=\(userId)")
         isJoining  = true
         statusText = "正在加入房间…"
         lastError  = nil
@@ -203,26 +203,7 @@ final class AppState: ObservableObject {
 
         do {
             try await signal.connect()
-
-            // Try CREATE first when this is the user's own room (or any
-            // first-time entry). Fall back to JOIN on "already exists".
-            // This pattern handles both first-launch (server has no
-            // record yet) and re-launch (server still holds the room
-            // from <30 min ago), without the caller having to know
-            // which case they're in.
-            var joinedAsCreator = false
-            if preferCreate {
-                do {
-                    try await signal.createRoom(roomId: roomId, userId: userId, password: nil)
-                    joinedAsCreator = true
-                } catch {
-                    AppLog.log("[AppState] createRoom failed (\(error.localizedDescription)) — falling back to JOIN_ROOM")
-                }
-            }
-            if !joinedAsCreator {
-                try await signal.joinRoom(roomId: roomId, userId: userId, password: nil)
-            }
-
+            try await signal.joinRoom(roomId: roomId, userId: userId, password: nil)
             try await mixer.connect(roomId: roomId, userId: userId)
             audio.syncServerTuningFromMixer()
             try audio.start()
