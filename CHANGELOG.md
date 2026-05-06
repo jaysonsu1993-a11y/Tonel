@@ -9,6 +9,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0] - 2026-05-07
+
+### Added — Tonel-MacOS multi-server selection + WSS-fallback transport
+
+The Settings sheet now exposes two pickers under
+**服务器与传输模式**:
+
+- **服务器**: 广州1（阿里云）/ 广州2（酷番云 · 暂不可用）
+- **协议**: UDP（低延迟） / WSS（兼容）
+
+Both pickers are greyed out while the user is in a room — switching
+servers or transport mid-session is intentionally disallowed. The
+deferred-from-v6.0.0 design lands here.
+
+**No auto-fallback**, by design. Connection failures surface as a
+modal alert on the Home screen ("连接失败 — 如果当前网络封锁直连
+UDP，可在 设置 → 服务器与传输模式 切换到 WSS 兜底重试") and the
+user picks the other transport manually. The reasoning is captured
+in earlier conversation notes and matches the user-explicit intent
+to keep the failure mode visible rather than silently re-routing.
+
+#### Architecture
+
+- New `MixerTransport` protocol (`Tonel-MacOS/.../Network/`) defines
+  the surface that `AppState` and `AudioEngine` use, decoupling the
+  audio path from the underlying transport class.
+- `MixerClient` (existing UDP-direct path) now conforms to
+  `MixerTransport` and accepts a `ServerLocation` at construction —
+  references to `Endpoints.mixerHost` / `mixerTCPPort` /
+  `mixerUDPPort` are read from the server bundle instead.
+- New `WSSMixerClient` parallel implementation. Talks the **same**
+  SPA1 wire format over `URLSessionWebSocketTask` to
+  `wss://<host>/mixer-tcp` (control, JSON text frames) and
+  `wss://<host>/mixer-udp` (audio, binary SPA1). The proxy on the
+  other side is the unchanged `web/ws-mixer-proxy.js`
+  (`tonel-ws-mixer-proxy` PM2 service) — no server-side change
+  needed; we just plug a native client into the same pipe the
+  browser already uses.
+- `Endpoints.swift` rewritten as a multi-server registry. Two
+  `ServerLocation` entries today: `guangzhou1` (Aliyun, fully
+  online) and `guangzhou2` (Kufan, marked `isAvailable=false` while
+  the IDC ban is unresolved). Default selection: 广州1 / UDP.
+  `@AppStorage` keys: `tonel.server.id`, `tonel.transport.mode`.
+- `AppState.mixer` is now an `@Published` `any MixerTransport`.
+  `applyTransportSelection(server:transport:)` recreates the mixer
+  from a static factory and re-attaches it to the audio engine.
+  Refuses to swap while in a room.
+
+#### Other Tonel-MacOS fixes
+
+- Connection-failure alert wired to `state.lastError` on `HomeView`.
+  Previously errors went into `lastError` but no UI surfaced them.
+- AudioDebugSheet jitter sliders' ranges scaled to match v6's
+  larger jitter constants — `jitterTarget` 1...16 → 1...60,
+  `jitterMaxDepth` 1...64 → 1...240. The v6 server defaults
+  (target=8, cap=124) were OFF the old slider scale, so the
+  sliders snapped to the max and pushed the wrong number back to
+  the server on first open.
+- Stale "120-sample" / "2.5 ms" comment cleanup absorbed into
+  `Endpoints.swift` rewrite (file is now generated fresh).
+
+#### Deferred from v6.1.0
+
+- Live transport-swap **without leaving the room** would require
+  draining + re-encoding the audio stream across the swap; not
+  worth it for a setting users typically pin once.
+- Health probe that pre-flights the selected transport against the
+  selected server (so the user finds out it won't work *before*
+  trying to join) — straightforward but not in scope here.
+
 ## [6.0.2] - 2026-05-07
 
 ### Docs / comments — RTT/latency review follow-up

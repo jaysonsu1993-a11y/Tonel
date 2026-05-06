@@ -26,16 +26,92 @@ final class AppState: ObservableObject {
 
     // Long-lived clients.
     let signal = SignalClient()
-    let mixer  = MixerClient()
     let audio  = AudioEngine()
+
+    /// The active mixer transport. v6.1.0+ this is selected dynamically
+    /// from `@AppStorage` settings — UDP-direct (`MixerClient`) for low
+    /// latency, WSS-tunnelled (`WSSMixerClient`) for restricted networks.
+    /// **Must only be reassigned outside an active room** — see
+    /// `applyTransportSelection()`.
+    @Published private(set) var mixer: any MixerTransport
+
+    /// Currently-selected server. Mirrors the @AppStorage value but
+    /// snapshotted here so a Settings change requires explicit
+    /// `applyTransportSelection()` (we don't want a dropdown wobble
+    /// while connecting).
+    @Published private(set) var serverLocation: ServerLocation
+    /// Currently-selected transport mode.
+    @Published private(set) var transportMode: TransportMode
 
     private var unsubSignal: (() -> Void)?
 
     init() {
-        audio.attach(mixer: mixer)
+        // Read the user's last selection from UserDefaults. First-run
+        // users get `Endpoints.defaultServer` / `defaultTransport`.
+        let savedServerId   = UserDefaults.standard.string(forKey: Endpoints.serverIdKey)
+                              ?? Endpoints.defaultServer.id
+        let savedTransport  = UserDefaults.standard.string(forKey: Endpoints.transportModeKey)
+                              .flatMap(TransportMode.init(rawValue:))
+                              ?? Endpoints.defaultTransport
+        let initialLoc      = Endpoints.server(byId: savedServerId)
+        // Defensive: a saved id pointing at a now-disabled location
+        // (e.g. user picked 广州2, then we marked it unavailable in a
+        // later release) collapses back to the default. Avoids users
+        // getting stuck unable to connect with no obvious cause.
+        let resolvedLoc     = initialLoc.isAvailable ? initialLoc : Endpoints.defaultServer
+        self.serverLocation = resolvedLoc
+        self.transportMode  = savedTransport
+        self.mixer          = AppState.makeMixer(serverLocation: resolvedLoc,
+                                                 transport:      savedTransport)
+
+        audio.attach(mixer: self.mixer)
         unsubSignal = signal.onMessage { [weak self] msg in
             self?.handleSignal(msg)
         }
+    }
+
+    /// Construct the right mixer for a (server, transport) pair. Pulled
+    /// out as a static factory so init and `applyTransportSelection`
+    /// share one path — keeps the "which class for which mode" mapping
+    /// in one place.
+    private static func makeMixer(serverLocation: ServerLocation,
+                                  transport: TransportMode) -> any MixerTransport {
+        switch transport {
+        case .udp:
+            return MixerClient(serverLocation: serverLocation)
+        case .wss:
+            return WSSMixerClient(serverLocation: serverLocation)
+        }
+    }
+
+    /// Apply a Settings change. Refuses to swap while connected — the
+    /// user must leave the room first. UI greys out the picker in
+    /// that case so this guard is rarely tripped, but check defensively.
+    /// Returns true if the swap happened.
+    @discardableResult
+    func applyTransportSelection(server: ServerLocation,
+                                 transport: TransportMode) -> Bool {
+        guard screen == .home else {
+            AppLog.log("[AppState] applyTransportSelection refused — currently in room")
+            return false
+        }
+        // Persist first so a crash mid-swap still leaves the user's
+        // selection captured for next launch.
+        UserDefaults.standard.set(server.id,         forKey: Endpoints.serverIdKey)
+        UserDefaults.standard.set(transport.rawValue, forKey: Endpoints.transportModeKey)
+
+        let same = (server.id == serverLocation.id) && (transport == transportMode)
+        if same { return false }
+
+        // Swap to a fresh mixer. The old one had no active connection
+        // (we're on Home), so disconnect() is safe but mostly a no-op.
+        mixer.disconnect()
+        serverLocation = server
+        transportMode  = transport
+        mixer          = AppState.makeMixer(serverLocation: server, transport: transport)
+        audio.attach(mixer: mixer)
+        AppLog.log("[AppState] transport swapped → server=\(server.id) transport=\(transport.rawValue)")
+        return true
     }
 
     // MARK: - Auth

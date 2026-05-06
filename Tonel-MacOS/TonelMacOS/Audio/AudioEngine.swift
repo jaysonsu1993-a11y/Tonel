@@ -110,7 +110,11 @@ final class AudioEngine: ObservableObject {
     }
 
     // ── Wiring ──────────────────────────────────────────────────────────────
-    private weak var mixer: MixerClient?
+    /// v6.1.0: typed as the `MixerTransport` protocol so we can swap
+    /// between the UDP-direct (`MixerClient`) and WSS-tunnelled
+    /// (`WSSMixerClient`) implementations from Settings without
+    /// touching the audio path.
+    private weak var mixer: (any MixerTransport)?
     private let engine = AVAudioEngine()
     /// Standalone HAL output AudioUnit (kAudioUnitSubType_HALOutput).
     /// Replaces the AVAudioEngine sourceNode → mainMixerNode → outputNode
@@ -163,7 +167,7 @@ final class AudioEngine: ObservableObject {
 
     // ── Setup ──────────────────────────────────────────────────────────────
 
-    func attach(mixer: MixerClient) {
+    func attach(mixer: any MixerTransport) {
         self.mixer = mixer
         self.packetUnsub?()
         self.packetUnsub = mixer.onPacket { [weak self] pkt in

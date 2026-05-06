@@ -22,10 +22,21 @@ struct MixerPacket {
 ///   5. Start UDP receive loop and TCP read loop.
 /// Not `@MainActor`. Real-time audio code calls `sendAudio(...)` from a Core
 /// Audio thread, so the network sends must remain accessible off-main.
-final class MixerClient {
+final class MixerClient: MixerTransport {
     typealias PacketHandler = (MixerPacket) -> Void
 
     enum State { case idle, connecting, connected, failed(String), disconnected }
+
+    /// Where this client is connecting to. Captured at construction so
+    /// the user can change `Endpoints.guangzhou1` ↔ `guangzhou2` in
+    /// Settings without affecting an in-flight connection (AppState
+    /// recreates the mixer on selection change).
+    let serverLocation: ServerLocation
+
+    init(serverLocation: ServerLocation = Endpoints.defaultServer) {
+        self.serverLocation = serverLocation
+        self.udpPort = serverLocation.mixerUDPPort
+    }
 
     private(set) var state: State = .idle
     private(set) var roomId = ""
@@ -39,7 +50,7 @@ final class MixerClient {
     private var tcpReadThread: Thread?
     private var tcpWriteQueue = DispatchQueue(label: "io.tonel.tcpwrite", qos: .userInitiated)
     private var udp: NWConnection?
-    private var udpPort: UInt16 = Endpoints.mixerUDPPort
+    private var udpPort: UInt16
 
     /// **Critical: dedicated network queue (NOT main).**
     ///
@@ -91,14 +102,14 @@ final class MixerClient {
         self.userId    = userId
         self.userIdKey = "\(roomId):\(userId)"
         self.state     = .connecting
-        AppLog.log("[Mixer] connect → tcp \(Endpoints.mixerHost):\(Endpoints.mixerTCPPort) room=\(roomId) user=\(userId)")
+        AppLog.log("[Mixer] connect → tcp \(serverLocation.mixerHost):\(serverLocation.mixerTCPPort) room=\(roomId) user=\(userId)")
 
         try await openTCP()
         AppLog.log("[Mixer] TCP ready, sending MIXER_JOIN")
         try await sendJoinAndAwaitAck()
         AppLog.log("[Mixer] MIXER_JOIN_ACK received, udpPort=\(udpPort)")
         try openUDP()
-        AppLog.log("[Mixer] UDP socket open → \(Endpoints.mixerHost):\(udpPort)")
+        AppLog.log("[Mixer] UDP socket open → \(serverLocation.mixerHost):\(udpPort)")
         sendHandshake()
         startUDPReceive()
         startTCPRead()
@@ -205,7 +216,7 @@ final class MixerClient {
     // MARK: - TCP (POSIX sockets — bypasses system proxies)
 
     private func openTCP() async throws {
-        AppLog.log("[Mixer] openTCP (POSIX) → \(Endpoints.mixerHost):\(Endpoints.mixerTCPPort)")
+        AppLog.log("[Mixer] openTCP (POSIX) → \(serverLocation.mixerHost):\(serverLocation.mixerTCPPort)")
         
         // Create socket
         let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
@@ -224,8 +235,8 @@ final class MixerClient {
         // Resolve host
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = Endpoints.mixerTCPPort.bigEndian
-        addr.sin_addr.s_addr = inet_addr(Endpoints.mixerHost)
+        addr.sin_port = serverLocation.mixerTCPPort.bigEndian
+        addr.sin_addr.s_addr = inet_addr(serverLocation.mixerHost)
         
         // Connect
         let connResult = withUnsafePointer(to: &addr) {
@@ -394,7 +405,7 @@ final class MixerClient {
     // MARK: - UDP
 
     private func openUDP() throws {
-        let host = NWEndpoint.Host(Endpoints.mixerHost)
+        let host = NWEndpoint.Host(serverLocation.mixerHost)
         let port = NWEndpoint.Port(integerLiteral: udpPort)
         let params = NWParameters.udp
         params.serviceClass = .interactiveVoice    // QoS hint for low-latency RT

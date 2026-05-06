@@ -493,6 +493,7 @@ import AVFoundation
 
 struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var state: AppState
     @ObservedObject var audio: AudioEngine
     @State private var outputDevices: [AudioDeviceInfo] = []
     @State private var selectedOutput: AudioDeviceID = 0
@@ -500,6 +501,12 @@ struct SettingsSheet: View {
     @State private var outputError: String? = nil
     @AppStorage(AudioEngine.bufferFramesKey) private var bufferFrames: Int = AudioWire.frameSamples
     @State private var deviceFrameRange: (Int, Int) = (15, 4096)
+    /// Bound to @AppStorage so the picker reflects the user's last
+    /// selection persistently. Selection-time changes flow through
+    /// `state.applyTransportSelection(...)` which actually swaps the
+    /// live mixer.
+    @AppStorage(Endpoints.serverIdKey)      private var serverId: String      = Endpoints.defaultServer.id
+    @AppStorage(Endpoints.transportModeKey) private var transportRaw: String  = Endpoints.defaultTransport.rawValue
 
     private let supportedRates: [Double] = [44100, 48000, 96000]
     /// Common IO buffer sizes shown in the picker. Each value is the
@@ -514,6 +521,51 @@ struct SettingsSheet: View {
                 Text("设置").font(.system(size: 22, weight: .bold))
                 Spacer()
                 Button("×") { dismiss() }.buttonStyle(.borderless)
+            }
+
+            // ── 服务器 / 传输模式 (v6.1.0) ────────────────────────────
+            // Visible at the top because changing server/transport is the
+            // only setting that requires leaving the room first; we want
+            // the user to see the constraint before they touch the
+            // picker (the .disabled binding alone wasn't enough — UX
+            // testing showed users tap a greyed picker repeatedly).
+            section("服务器与传输模式") {
+                let inRoom = state.screen == .room
+                row("服务器") {
+                    Picker("", selection: $serverId) {
+                        ForEach(Endpoints.allServers) { s in
+                            Text(s.displayName)
+                                .tag(s.id)
+                                .foregroundStyle(s.isAvailable ? .primary : .secondary)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(inRoom)
+                    .onChange(of: serverId) { _, new in
+                        applyServerTransportChange()
+                    }
+                }
+                row("协议") {
+                    Picker("", selection: $transportRaw) {
+                        ForEach(TransportMode.allCases) { t in
+                            Text(t.displayName).tag(t.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(inRoom)
+                    .onChange(of: transportRaw) { _, new in
+                        applyServerTransportChange()
+                    }
+                }
+                if inRoom {
+                    Text("正在房间内 — 离开后才能切换服务器或协议。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("UDP 是默认（最低延迟）；WSS 是兜底，仅当所在网络封锁直连 UDP 时使用。连不上不会自动切换 —— 由你手动改。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color(white: 0.45))
+                }
             }
 
             section("音频设备") {
@@ -630,6 +682,27 @@ struct SettingsSheet: View {
         }
     }
 
+    /// Push the picker selections through to AppState. The picker uses
+    /// raw String tags (so @AppStorage can be String-typed across
+    /// AppStorage limitations); we map back to the typed values here.
+    /// AppState refuses the swap if the user is in a room — UI greys
+    /// the pickers in that case so it shouldn't fire, but we still
+    /// guard defensively.
+    private func applyServerTransportChange() {
+        let server = Endpoints.server(byId: serverId)
+        let mode   = TransportMode(rawValue: transportRaw) ?? Endpoints.defaultTransport
+        // If user picked a disabled location, snap selection back to
+        // the previously-applied value. The Picker rendered the row
+        // greyed so this is rare, but iOS/macOS still allows .tag()
+        // selection on a disabled-foreground row.
+        guard server.isAvailable else {
+            AppLog.log("[Settings] picked unavailable server \(serverId), reverting")
+            serverId = state.serverLocation.id
+            return
+        }
+        _ = state.applyTransportSelection(server: server, transport: mode)
+    }
+
     @ViewBuilder
     private func section<C: View>(_ title: String,
                                   @ViewBuilder content: () -> C) -> some View {
@@ -680,15 +753,20 @@ struct AudioDebugSheet: View {
             // ── SERVER — MIXER_TUNE ───────────────────────────────────────
             Text("SERVER — per-user jitter buffer (MIXER_TUNE)")
                 .bold().foregroundStyle(Color.green.opacity(0.85))
+            // v6.1.0: ranges scaled to match server's
+            // JITTER_TARGET_MAX=60 / JITTER_MAX_DEPTH_MAX=240 at the
+            // 32-sample wire frame. Pre-v6 had target_max=16 / cap=64
+            // at 120-sample frames; the ms-equivalent ceilings (~40 ms
+            // / ~160 ms) survive the rescale unchanged.
             slider(label: "jitterTarget",
                    value: Binding(get: { Double(audio.serverJitterTarget) },
                                   set: { audio.serverJitterTarget = Int($0) }),
-                   range: 1...16, step: 1,
+                   range: 1...60, step: 1,
                    display: "\(audio.serverJitterTarget) fr · \(String(format: "%.1f", Double(audio.serverJitterTarget) * AudioWire.frameMs)) ms")
             slider(label: "jitterMaxDepth",
                    value: Binding(get: { Double(audio.serverJitterMaxDepth) },
                                   set: { audio.serverJitterMaxDepth = Int($0) }),
-                   range: 1...64, step: 1,
+                   range: 1...240, step: 1,
                    display: "\(audio.serverJitterMaxDepth) fr · \(String(format: "%.1f", Double(audio.serverJitterMaxDepth) * AudioWire.frameMs)) ms cap")
 
             Divider().background(Color.green.opacity(0.4))

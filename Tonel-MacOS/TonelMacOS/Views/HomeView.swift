@@ -69,6 +69,20 @@ struct HomeView: View {
         .sheet(isPresented: $presentSettings) {
             SettingsSheet(audio: state.audio).environmentObject(state)
         }
+        // v6.1.0: surface connection failures (mixer TCP refused, WSS
+        // upgrade rejected, MIXER_JOIN timeout) as a modal so the user
+        // can react. No auto-fallback by design — the dialog suggests
+        // toggling 协议 in Settings as the manual remediation.
+        .alert("连接失败",
+               isPresented: Binding(
+                   get: { state.lastError != nil },
+                   set: { if !$0 { state.lastError = nil } }
+               ),
+               presenting: state.lastError) { _ in
+            Button("好") { state.lastError = nil }
+        } message: { err in
+            Text("\(err)\n\n如果当前网络封锁直连 UDP，可在 设置 → 服务器与传输模式 切换到 WSS 兜底重试。")
+        }
     }
 }
 
