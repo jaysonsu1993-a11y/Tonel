@@ -31,7 +31,7 @@ struct RootView: View {
                    presenting: state.lastError) { _ in
                 Button("好") { state.lastError = nil }
             } message: { err in
-                Text("\(err)\n\n如果当前网络封锁直连 UDP，可在 设置 → 服务器与传输模式 切换到 WSS 兜底重试。")
+                Text("\(err)\n\n如果当前网络封锁直连 UDP，可在 设置 → 服务器与传输模式 切换到 WS 兜底重试。")
             }
     }
 }

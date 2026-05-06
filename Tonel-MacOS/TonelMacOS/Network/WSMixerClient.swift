@@ -38,7 +38,7 @@ import Foundation
 ///      learns our `(roomId:userId)` → WS mapping for return
 ///      broadcasts.
 ///   5. Start receive loops on both sockets + PING timer.
-final class WSSMixerClient: MixerTransport {
+final class WSMixerClient: MixerTransport {
     typealias PacketHandler = (MixerPacket) -> Void
 
     enum WSError: LocalizedError {
@@ -137,14 +137,14 @@ final class WSSMixerClient: MixerTransport {
         self.userId    = userId
         self.userIdKey = "\(roomId):\(userId)"
 
-        guard let ctlURL = serverLocation.wssMixerTCPURL,
-              let audURL = serverLocation.wssMixerUDPURL else {
+        guard let ctlURL = serverLocation.wsMixerTCPURL,
+              let audURL = serverLocation.wsMixerUDPURL else {
             throw WSError.missingURL(serverLocation.id)
         }
         let host = ctlURL.host ?? "<no-host>"
 
-        AppLog.log("[WSSMixer] connect → \(ctlURL.absoluteString) (control)")
-        AppLog.log("[WSSMixer]            \(audURL.absoluteString) (audio)")
+        AppLog.log("[WSMixer] connect → \(ctlURL.absoluteString) (control)")
+        AppLog.log("[WSMixer]            \(audURL.absoluteString) (audio)")
 
         // The whole connect flow (control upgrade + JOIN + audio
         // upgrade + handshake) is bounded by a single 8s deadline. The
@@ -161,7 +161,7 @@ final class WSSMixerClient: MixerTransport {
 
                 // 2. MIXER_JOIN + ACK
                 try await self.sendJoinAndAwaitAck()
-                AppLog.log("[WSSMixer] MIXER_JOIN_ACK received")
+                AppLog.log("[WSMixer] MIXER_JOIN_ACK received")
 
                 // 3. Audio WS
                 let aud = self.session.webSocketTask(with: audURL)
@@ -175,7 +175,7 @@ final class WSSMixerClient: MixerTransport {
                                     timestamp: 0,
                                     userId: self.userIdKey)
                 try await aud.send(.data(hs))
-                AppLog.log("[WSSMixer] SPA1 handshake sent")
+                AppLog.log("[WSMixer] SPA1 handshake sent")
             }
         } catch {
             // Clean up half-open WS tasks so the next attempt starts
@@ -191,7 +191,7 @@ final class WSSMixerClient: MixerTransport {
         startControlReceive()
         startAudioReceive()
         startPing()
-        AppLog.log("[WSSMixer] connected ✅")
+        AppLog.log("[WSMixer] connected ✅")
     }
 
     func disconnect() {
@@ -260,7 +260,7 @@ final class WSSMixerClient: MixerTransport {
         guard let data = try? JSONSerialization.data(withJSONObject: body),
               let s    = String(data: data, encoding: .utf8) else { return }
         ctl.send(.string(s + "\n")) { err in
-            if let err = err { AppLog.log("[WSSMixer] MIXER_TUNE err: \(err)") }
+            if let err = err { AppLog.log("[WSMixer] MIXER_TUNE err: \(err)") }
         }
     }
 
@@ -276,7 +276,7 @@ final class WSSMixerClient: MixerTransport {
         guard let data = try? JSONSerialization.data(withJSONObject: body),
               let s    = String(data: data, encoding: .utf8) else { return }
         ctl.send(.string(s + "\n")) { err in
-            if let err = err { AppLog.log("[WSSMixer] PEER_GAIN err: \(err)") }
+            if let err = err { AppLog.log("[WSMixer] PEER_GAIN err: \(err)") }
         }
     }
 
@@ -294,7 +294,7 @@ final class WSSMixerClient: MixerTransport {
             if let err = err {
                 // Don't spam — log only the first couple of failures
                 // per second by hooking into existing app log throttle.
-                AppLog.log("[WSSMixer] audio send err: \(err)")
+                AppLog.log("[WSMixer] audio send err: \(err)")
             }
         }
     }
@@ -307,7 +307,7 @@ final class WSSMixerClient: MixerTransport {
             guard let self = self else { return }
             switch result {
             case .failure(let err):
-                AppLog.log("[WSSMixer] control recv err: \(err)")
+                AppLog.log("[WSMixer] control recv err: \(err)")
                 return  // stop the loop on error
             case .success(let msg):
                 if case .string(let s) = msg {
@@ -352,7 +352,7 @@ final class WSSMixerClient: MixerTransport {
             guard let self = self else { return }
             switch result {
             case .failure(let err):
-                AppLog.log("[WSSMixer] audio recv err: \(err)")
+                AppLog.log("[WSMixer] audio recv err: \(err)")
                 return
             case .success(let msg):
                 if case .data(let d) = msg, let h = SPA1.parseHeader(d) {

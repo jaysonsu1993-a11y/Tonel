@@ -9,6 +9,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.0] - 2026-05-07
+
+### Changed — Tonel-MacOS WS-fallback now goes plain `ws://` directly to the box
+
+The fallback transport (was 协议 = WSS) now talks **plain
+WebSocket** straight to the mixer's `tonel-ws-mixer-proxy` port
+(9005/TCP), bypassing the DNS + TLS + nginx chain that v6.1.0
+introduced. The native client gets the same direct-to-Aliyun
+philosophy as the UDP path — no `srv-new.tonel.io` lookup, no
+cert renewal, no proxy hop. Web clients still go through nginx
++ TLS as before; this change is Tonel-MacOS-only.
+
+The original v6.1.0 design assumed `srv-new.tonel.io` had a DNS
+record; v6.2.2's investigation found it never did. Rather than
+fix DNS we changed the architecture: a native client doesn't need
+TLS to a hostname for what is fundamentally a "use TCP not UDP"
+fallback.
+
+#### Concrete changes
+
+- `TransportMode.wss` → `.ws`. Old `wss` raw values from
+  pre-v6.3.0 `@AppStorage` slots collapse to nil → `AppState`
+  defaults to `.udp` on first launch of v6.3.0. (Acceptable; the
+  transport picker is right there in Settings if the user wants
+  WS again.)
+- `ServerLocation.wssMixerHost` → `wsMixerURL` (full
+  `URL("ws://<ip>:<port>")`); the per-path `wsMixerTCPURL` /
+  `wsMixerUDPURL` derive `/mixer-tcp` and `/mixer-udp` from it.
+- `WSSMixerClient.swift` → `WSMixerClient.swift` (file + class
+  rename; same SPA1 wire path internals).
+- `Info.plist` `NSAppTransportSecurity.NSExceptionDomains` adds
+  the two server IPs (8.163.21.207, 42.240.163.172) with
+  `NSExceptionAllowsInsecureHTTPLoads = true`. `NSAllowsArbitraryLoads`
+  stays `false` so this only whitelists those specific hosts.
+- UI label: 协议 picker option renamed `WSS（兼容）` → `WS（兼容）`;
+  alert text and Settings helper updated.
+
+#### Server-side
+
+- UFW: `ufw allow 9005/tcp` (done at deploy-time).
+- Aliyun ECS Security Group: must add 9005/TCP inbound from
+  `0.0.0.0/0` — UFW alone isn't enough on Aliyun
+  (`reference_aliyun_security_group` memory rule). Operator-action.
+
+#### Trade-off accepted
+
+ws:// is plaintext. The PCM stream + `roomId:userId` are visible
+to any in-path observer between the user and Aliyun. This is
+the same posture as the UDP path on 9003 (also plaintext), so
+the change is internally consistent. Future encryption work
+should target both transports together (DTLS on UDP, wss:// or
+TLS-wrapped on TCP) — better than retrofitting wss:// alone.
+
 ## [6.2.2] - 2026-05-07
 
 ### Fixed — WSS transport switch hangs the app indefinitely

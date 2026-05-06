@@ -111,8 +111,8 @@ final class AudioEngine: ObservableObject {
 
     // ── Wiring ──────────────────────────────────────────────────────────────
     /// v6.1.0: typed as the `MixerTransport` protocol so we can swap
-    /// between the UDP-direct (`MixerClient`) and WSS-tunnelled
-    /// (`WSSMixerClient`) implementations from Settings without
+    /// between the UDP-direct (`MixerClient`) and WS-direct
+    /// (`WSMixerClient`) implementations from Settings without
     /// touching the audio path.
     private weak var mixer: (any MixerTransport)?
     private let engine = AVAudioEngine()

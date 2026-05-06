@@ -575,7 +575,7 @@ struct SettingsSheet: View {
                     .labelsHidden()
                     .onChange(of: transportRaw) { _, _ in applyServerTransportChange() }
                 }
-                Text("UDP 是默认（最低延迟）；WSS 是兜底，仅当所在网络封锁直连 UDP 时使用。连不上不会自动切换 —— 由你手动改。切换会重连当前房间。")
+                Text("UDP 是默认（最低延迟）；WS 是兜底，仅当所在网络封锁直连 UDP 时使用。连不上不会自动切换 —— 由你手动改。切换会重连当前房间。")
                     .font(.system(size: 11))
                     .foregroundStyle(Color(white: 0.45))
             }

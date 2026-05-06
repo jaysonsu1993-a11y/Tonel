@@ -14,42 +14,51 @@ struct ServerLocation: Identifiable, Hashable {
     let mixerHost: String
     let mixerTCPPort: UInt16   // control
     let mixerUDPPort: UInt16   // SPA1 audio
-    /// Hostname for the WSS-tunnelled path (`WSSMixerClient`). The proxy
-    /// at this host wraps `mixerTCPPort` and `mixerUDPPort` behind
-    /// `/mixer-tcp` and `/mixer-udp`. nil = no WSS path available
-    /// for this location yet.
-    let wssMixerHost: String?
+    /// Plain-WS endpoint URL for the TCP-fallback path (`WSMixerClient`).
+    /// v6.3.0+ this points directly at the box's `tonel-ws-mixer-proxy`
+    /// (Node, plain `ws://`, no TLS termination), bypassing both DNS
+    /// and nginx — exactly the same direct-to-Aliyun philosophy as the
+    /// UDP path. Pre-v6.3.0 this was a `wss://srv-new.tonel.io/...`
+    /// hostname that turned out to have no DNS record.
+    /// nil = no WS fallback path available yet for this location.
+    let wsMixerURL: URL?
     /// Set to false to grey out a placeholder entry (e.g. 广州2 = 酷番云
     /// while the box is still being un-banned). The picker still shows
     /// the row but the user can't select it; AppState refuses to
     /// connect.
     let isAvailable: Bool
 
-    /// WSS endpoints derived from `wssMixerHost`. nil → not selectable.
-    var wssMixerTCPURL: URL? {
-        guard let h = wssMixerHost else { return nil }
-        return URL(string: "wss://\(h)/mixer-tcp")
-    }
-    var wssMixerUDPURL: URL? {
-        guard let h = wssMixerHost else { return nil }
-        return URL(string: "wss://\(h)/mixer-udp")
-    }
+    /// WS endpoints derived from `wsMixerURL`. nil → not selectable.
+    /// The path layout (`/mixer-tcp` for control, `/mixer-udp` for
+    /// audio) matches `tonel-ws-mixer-proxy.js`'s upgrade routes so
+    /// we plug straight into the same proxy the web client uses.
+    var wsMixerTCPURL: URL? { wsMixerURL.flatMap { $0.appendingPathComponent("mixer-tcp") } }
+    var wsMixerUDPURL: URL? { wsMixerURL.flatMap { $0.appendingPathComponent("mixer-udp") } }
 }
 
 /// Transport mode for the audio path. UDP is the default and lowest-
-/// latency choice; WSS is the fallback for users behind firewalls /
+/// latency choice; WS is the fallback for users behind firewalls /
 /// NATs that block direct UDP. **No auto-fallback** — when a connection
 /// fails, the user picks the other mode manually.
+///
+/// v6.3.0 renamed the fallback from `.wss` (TLS over the tonel.io
+/// reverse proxy) to `.ws` (plain WebSocket directly to the mixer's
+/// `tonel-ws-mixer-proxy` port). The native client doesn't need TLS
+/// here — for the firewall-traversal use-case the relevant property
+/// is "TCP not UDP", and a plain ws:// directly to the box on a
+/// known port is simpler than a DNS + cert + nginx chain. Stale
+/// `.wss` raw-values from older releases collapse back to `.udp` via
+/// `init?(rawValue:)` returning nil → AppState's default fallback.
 enum TransportMode: String, CaseIterable, Identifiable {
     case udp
-    case wss
+    case ws
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .udp: return "UDP（低延迟）"
-        case .wss: return "WSS（兼容）"
+        case .ws:  return "WS（兼容）"
         }
     }
 }
@@ -73,7 +82,7 @@ enum Endpoints {
         mixerHost: "8.163.21.207",
         mixerTCPPort: 9002,
         mixerUDPPort: 9003,
-        wssMixerHost: "srv-new.tonel.io",
+        wsMixerURL: URL(string: "ws://8.163.21.207:9005"),
         isAvailable: true
     )
 
@@ -90,7 +99,7 @@ enum Endpoints {
         mixerHost: "42.240.163.172",
         mixerTCPPort: 9002,
         mixerUDPPort: 9003,
-        wssMixerHost: "srv.tonel.io",
+        wsMixerURL: URL(string: "ws://42.240.163.172:9005"),
         isAvailable: false
     )
 

@@ -44,6 +44,20 @@ targets:
         NSHighResolutionCapable: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
+          # v6.3.0: macOS WS-fallback transport (`WSMixerClient`) talks
+          # plain ws:// directly to the mixer's tonel-ws-mixer-proxy
+          # port (avoiding the DNS + cert + nginx chain a wss:// path
+          # would need — see CHANGELOG v6.3.0). ATS rejects ws:// by
+          # default; whitelist the specific Aliyun box only. The other
+          # entry (酷番云) is added in advance for when 广州2 flips
+          # back online.
+          NSExceptionDomains:
+            "8.163.21.207":
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
+            "42.240.163.172":
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
     entitlements:
       path: TonelMacOS/Resources/TonelMacOS.entitlements
       properties:

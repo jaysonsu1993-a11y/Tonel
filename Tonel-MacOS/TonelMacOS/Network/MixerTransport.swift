@@ -5,7 +5,7 @@ import Foundation
 ///
 ///   - `MixerClient`     — direct TCP `:9002` + UDP `:9003` to the
 ///                         mixer host (lowest latency; UDP-default).
-///   - `WSSMixerClient`  — WSS-tunnelled SPA1 via the same proxy that
+///   - `WSMixerClient`  — WS-direct SPA1 via the same proxy that
 ///                         serves the web client (`/mixer-tcp` and
 ///                         `/mixer-udp`); for users behind firewalls
 ///                         that block direct UDP.

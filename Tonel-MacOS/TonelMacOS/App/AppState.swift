@@ -50,7 +50,7 @@ final class AppState: ObservableObject {
 
     /// The active mixer transport. v6.1.0+ this is selected dynamically
     /// from `@AppStorage` settings — UDP-direct (`MixerClient`) for low
-    /// latency, WSS-tunnelled (`WSSMixerClient`) for restricted networks.
+    /// latency, WS-direct (`WSMixerClient`) for restricted networks.
     /// **Must only be reassigned outside an active connection** — see
     /// `applyTransportSelection()`.
     @Published private(set) var mixer: any MixerTransport
@@ -108,7 +108,7 @@ final class AppState: ObservableObject {
                                   transport: TransportMode) -> any MixerTransport {
         switch transport {
         case .udp:  return MixerClient(serverLocation: serverLocation)
-        case .wss:  return WSSMixerClient(serverLocation: serverLocation)
+        case .ws:  return WSMixerClient(serverLocation: serverLocation)
         }
     }
 
