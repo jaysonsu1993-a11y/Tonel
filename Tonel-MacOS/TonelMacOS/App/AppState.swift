@@ -1,53 +1,80 @@
 import Foundation
 import Combine
 
-/// Top-level glue object — owns long-lived clients and exposes the screen
-/// the UI should currently render.
+/// Top-level glue object — owns long-lived clients and the active room
+/// session.
+///
+/// v6.2.0 dropped the login + home-page flow. The app now boots
+/// directly into a room: `Identity.loadOrCreate()` lazily generates a
+/// persistent `userId` + `myRoomId` on first launch, and `bootstrap()`
+/// auto-joins the user's last-used room (defaults to their own personal
+/// room) before the UI ever appears. There's no logout — identity
+/// only resets via the Settings 重置身份 button.
 @MainActor
 final class AppState: ObservableObject {
 
-    enum Screen { case home, room }
+    // MARK: - Identity
 
-    @Published var screen: Screen = .home
+    /// Persistent user id — generated once on first launch, never
+    /// changes unless the user explicitly resets identity. Used as
+    /// the SPA1 `user_id` and the signaling `user_id` slot.
+    @Published private(set) var userId: String
+    /// The user's personal room (their "home base"). Stable for the
+    /// lifetime of the identity. Doesn't change when the user
+    /// switches rooms — `currentRoomId` does.
+    @Published private(set) var myRoomId: String
+    /// The room the user is currently in (or trying to join). Sticky
+    /// across launches via `Identity.saveCurrentRoom`. Empty during
+    /// the brief window between disconnect and reconnect when the
+    /// user switches rooms.
+    @Published private(set) var currentRoomId: String
 
-    var isLoggedIn: Bool { !userId.isEmpty }
+    // MARK: - Room session state
 
-    // Auth (phone-stub mirroring web `LoginPage.tsx`).
-    @Published var userId: String = ""
-    @Published var phone: String = ""
-
-    // Room state.
-    @Published var roomId: String = ""
     @Published var peers: [PeerVM] = []
-    @Published var rooms: [String] = []
+    /// "正在加入…" / "已连接" / "正在重连…" — surfaced in the room header.
     @Published var statusText: String = ""
     @Published var isJoining: Bool = false
+    /// Most recent error to surface as an alert. UI clears it back to nil
+    /// after dismiss.
     @Published var lastError: String? = nil
+    /// True once the initial bootstrap join has at least attempted; the
+    /// UI uses this to render the connecting state instead of an empty
+    /// peer list.
+    @Published private(set) var hasBootstrapped: Bool = false
 
-    // Long-lived clients.
+    // MARK: - Long-lived clients
+
     let signal = SignalClient()
     let audio  = AudioEngine()
 
     /// The active mixer transport. v6.1.0+ this is selected dynamically
     /// from `@AppStorage` settings — UDP-direct (`MixerClient`) for low
     /// latency, WSS-tunnelled (`WSSMixerClient`) for restricted networks.
-    /// **Must only be reassigned outside an active room** — see
+    /// **Must only be reassigned outside an active connection** — see
     /// `applyTransportSelection()`.
     @Published private(set) var mixer: any MixerTransport
 
-    /// Currently-selected server. Mirrors the @AppStorage value but
-    /// snapshotted here so a Settings change requires explicit
-    /// `applyTransportSelection()` (we don't want a dropdown wobble
-    /// while connecting).
+    /// Currently-selected server.
     @Published private(set) var serverLocation: ServerLocation
     /// Currently-selected transport mode.
     @Published private(set) var transportMode: TransportMode
 
+    /// True while a connection (signal + mixer) is up.
+    var isConnected: Bool { !currentRoomId.isEmpty && !isJoining }
+
     private var unsubSignal: (() -> Void)?
 
+    // MARK: - Init
+
     init() {
-        // Read the user's last selection from UserDefaults. First-run
-        // users get `Endpoints.defaultServer` / `defaultTransport`.
+        // Identity first (sync, UserDefaults).
+        let id = Identity.loadOrCreate()
+        self.userId        = id.userId
+        self.myRoomId      = id.myRoomId
+        self.currentRoomId = ""    // populated after successful join
+
+        // Server / transport selection (UserDefaults).
         let savedServerId   = UserDefaults.standard.string(forKey: Endpoints.serverIdKey)
                               ?? Endpoints.defaultServer.id
         let savedTransport  = UserDefaults.standard.string(forKey: Endpoints.transportModeKey)
@@ -55,9 +82,8 @@ final class AppState: ObservableObject {
                               ?? Endpoints.defaultTransport
         let initialLoc      = Endpoints.server(byId: savedServerId)
         // Defensive: a saved id pointing at a now-disabled location
-        // (e.g. user picked 广州2, then we marked it unavailable in a
-        // later release) collapses back to the default. Avoids users
-        // getting stuck unable to connect with no obvious cause.
+        // collapses back to the default. Avoids users getting stuck
+        // unable to connect with no obvious cause.
         let resolvedLoc     = initialLoc.isAvailable ? initialLoc : Endpoints.defaultServer
         self.serverLocation = resolvedLoc
         self.transportMode  = savedTransport
@@ -68,34 +94,46 @@ final class AppState: ObservableObject {
         unsubSignal = signal.onMessage { [weak self] msg in
             self?.handleSignal(msg)
         }
+
+        // Kick off the initial join. Decoupled from init via Task so we
+        // don't hold up window construction; the UI renders immediately
+        // with `isJoining=true` and switches to "已连接" once joined.
+        Task { @MainActor in
+            await self.bootstrap()
+        }
     }
 
-    /// Construct the right mixer for a (server, transport) pair. Pulled
-    /// out as a static factory so init and `applyTransportSelection`
-    /// share one path — keeps the "which class for which mode" mapping
-    /// in one place.
+    /// Construct the right mixer for a (server, transport) pair.
     private static func makeMixer(serverLocation: ServerLocation,
                                   transport: TransportMode) -> any MixerTransport {
         switch transport {
-        case .udp:
-            return MixerClient(serverLocation: serverLocation)
-        case .wss:
-            return WSSMixerClient(serverLocation: serverLocation)
+        case .udp:  return MixerClient(serverLocation: serverLocation)
+        case .wss:  return WSSMixerClient(serverLocation: serverLocation)
         }
     }
 
-    /// Apply a Settings change. Refuses to swap while connected — the
-    /// user must leave the room first. UI greys out the picker in
-    /// that case so this guard is rarely tripped, but check defensively.
-    /// Returns true if the swap happened.
+    // MARK: - Bootstrap (auto-join on launch)
+
+    /// First-launch / re-launch entry into a room. Joins the room
+    /// `Identity.currentRoomId` points at — defaults to `myRoomId`
+    /// for first-launch users, otherwise whichever room the user was
+    /// last in.
+    private func bootstrap() async {
+        let target = Identity.loadOrCreate().currentRoomId
+        AppLog.log("[AppState] bootstrap → room=\(target) user=\(userId)")
+        await enterRoom(target)
+        hasBootstrapped = true
+    }
+
+    // MARK: - Settings — server / transport selection
+
+    /// Apply a Settings change. The new transport requires a fresh
+    /// connection; we tear the current one down, swap mixers, and
+    /// re-enter the same room. Returns true if the swap happened.
     @discardableResult
     func applyTransportSelection(server: ServerLocation,
                                  transport: TransportMode) -> Bool {
-        guard screen == .home else {
-            AppLog.log("[AppState] applyTransportSelection refused — currently in room")
-            return false
-        }
-        // Persist first so a crash mid-swap still leaves the user's
+        // Persist first so a crash mid-swap leaves the user's
         // selection captured for next launch.
         UserDefaults.standard.set(server.id,         forKey: Endpoints.serverIdKey)
         UserDefaults.standard.set(transport.rawValue, forKey: Endpoints.transportModeKey)
@@ -103,82 +141,116 @@ final class AppState: ObservableObject {
         let same = (server.id == serverLocation.id) && (transport == transportMode)
         if same { return false }
 
-        // Swap to a fresh mixer. The old one had no active connection
-        // (we're on Home), so disconnect() is safe but mostly a no-op.
-        mixer.disconnect()
-        serverLocation = server
-        transportMode  = transport
-        mixer          = AppState.makeMixer(serverLocation: server, transport: transport)
-        audio.attach(mixer: mixer)
-        AppLog.log("[AppState] transport swapped → server=\(server.id) transport=\(transport.rawValue)")
+        let roomToReenter = currentRoomId.isEmpty ? myRoomId : currentRoomId
+
+        // Tear down current session, swap to the new transport class,
+        // re-enter the same room. Keeps the user's experience seamless
+        // — the picker change just feels like a brief reconnect blip.
+        Task { @MainActor in
+            await self.tearDownSession()
+            self.serverLocation = server
+            self.transportMode  = transport
+            self.mixer          = AppState.makeMixer(serverLocation: server, transport: transport)
+            self.audio.attach(mixer: self.mixer)
+            AppLog.log("[AppState] transport swapped → server=\(server.id) transport=\(transport.rawValue), re-entering room=\(roomToReenter)")
+            await self.enterRoom(roomToReenter)
+        }
         return true
     }
 
-    // MARK: - Auth
+    // MARK: - Identity reset
 
-    func login(phone: String) {
-        // Mirror web stub: ephemeral userId; no real OTP yet.
-        let suffix = String(Int.random(in: 0..<99999)).padding(toLength: 5, withPad: "0", startingAt: 0)
-        let uid = "user_\(Int(Date().timeIntervalSince1970 * 1000))_\(suffix)"
-        self.phone  = phone
-        self.userId = uid
-        Task { await self.fetchRoomList() }
-    }
-
-    func logout() {
-        leaveRoom()
-        signal.disconnect()
-        userId = ""; phone = ""; rooms = []
-        screen = .home
-    }
-
-    // MARK: - Rooms
-
-    func fetchRoomList() async {
-        do {
-            try await signal.connect()
-            // Currently the server pushes ROOM_LIST on connect; nothing to do.
-        } catch {
-            self.lastError = error.localizedDescription
+    /// Wipe the saved identity and force a reconnect with fresh ids.
+    /// Triggered by the Settings 重置身份 button. Useful if the user
+    /// wants to "start over" or is in a stuck state on the server side
+    /// (e.g. a session-replaced loop).
+    func resetIdentity() {
+        Task { @MainActor in
+            AppLog.log("[AppState] resetIdentity")
+            await self.tearDownSession()
+            Identity.reset()
+            let fresh = Identity.loadOrCreate()
+            self.userId   = fresh.userId
+            self.myRoomId = fresh.myRoomId
+            await self.enterRoom(fresh.myRoomId)
         }
     }
 
-    func joinRoom(_ roomId: String, password: String? = nil, create: Bool = false) async {
-        AppLog.log("[AppState] joinRoom called — roomId=\(roomId) create=\(create) currentUserId=\(userId.isEmpty ? "<empty>" : userId)")
-        // Create flow doesn't require phone login — mint an ephemeral uid
-        // on the fly. Matches web `LoginPage.tsx` ephemeral-uid behaviour.
-        if userId.isEmpty {
-            let suffix = String(Int.random(in: 0..<99999))
-                            .padding(toLength: 5, withPad: "0", startingAt: 0)
-            userId = "user_\(Int(Date().timeIntervalSince1970 * 1000))_\(suffix)"
+    // MARK: - Room switching
+
+    /// Switch to a different room. Used by the "切换房间" sheet — type
+    /// a room id, hit confirm, we tear down and re-enter. Always uses
+    /// `JOIN_ROOM` (not CREATE) since the user is joining someone
+    /// else's room. If the room doesn't exist yet the server returns
+    /// an error and we surface it.
+    func switchToRoom(_ roomId: String) {
+        let trimmed = roomId.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard Identity.isPlausibleRoomId(trimmed) else {
+            lastError = "房间号格式不对（3–32 位字母 / 数字）"
+            return
         }
-        isJoining = true
+        Task { @MainActor in
+            await self.tearDownSession()
+            await self.enterRoom(trimmed, preferCreate: false)
+        }
+    }
+
+    /// Re-enter the user's personal room. Use when bandmates have left
+    /// and the user wants to come back to their own home base.
+    func returnToMyRoom() {
+        guard currentRoomId != myRoomId else { return }
+        Task { @MainActor in
+            await self.tearDownSession()
+            await self.enterRoom(self.myRoomId)
+        }
+    }
+
+    // MARK: - Connection lifecycle
+
+    /// Connect signal + mixer + audio for the given room. Tries
+    /// `CREATE_ROOM` first (so first-launch users implicitly create
+    /// their own room), falls back to `JOIN_ROOM` if the server says
+    /// it already exists. `preferCreate=false` skips the create
+    /// attempt — used for switching to someone else's room.
+    private func enterRoom(_ roomId: String, preferCreate: Bool = true) async {
+        AppLog.log("[AppState] enterRoom roomId=\(roomId) preferCreate=\(preferCreate) userId=\(userId)")
+        isJoining  = true
         statusText = "正在加入房间…"
-        lastError = nil
+        lastError  = nil
         defer { isJoining = false }
 
         do {
-            AppLog.log("[AppState] step1: signal.connect()")
             try await signal.connect()
-            AppLog.log("[AppState] step2: signal.\(create ? "createRoom" : "joinRoom")")
-            if create {
-                try await signal.createRoom(roomId: roomId, userId: userId, password: password)
-            } else {
-                try await signal.joinRoom(roomId: roomId, userId: userId, password: password)
+
+            // Try CREATE first when this is the user's own room (or any
+            // first-time entry). Fall back to JOIN on "already exists".
+            // This pattern handles both first-launch (server has no
+            // record yet) and re-launch (server still holds the room
+            // from <30 min ago), without the caller having to know
+            // which case they're in.
+            var joinedAsCreator = false
+            if preferCreate {
+                do {
+                    try await signal.createRoom(roomId: roomId, userId: userId, password: nil)
+                    joinedAsCreator = true
+                } catch {
+                    AppLog.log("[AppState] createRoom failed (\(error.localizedDescription)) — falling back to JOIN_ROOM")
+                }
             }
-            AppLog.log("[AppState] step3: mixer.connect()")
+            if !joinedAsCreator {
+                try await signal.joinRoom(roomId: roomId, userId: userId, password: nil)
+            }
+
             try await mixer.connect(roomId: roomId, userId: userId)
-            // Pull JOIN_ACK defaults into the AudioDebugSheet sliders ONCE
-            // per join. Re-syncing on sheet open would clobber user edits.
             audio.syncServerTuningFromMixer()
-            AppLog.log("[AppState] step4: audio.start()")
             try audio.start()
-            self.roomId = roomId
-            self.screen = .room
+
+            self.currentRoomId = roomId
+            Identity.saveCurrentRoom(roomId)
             statusText = "已连接"
-            AppLog.log("[AppState] joinRoom DONE")
+            AppLog.log("[AppState] enterRoom DONE — roomId=\(roomId)")
         } catch {
-            AppLog.log("[AppState] joinRoom ERROR: \(error)")
+            AppLog.log("[AppState] enterRoom ERROR: \(error)")
             lastError = error.localizedDescription
             mixer.disconnect()
             audio.stop()
@@ -186,13 +258,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    func leaveRoom() {
+    /// Tear down the active connection but leave the identity / mixer
+    /// instance intact. Called before switching rooms or applying a
+    /// transport change.
+    private func tearDownSession() async {
         audio.stop()
         mixer.disconnect()
         signal.leaveRoom()
-        roomId = ""
+        signal.disconnect()
+        currentRoomId = ""
         peers = []
-        if screen == .room { screen = .home }
+        statusText = ""
+        // Tiny delay so the server gets the LEAVE before the next
+        // CREATE/JOIN tries to claim the same slot under the same uid.
+        try? await Task.sleep(nanoseconds: 200_000_000)
     }
 
     // MARK: - Signal handling
@@ -209,11 +288,9 @@ final class AppState: ObservableObject {
             }
         case .peerLeft(let uid):
             peers.removeAll { $0.userId == uid }
-        case .roomList(let list):
-            self.rooms = list
         case .sessionReplaced:
             lastError = "你的账号在其它设备登录了"
-            leaveRoom()
+            Task { @MainActor in await self.tearDownSession() }
         case .error(let m):
             lastError = m
         default:

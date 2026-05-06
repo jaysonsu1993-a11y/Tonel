@@ -9,6 +9,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.0] - 2026-05-07
+
+### Changed — Tonel-MacOS: no more home page, auto-bootstrap into a room
+
+The macOS client launches **directly into a room**. The home page,
+login page, and room-list flow are gone. On first launch the app
+generates a persistent `userId` (opaque, internal) plus a personal
+`myRoomId` — a 6-character uppercase short id from a verbal-friendly
+alphabet (`23456789ABCDEFGHJKLMNPQRSTUVWXYZ`, no `0/1/I/O`) so users
+can read it to bandmates over a phone call. Both ids are stored in
+UserDefaults; subsequent launches re-use them and re-enter the
+last-used room.
+
+Joining someone else's room: header has a **切换房间** button
+(replacing 离开房间) opening a sheet to type a 6-char room id. After
+a successful switch the user can hit **返回我的房间** to come back
+to their personal room in one click. **重置身份** in Settings wipes
+both ids and starts fresh — useful when bandmates' clients are
+stuck on the old uid.
+
+### Added — `Identity` helper
+
+New `App/Identity.swift` owns first-launch generation, persistence,
+and reset. The room-id alphabet excludes `0/1/I/O` to remove the
+verbal-share ambiguity ("zero or oh", "one or el"). Three
+UserDefaults keys: `tonel.identity.userId`,
+`tonel.identity.myRoomId`, `tonel.identity.currentRoomId`.
+
+### Changed — AppState
+
+- `Screen` enum gone — there's only one screen now (Room).
+- `userId`/`myRoomId`/`currentRoomId` are `@Published` properties
+  reflecting the persistent identity.
+- `bootstrap()` runs from `init()` via `Task` to auto-join the room
+  on launch. Tries `CREATE_ROOM` first, falls back to `JOIN_ROOM` on
+  "already exists" (handles both first-launch and re-launch
+  transparently).
+- `applyTransportSelection(...)` now tears down + re-enters the
+  current room instead of refusing while connected. The Settings
+  picker is therefore live at all times — switching UDP↔WSS feels
+  like a brief reconnect blip, not a hard error.
+- New `switchToRoom(_:)`, `returnToMyRoom()`, `resetIdentity()` for
+  the new UI flows.
+- Removed: `screen`, `phone`, `isLoggedIn`, `login(_:)`, `logout()`,
+  `joinRoom(_:password:create:)`, `leaveRoom()`, `fetchRoomList()`,
+  `rooms`, `roomId` (renamed → `currentRoomId`).
+
+### Removed — `HomeView.swift` + `LoginView.swift`
+
+Both deleted. Kept dead code is technical debt; clearing now since
+the new Identity-based flow doesn't need either.
+
+### UI
+
+- Settings sheet adds a **身份** section showing userId (truncated),
+  myRoomId (with copy button), and the **重置身份** action.
+- Server / transport pickers no longer grey out while in a room
+  (since transport change auto-reconnects). Helper text updated.
+
+### Migration
+
+Existing users who installed v6.0.x – v6.1.x had no persistent
+identity beyond the ephemeral phone-stub uid. On first launch of
+v6.2.0 they'll be assigned a fresh `userId` and `myRoomId`. The
+old ephemeral uid is silently discarded — there's nothing on the
+server tied to it.
+
 ## [6.1.1] - 2026-05-07
 
 ### Fixed — Tonel-MacOS hard crash on 创建房间 (regression from v6.1.0)

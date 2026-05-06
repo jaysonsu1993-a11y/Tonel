@@ -28,6 +28,7 @@ struct RoomView: View {
     // Local UI state.
     @State private var settingsOpen = false
     @State private var debugOpen = false
+    @State private var switchRoomOpen = false
     @State private var copied = false
     @State private var soloId: String? = nil
     @State private var monitorVolume: Double = 100   // default ON so user hears self
@@ -91,6 +92,9 @@ struct RoomView: View {
         .sheet(isPresented: $debugOpen) {
             AudioDebugSheet(audio: state.audio).environmentObject(state)
         }
+        .sheet(isPresented: $switchRoomOpen) {
+            SwitchRoomSheet().environmentObject(state)
+        }
     }
 
     // ─── Header ───────────────────────────────────────────────────────────────
@@ -102,7 +106,7 @@ struct RoomView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("房间号").font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.5))
-                    Text(state.roomId)
+                    Text(state.currentRoomId)
                         .font(.system(size: 18, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white)
                         .onTapGesture(count: 3) { debugOpen.toggle() }
@@ -110,7 +114,7 @@ struct RoomView: View {
                 }
                 Button {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(state.roomId, forType: .string)
+                    NSPasteboard.general.setString(state.currentRoomId, forType: .string)
                     copied = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { copied = false }
                 } label: {
@@ -152,10 +156,13 @@ struct RoomView: View {
 
             latencyDisplay
 
+            // v6.2.0: 离开房间 → 切换房间. There is no "logged out"
+            // state anymore — the user is always in some room. This
+            // button opens a sheet to enter a different room id.
             Button {
-                state.leaveRoom()
+                switchRoomOpen = true
             } label: {
-                Text("离开房间")
+                Text("切换房间")
                     .font(.system(size: 12))
                     .foregroundStyle(Color(white: 0.85))
                     .padding(.horizontal, 12).padding(.vertical, 6)
@@ -163,6 +170,22 @@ struct RoomView: View {
                                 in: RoundedRectangle(cornerRadius: 4))
             }
             .buttonStyle(.plain)
+            // Quick path home: when the user is in someone else's room
+            // and wants back to their own, this is one click instead of
+            // typing the room id.
+            if state.currentRoomId != state.myRoomId {
+                Button {
+                    state.returnToMyRoom()
+                } label: {
+                    Text("返回我的房间")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(white: 0.85))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Color(red: 0.10, green: 0.30, blue: 0.50),
+                                    in: RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
         .background(Color(red: 0.10, green: 0.10, blue: 0.12))
@@ -265,10 +288,12 @@ struct RoomView: View {
             sectionHeader(label: "MIXER", count: peerCount + 1)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 10) {
-                    // Self-monitor strip
+                    // Self-monitor strip. v6.2.0: there's no `phone` field
+                    // anymore (removed with the login flow). Show "YOU"
+                    // labelled with the last 4 chars of the user id so
+                    // the user can tell their own strip apart at a glance.
                     ChannelStripView(
-                        title: state.phone.isEmpty ? "YOU · Mon"
-                                                   : "\(state.phone) · Mon",
+                        title: "YOU · \(String(state.userId.suffix(4)))",
                         subtitle: nil,
                         level: inputLevelTick,
                         isSelf: true,
@@ -523,14 +548,13 @@ struct SettingsSheet: View {
                 Button("×") { dismiss() }.buttonStyle(.borderless)
             }
 
-            // ── 服务器 / 传输模式 (v6.1.0) ────────────────────────────
-            // Visible at the top because changing server/transport is the
-            // only setting that requires leaving the room first; we want
-            // the user to see the constraint before they touch the
-            // picker (the .disabled binding alone wasn't enough — UX
-            // testing showed users tap a greyed picker repeatedly).
+            // ── 服务器 / 传输模式 ─────────────────────────────────────
+            // v6.2.0: changing either picker now triggers an automatic
+            // tear-down + reconnect (`AppState.applyTransportSelection`),
+            // so the user can change them anytime — no need to leave a
+            // room first. The `lastError` alert covers reconnect
+            // failure.
             section("服务器与传输模式") {
-                let inRoom = state.screen == .room
                 row("服务器") {
                     Picker("", selection: $serverId) {
                         ForEach(Endpoints.allServers) { s in
@@ -540,10 +564,7 @@ struct SettingsSheet: View {
                         }
                     }
                     .labelsHidden()
-                    .disabled(inRoom)
-                    .onChange(of: serverId) { _, new in
-                        applyServerTransportChange()
-                    }
+                    .onChange(of: serverId) { _, _ in applyServerTransportChange() }
                 }
                 row("协议") {
                     Picker("", selection: $transportRaw) {
@@ -552,20 +573,49 @@ struct SettingsSheet: View {
                         }
                     }
                     .labelsHidden()
-                    .disabled(inRoom)
-                    .onChange(of: transportRaw) { _, new in
-                        applyServerTransportChange()
+                    .onChange(of: transportRaw) { _, _ in applyServerTransportChange() }
+                }
+                Text("UDP 是默认（最低延迟）；WSS 是兜底，仅当所在网络封锁直连 UDP 时使用。连不上不会自动切换 —— 由你手动改。切换会重连当前房间。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(white: 0.45))
+            }
+
+            // ── 身份 (v6.2.0) ─────────────────────────────────────────
+            // The user has a persistent local identity (userId +
+            // myRoomId) generated on first launch. 重置身份 wipes both
+            // and forces a reconnect with fresh ids — useful when
+            // bandmates' clients are stuck on the user's old uid
+            // (session-replaced loops) or the user just wants a new
+            // personal room number.
+            section("身份") {
+                row("用户ID") {
+                    Text(state.userId)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.6))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                row("我的房间") {
+                    Text(state.myRoomId)
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Button("复制") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(state.myRoomId, forType: .string)
                     }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
                 }
-                if inRoom {
-                    Text("正在房间内 — 离开后才能切换服务器或协议。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.orange)
-                } else {
-                    Text("UDP 是默认（最低延迟）；WSS 是兜底，仅当所在网络封锁直连 UDP 时使用。连不上不会自动切换 —— 由你手动改。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color(white: 0.45))
+                Button {
+                    state.resetIdentity()
+                    dismiss()
+                } label: {
+                    Text("重置身份（生成新的用户 ID 与房间号）")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
                 }
+                .buttonStyle(.borderless)
             }
 
             section("音频设备") {
@@ -818,4 +868,76 @@ struct AudioDebugSheet: View {
 #Preview {
     RoomView().environmentObject(AppState())
         .preferredColorScheme(.dark)
+}
+
+// ─── Switch-room sheet (v6.2.0) ──────────────────────────────────────────
+// Replaces the old HomeView "加入房间" sheet. Type a room id and confirm;
+// AppState tears down the current session and re-enters the new room.
+
+struct SwitchRoomSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var state: AppState
+    @State private var input: String = ""
+    @FocusState private var inputFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("切换房间").font(.system(size: 22, weight: .bold))
+                Spacer()
+                Button("×") { dismiss() }.buttonStyle(.borderless)
+            }
+
+            Text("输入想加入的房间号。如果该房间不存在，连接会失败 —— 请向房主确认房间号是否输错。")
+                .font(.system(size: 12))
+                .foregroundStyle(Color(white: 0.6))
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("如 K7M4P2", text: $input)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 16, design: .monospaced))
+                .focused($inputFocused)
+                .onSubmit { submit() }
+
+            HStack {
+                // Convenience: paste-button + show the user's own room
+                // number so they can fall back to it if they paste the
+                // wrong thing.
+                if let pasted = NSPasteboard.general.string(forType: .string),
+                   Identity.isPlausibleRoomId(pasted), pasted.uppercased() != state.currentRoomId {
+                    Button("粘贴 \(pasted.uppercased())") {
+                        input = pasted.uppercased()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                }
+                Spacer()
+                Text("我的房间: \(state.myRoomId)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color(white: 0.5))
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("加入") {
+                    submit()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!Identity.isPlausibleRoomId(input))
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+        .background(Color(red: 0.10, green: 0.10, blue: 0.12))
+        .onAppear { inputFocused = true }
+    }
+
+    private func submit() {
+        let target = input.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard Identity.isPlausibleRoomId(target) else { return }
+        state.switchToRoom(target)
+        dismiss()
+    }
 }
