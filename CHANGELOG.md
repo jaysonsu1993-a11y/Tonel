@@ -9,6 +9,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.1] - 2026-05-07
+
+### Fixed — Tonel-MacOS hard crash on 创建房间 (regression from v6.1.0)
+
+`xcodegen generate` (re-run during v6.1.0 to wire `MixerTransport.swift`
+and `WSSMixerClient.swift` into the project) regenerated
+`TonelMacOS/Resources/Info.plist` from its template and **silently
+dropped** `NSMicrophoneUsageDescription` (and a few other keys —
+`CFBundleDisplayName`, `LSMinimumSystemVersion`, `NSAppTransportSecurity`,
+`NSHumanReadableCopyright`, `NSHighResolutionCapable`,
+`LSApplicationCategoryType`).
+
+Without `NSMicrophoneUsageDescription`, macOS' privacy enforcement
+(TCC) sends `SIGABRT` the moment the app touches `AVCaptureDevice` —
+which is exactly what `AudioEngine.start()` does when the user clicks
+**创建** in `CreateRoomSheet`. Crash signature confirmed in the
+diagnostic report:
+
+```
+EXC_CRASH (SIGABRT)  TCC: This app has crashed because it attempted
+to access privacy-sensitive data without a usage description.
+```
+
+Fix: hoist the lost keys into `project.yml`'s `info.properties`
+(rather than relying on `INFOPLIST_KEY_*` build settings, which
+xcodegen doesn't merge into the file it writes). Future `xcodegen
+generate` runs now produce a complete Info.plist. Verified by
+reading the regenerated file before relaunch.
+
+No code change. Existing v6.1.0 binaries are still broken — anyone
+who pulled tag `v6.1.0` should rebuild from `v6.1.1` or later.
+
 ## [6.1.0] - 2026-05-07
 
 ### Added — Tonel-MacOS multi-server selection + WSS-fallback transport

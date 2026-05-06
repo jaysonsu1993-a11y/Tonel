@@ -27,6 +27,23 @@ targets:
       - TonelMacOS/Resources
     info:
       path: TonelMacOS/Resources/Info.plist
+      properties:
+        # macOS privacy enforcement: without NSMicrophoneUsageDescription
+        # the OS sends SIGABRT the moment we touch AVCaptureDevice. Putting
+        # it in `info.properties` (rather than relying on
+        # INFOPLIST_KEY_NSMicrophoneUsageDescription) makes xcodegen write
+        # it directly into the Info.plist file — survives `xcodegen
+        # generate` re-runs, which otherwise erase any keys we don't list
+        # here. (v6.1.0 regression: the regen on adding MixerTransport.swift
+        # silently dropped this key, app crashed on first 创建 click.)
+        NSMicrophoneUsageDescription: "Tonel needs microphone access to send your audio to the rehearsal room."
+        NSHumanReadableCopyright: "© 2026 Tonel"
+        LSApplicationCategoryType: "public.app-category.music"
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+        CFBundleDisplayName: "Tonel"
+        NSHighResolutionCapable: true
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
     entitlements:
       path: TonelMacOS/Resources/TonelMacOS.entitlements
       properties:
