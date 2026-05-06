@@ -12,11 +12,11 @@ mouth-to-ear**.
 ```
   Client A (Web or Tonel-MacOS)
             │
-            │  audio (SPA1, every 2.5 ms)
+            │  audio (SPA1, every 0.667 ms)
             ▼
   ┌─────────────────────────────┐
   │   Mixer Server (libuv)       │
-  │   per 2.5 ms tick:           │
+  │   per 0.667 ms tick:         │
   │     for each user U in room: │
   │       mix = sum of all       │
   │             other users      │
@@ -91,7 +91,7 @@ Two separate libuv processes:
 
 ┌── mixer_server (port 9002 TCP, 9003 UDP) ─┐
 │  - SPA1 audio packet handling             │
-│  - 2.5 ms mix tick (timed mixing)          │
+│  - 0.667 ms mix tick (v6.0.0; was 2.5 ms) │
 │  - Per-user jitter buffer + PLC fill      │
 │  - PCM16 ↔ Opus codec                      │
 │  - N−1 mix (excluding the listener)        │
@@ -127,15 +127,19 @@ Native clients (Tonel-MacOS) skip the proxies entirely and speak SPA1 to
 |---|---|---|
 | 0 | 4 | magic = 0x53415031 ("SPA1") |
 | 4 | 2 | sequence (u16) |
-| 6 | 2 | timestamp (u16, 2.5 ms units) |
+| 6 | 2 | timestamp (u16, ms low-16 units) |
 | 8 | 64 | userId (null-terminated, "roomId:userId" format) |
 | 72 | 1 | codec (0=PCM16, 1=Opus, 0xFF=handshake) |
 | 73 | 2 | dataSize (u16) |
 | 75 | 1 | reserved (PLC-fired bit + padding) |
 | 76+ | N | payload |
 
-Frame size: **120 samples / 2.5 ms @ 48 kHz**. PCM16 payload = 240 bytes;
-Opus is variable. Server mix tick matches at 2.5 ms.
+Frame size: **32 samples / 0.667 ms @ 48 kHz** (v6.0.0+). PCM16 payload =
+64 bytes; Opus would be variable. Server mix tick is derived from
+`audio_frames_` (`mix_interval_us_` member), so the broadcast cadence
+stays locked to the wire frame size.
+
+Pre-v6 wire history: v3.x 240/5ms → v4.2.0 120/2.5ms → v6.0.0 32/0.667ms.
 
 Full spec: [SPA1_PROTOCOL.md](./SPA1_PROTOCOL.md).
 
@@ -145,10 +149,10 @@ End-to-end on a Chinese intra-province network looks like:
 
 | Component | Time | Source |
 |---|---|---|
-| Mic capture quantum | 2.5 ms | `FRAME_MS` |
+| Mic capture quantum | 0.667 ms | `FRAME_MS = 32/48` (v6.0.0) |
 | Network RTT (client → kufan) | 5-15 ms | depends on user network |
-| Server jitter buffer | 3.75 ms | `(JITTER_TARGET_DEFAULT=2 - 0.5) × 2.5` |
-| Server mix tick | 2.5 ms | mix half-period |
+| Server jitter buffer | ~5 ms | `(JITTER_TARGET_DEFAULT=8 - 0.5) × 0.667` (v6.0.0) |
+| Server mix tick | 0.667 ms | mix half-period (v6.0.0) |
 | Client playback ring | 12 ms | `primeTarget=576` samples / 48 kHz |
 | Output device | 2-10 ms (wired); 60-200 ms (Bluetooth) | hardware-dependent |
 | **Total (wired)** | **~30 ms** | |

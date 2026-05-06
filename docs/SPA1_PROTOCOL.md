@@ -230,7 +230,7 @@ Per-listener gain on a specific peer's track in the mix.
 │   Tonel-MacOS     │
 │   (native macOS)  │
 └─────────┬─────────┘
-          │  SPA1 binary frames (every 2.5 ms)
+          │  SPA1 binary frames (every 0.667 ms — v6.0.0)
           │
           │   wss://srv.tonel.io/mixer-tcp  (control)
           │   wss://srv.tonel.io/mixer-udp  (audio)  ─── browser
@@ -238,7 +238,7 @@ Per-listener gain on a specific peer's track in the mix.
           ▼
    ┌─────────────────────────────────────┐
    │           mixer_server               │
-   │   per 2.5 ms tick:                   │
+   │   per 0.667 ms tick:                 │
    │     for each user U:                 │
    │       broadcast(N−1 mix excluding U) │
    └─────────────────────────────────────┘

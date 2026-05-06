@@ -9,6 +9,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.1] - 2026-05-07
+
+### Docs
+
+Frame-size sweep for stragglers that didn't make the v6.0.0 commit:
+
+- `docs/ARCHITECTURE.md` — topology diagram tick (2.5 → 0.667 ms),
+  mixer_server bullet, latency budget table (Mic capture, Server
+  jitter buffer, Server mix tick), SPA1 frame-size paragraph,
+  timestamp-units row.
+- `docs/SPA1_PROTOCOL.md` — bottom topology diagram tick.
+
+No code change. Tonel-local docs (`STANDARDS_WEB_AUDIO.md`,
+`STANDARDS_NETWORK.md`) and memory entries also updated, but they live
+outside this repo.
+
 ## [6.0.0] - 2026-05-07
 
 ### Changed — SPA1 wire frame size 120 → 32 samples (BREAKING)
