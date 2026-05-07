@@ -180,6 +180,19 @@ export function HomePage({
               <button className="v1-cta-ghost" onClick={handleJoinClick}>加入房间</button>
               <button className="v1-link" onClick={() => bookingNav()}>预约 Pro 试用 →</button>
             </div>
+            {/* v6.5.2: 内测下载入口直接放主页 hero 下方，
+                不藏在 #download 子页里。两个原生平台 + "查看全部"
+                链接到详细说明页。 */}
+            <div className="v1-downloads">
+              <span className="v1-dl-label">下载桌面客户端：</span>
+              <a className="v1-dl-pill" href="https://download.tonel.io/Tonel-MacOS-latest.dmg" download>
+                <span className="v1-dl-icon">⌘</span> macOS
+              </a>
+              <a className="v1-dl-pill" href="https://download.tonel.io/Tonel-Windows-latest.exe" download>
+                <span className="v1-dl-icon">⊞</span> Windows
+              </a>
+              <button className="v1-dl-more" onClick={() => downloadNav()}>安装说明 →</button>
+            </div>
             {createError && (
               <p style={{ marginTop: 12, fontSize: 13, color: '#f87171' }}>{createError}</p>
             )}
@@ -284,7 +297,12 @@ export function HomePage({
             <button className="v1m-ghost" onClick={handleJoinClick}>加入房间</button>
             <button className="v1m-ghost" onClick={() => bookingNav()}>预约时段</button>
           </div>
-          <button className="v1m-link" onClick={() => downloadNav()}>下载桌面客户端 →</button>
+          {/* v6.5.2: same hero-level 下载 row as desktop, mobile-styled. */}
+          <div className="v1m-downloads">
+            <a className="v1m-dl-pill" href="https://download.tonel.io/Tonel-MacOS-latest.dmg" download>⌘ macOS</a>
+            <a className="v1m-dl-pill" href="https://download.tonel.io/Tonel-Windows-latest.exe" download>⊞ Windows</a>
+          </div>
+          <button className="v1m-link" onClick={() => downloadNav()}>安装说明 →</button>
           {createError && (
             <p style={{ fontSize: 13, color: '#f87171', textAlign: 'center', margin: 0 }}>{createError}</p>
           )}

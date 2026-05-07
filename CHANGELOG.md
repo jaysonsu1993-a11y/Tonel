@@ -9,6 +9,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.2] - 2026-05-07
+
+### Added — desktop client distribution via Cloudflare R2
+
+Tonel-MacOS and Tonel-Windows installers can now be downloaded
+directly from the home page. Buttons live under the primary CTA
+cluster on both desktop and mobile heros — `⌘ macOS` and
+`⊞ Windows` pills point at:
+
+- `https://download.tonel.io/Tonel-MacOS-latest.dmg`
+- `https://download.tonel.io/Tonel-Windows-latest.exe`
+
+Both are stable "latest" aliases — `deploy/upload-r2.sh` rolls them
+forward on every release without needing the user-facing URL to
+change.
+
+#### Infrastructure
+
+- **R2 bucket**: `tonel-downloads` (APAC region)
+- **Custom domain**: `download.tonel.io` (CF-managed CNAME +
+  auto-issued TLS cert)
+- **Free tier**: 10 GB storage / 1M Class A / 10M Class B ops per
+  month — multiple orders of magnitude headroom for 内测 traffic.
+
+#### Internal-distribution caveats (called out on the page)
+
+- macOS .dmg is **ad-hoc signed** (no Apple notarization). First
+  launch shows "无法验证开发者"; user right-clicks → 打开 →
+  确认 once per install. Apple Developer Program ($99/yr) +
+  notarization is the proper fix when going public.
+- Windows .exe is **unsigned**. SmartScreen shows the blue panel;
+  user clicks 更多信息 → 仍要运行 once. Real fix is a code-signing
+  cert (~¥800-3000/yr depending on OV vs EV).
+
+#### New files
+
+- `deploy/package-macos.sh` — Release-config xcodebuild → ad-hoc
+  codesign verify → `hdiutil create` UDZO. Output:
+  `deploy/dist/Tonel-MacOS-v<version>.dmg`.
+- `deploy/upload-r2.sh` — wrangler-based R2 upload. Auto-publishes
+  a `*-latest.{dmg,exe}` alias when the filename matches
+  `Tonel-(MacOS|Windows)-vX.Y.Z.{dmg,exe}`.
+
+#### Web changes
+
+- `App.tsx`: `Placeholder` no longer handles `'download'`; new
+  inline `DownloadPage` renders the install-instructions page at
+  `#download` with platform-specific tiles + 内测 caveats notes.
+- `pages/HomePage.tsx`: hero CTA cluster gains a "下载桌面客户端"
+  pill row — both desktop (`v1-actions`) and mobile (`v1m-actions`)
+  variants.
+- `styles/globals.css`: `.v1-downloads` / `.v1-dl-pill` / `.tn-download`
+  styles. Pills use the same dark-on-dark + green-accent palette as
+  the rest of the v1 layout.
+- `wrangler` v4.88 installed globally on the dev machine for R2
+  push.
+
+`.gitignore` adds `deploy/dist/`, `.playwright-mcp/`, and the
+playwright screenshot file so they don't accidentally get
+committed.
+
 ## [6.5.1] - 2026-05-07
 
 ### Fixed — P2P bind() failed with "Operation not permitted"

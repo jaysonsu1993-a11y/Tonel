@@ -1299,6 +1299,38 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   background: transparent; border: none; font-family: inherit; padding: 0;
 }
 .v1-link:hover { color: #e8e8e8; }
+
+/* v6.5.2: hero-level 下载 row — pill buttons sit just under the
+   primary CTA cluster so internal-test users grab the .dmg / .exe
+   in one click without paging through #download. */
+.v1-downloads {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  margin-top: 16px;
+}
+.v1-dl-label {
+  font-family: var(--font-mono); font-size: 11px;
+  color: #666; letter-spacing: 1px; text-transform: uppercase;
+  margin-right: 4px;
+}
+.v1-dl-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: 999px;
+  background: #0a0a0a; border: 1px solid #1f1f1f;
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.5px;
+  color: #ccc; text-decoration: none;
+  transition: all 0.15s;
+}
+.v1-dl-pill:hover {
+  background: #fff; color: #000; border-color: #fff;
+  transform: translateY(-1px);
+}
+.v1-dl-icon { font-size: 14px; line-height: 1; }
+.v1-dl-more {
+  background: transparent; border: none; padding: 0; cursor: pointer;
+  font-family: inherit; font-size: 12px; color: #555;
+}
+.v1-dl-more:hover { color: #e8e8e8; }
+
 .v1-bullets {
   display: flex; gap: 28px; margin-top: 56px;
   font-family: var(--font-mono); font-size: 11px; color: #666;
@@ -1473,6 +1505,21 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   background: transparent; border: none; font-family: inherit; width: 100%;
 }
 
+/* v6.5.2: mobile hero-level 下载 — same role as .v1-downloads on
+   desktop. Two-column grid matching the existing .v1m-row2 layout. */
+.v1m-downloads {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  margin-top: 4px;
+}
+.v1m-dl-pill {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 13px;
+  background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 10px;
+  font-family: var(--font-mono); font-size: 13px;
+  color: #e8e8e8; text-decoration: none;
+}
+.v1m-dl-pill:active { background: #fff; color: #000; }
+
 .v1m-stats {
   display: grid; grid-template-columns: 1fr 1fr;
   border-top: 1px solid #111;
@@ -1527,3 +1574,83 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
   color: #4ade80; letter-spacing: 2px; text-transform: uppercase;
   margin-bottom: 24px;
 }
+
+/* ── v6.5.2 download page ─────────────────────────────────────── */
+.tn-download {
+  min-height: calc(100vh - 56px);
+  padding: 64px 24px 48px;
+  max-width: 880px; margin: 0 auto;
+  font-family: var(--font-sans);
+  background: #000;
+}
+.tn-download .tag {
+  font-family: var(--font-mono); font-size: 11px;
+  color: #4ade80; letter-spacing: 2px; text-transform: uppercase;
+  margin-bottom: 16px;
+}
+.tn-download h1 {
+  font-size: 40px; font-weight: 700; color: #e8e8e8;
+  margin: 0 0 12px; letter-spacing: -1px;
+}
+.tn-download .blurb {
+  font-size: 15px; color: #888; line-height: 1.7;
+  margin: 0 0 40px; max-width: 560px;
+}
+
+.tn-dl-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin-bottom: 40px;
+}
+.tn-dl-card {
+  display: block; padding: 24px;
+  background: #0a0a0a; border: 1px solid #1f1f1f; border-radius: 8px;
+  text-decoration: none; color: inherit; transition: all 0.15s;
+}
+.tn-dl-card:hover { background: #111; border-color: #2a2a2a; transform: translateY(-2px); }
+.tn-dl-recommended { border-color: #4ade80; }
+.tn-dl-recommended::before {
+  content: '推荐'; display: inline-block;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px;
+  color: #4ade80; background: #14301f; padding: 2px 8px; border-radius: 3px;
+  margin-bottom: 12px;
+}
+.tn-dl-icon { font-size: 32px; color: #888; margin-bottom: 12px; line-height: 1; }
+.tn-dl-name { font-size: 18px; font-weight: 600; color: #e8e8e8; margin-bottom: 6px; }
+.tn-dl-meta { font-size: 12px; color: #666; margin-bottom: 16px; }
+.tn-dl-action {
+  display: inline-block; padding: 8px 16px;
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px;
+  font-family: var(--font-mono); font-size: 12px; color: #ccc;
+}
+.tn-dl-card:hover .tn-dl-action { background: #fff; color: #000; border-color: #fff; }
+
+.tn-dl-notes {
+  background: #0a0a0a; border: 1px solid #1f1f1f; border-radius: 8px;
+  padding: 24px 28px; margin-bottom: 32px;
+}
+.tn-dl-notes h3 {
+  font-family: var(--font-mono); font-size: 12px; letter-spacing: 1px;
+  color: #888; text-transform: uppercase;
+  margin: 0 0 12px;
+}
+.tn-dl-notes ul { margin: 0; padding-left: 20px; }
+.tn-dl-notes li {
+  font-size: 13px; color: #aaa; line-height: 1.7;
+  margin-bottom: 8px;
+}
+.tn-dl-notes strong { color: #e8e8e8; font-weight: 600; }
+.tn-dl-notes em {
+  font-style: normal;
+  color: #4ade80;
+  font-family: var(--font-mono); font-size: 12px;
+  background: #14301f; padding: 1px 6px; border-radius: 3px;
+}
+
+.tn-dl-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  padding-top: 16px; border-top: 1px solid #1f1f1f;
+  font-size: 13px; color: #666;
+}
+.tn-dl-altlink a { color: #888; text-decoration: underline; }
+.tn-dl-altlink a:hover { color: #e8e8e8; }

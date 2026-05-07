@@ -484,8 +484,11 @@ export default function App() {
             onLeave={handleLeaveRoom}
           />
         )}
-        {(page === 'pricing' || page === 'booking' || page === 'download') && (
+        {(page === 'pricing' || page === 'booking') && (
           <Placeholder kind={page} onHome={() => { window.location.hash = ''; setPage('home') }} />
+        )}
+        {page === 'download' && (
+          <DownloadPage onHome={() => { window.location.hash = ''; setPage('home') }} />
         )}
       </main>
     </div>
@@ -499,11 +502,10 @@ export default function App() {
  * (not a separate file) until any of these grow real content —
  * spinning up a `pages/` file for a 30-line stub is overhead.
  */
-function Placeholder({ kind, onHome }: { kind: 'pricing' | 'booking' | 'download'; onHome: () => void }) {
+function Placeholder({ kind, onHome }: { kind: 'pricing' | 'booking'; onHome: () => void }) {
   const titles = {
     pricing:  { tag: 'PRICING',  title: '定价方案',     blurb: '免费 / Pro / 团队三档计划。详细价格表正在整理。' },
     booking:  { tag: 'PRO TRIAL', title: 'Pro 预约试用', blurb: '想抢先体验 Pro 完整功能？预约接入流程开发中。' },
-    download: { tag: 'DOWNLOAD', title: '下载桌面客户端', blurb: 'macOS / Windows 原生客户端正在打包。Web 版可直接使用。' },
   }
   const t = titles[kind]
   return (
@@ -512,6 +514,93 @@ function Placeholder({ kind, onHome }: { kind: 'pricing' | 'booking' | 'download
       <h1>{t.title}</h1>
       <p>{t.blurb}</p>
       <button className="tn-btn tn-btn-primary-sm" onClick={onHome}>← 返回主页</button>
+    </div>
+  )
+}
+
+/**
+ * v6.5.2 — actual download page. Three platform tiles linking to the
+ * latest artifact on R2 (download.tonel.io, see deploy/upload-r2.sh).
+ * The `latest` aliases mean these URLs don't churn with each release;
+ * users sharing the link out-of-band keep getting the freshest build.
+ *
+ * Internal-distribution caveats:
+ *   - macOS .dmg is ad-hoc signed (no Apple notarization). Users see
+ *     "无法验证开发者" on first launch and must right-click → 打开
+ *     once per install. Documented inline below.
+ *   - Windows .exe is unsigned. SmartScreen shows the blue "Windows
+ *     已保护你的电脑" panel; users click 更多信息 → 仍要运行 once.
+ *   - Web button stays at the top so users without a desktop platform
+ *     can fall back to the in-browser experience.
+ */
+function DownloadPage({ onHome }: { onHome: () => void }) {
+  // Naive UA detection — `navigator.userAgentData` would be more
+  // robust but isn't on Safari yet. We only use this to highlight
+  // the recommended tile, all options stay clickable.
+  const ua = (typeof navigator !== 'undefined') ? navigator.userAgent : ''
+  const isMac = /Mac/i.test(ua)
+  const isWin = /Windows/i.test(ua)
+
+  const macURL = 'https://download.tonel.io/Tonel-MacOS-latest.dmg'
+  const winURL = 'https://download.tonel.io/Tonel-Windows-latest.exe'
+
+  return (
+    <div className="tn-download">
+      <div className="tag">● DOWNLOAD</div>
+      <h1>下载桌面客户端</h1>
+      <p className="blurb">
+        原生客户端针对低延迟场景做了专门优化：直连 UDP、本地音频混音、
+        硬件回声抑制。Web 版本随时可用，桌面版用于实际排练。
+      </p>
+
+      <div className="tn-dl-grid">
+        <a className={`tn-dl-card${isMac ? ' tn-dl-recommended' : ''}`}
+           href={macURL}
+           download>
+          <div className="tn-dl-icon">⌘</div>
+          <div className="tn-dl-name">Tonel for macOS</div>
+          <div className="tn-dl-meta">macOS 14+ · Apple Silicon &amp; Intel</div>
+          <div className="tn-dl-action">下载 .dmg</div>
+        </a>
+
+        <a className={`tn-dl-card${isWin ? ' tn-dl-recommended' : ''}`}
+           href={winURL}
+           download>
+          <div className="tn-dl-icon">⊞</div>
+          <div className="tn-dl-name">Tonel for Windows</div>
+          <div className="tn-dl-meta">Windows 10/11 · x64</div>
+          <div className="tn-dl-action">下载 .exe</div>
+        </a>
+      </div>
+
+      <div className="tn-dl-notes">
+        <h3>内测期注意事项</h3>
+        <ul>
+          <li>
+            <strong>macOS：</strong>首次打开会提示"无法验证开发者"。
+            <em>右键点击 Tonel → 打开 → 确认</em>，之后正常使用。
+            （内测期未做 Apple 公证，正式版会签名解决）
+          </li>
+          <li>
+            <strong>Windows：</strong>首次运行会出现"Windows 已保护你的电脑"。
+            <em>点击更多信息 → 仍要运行</em>，之后正常使用。
+            （内测期未购买代码签名证书，正式版会签名解决）
+          </li>
+          <li>
+            <strong>权限：</strong>客户端需要麦克风权限。系统首次询问时点允许。
+          </li>
+          <li>
+            遇到问题反馈给团队，附上错误截图 + 操作步骤即可。
+          </li>
+        </ul>
+      </div>
+
+      <div className="tn-dl-footer">
+        <button className="tn-btn tn-btn-ghost" onClick={onHome}>← 返回主页</button>
+        <span className="tn-dl-altlink">
+          也可以 <a href="#" onClick={(e) => { e.preventDefault(); onHome() }}>用浏览器版本</a> 直接试用
+        </span>
+      </div>
     </div>
   )
 }

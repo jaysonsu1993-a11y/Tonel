@@ -78,3 +78,10 @@ config.json
 
 # Deploy secrets (SSH host, CF token, tunnel id)
 deploy/.env.deploy
+
+# v6.5.2: distribution artifacts built locally, uploaded to R2 — not committed
+deploy/dist/
+
+# Playwright MCP runtime artifacts (screenshot output goes to repo root by default)
+.playwright-mcp/
+tonel-home-with-downloads.png
