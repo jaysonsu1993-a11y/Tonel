@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(TonelServer VERSION 6.5.13 LANGUAGES CXX)
+project(TonelServer VERSION 6.5.14 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

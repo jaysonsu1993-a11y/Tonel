@@ -109,8 +109,16 @@ jobs:
           $exe = Get-ChildItem -Path installer\output\Tonel-Windows-v*.exe `
                  | Select-Object -First 1
           if (-not $exe) { throw "No installer .exe found in installer\output\" }
+          # v6.5.14: assign FullName to its own variable. PowerShell
+          # in argument-mode (i.e. command invocation, not expression
+          # mode) doesn't evaluate property access on bare `$obj.Prop`
+          # — it stringifies $obj and appends ".Prop" as literal text.
+          # So `--file=$exe.FullName` produced
+          # `--file=<path>.FullName`. Storing in a string-typed local
+          # var first sidesteps the entire mode-switch.
+          $exePath   = $exe.FullName
           $versioned = $exe.Name
           $latest    = "Tonel-Windows-latest.exe"
-          Write-Host "uploading $versioned + $latest to r2://tonel-downloads/"
-          wrangler r2 object put "tonel-downloads/$versioned" --file=$exe.FullName --remote
-          wrangler r2 object put "tonel-downloads/$latest"    --file=$exe.FullName --remote
+          Write-Host "uploading $versioned + $latest from $exePath to r2://tonel-downloads/"
+          wrangler r2 object put "tonel-downloads/$versioned" --file="$exePath" --remote
+          wrangler r2 object put "tonel-downloads/$latest"    --file="$exePath" --remote

@@ -9,6 +9,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.14] - 2026-05-07
+
+### Fixed — R2 push step's `$exe.FullName` not evaluated
+
+v6.5.12 + v6.5.13 CI passed every step except the R2 push, which
+errored:
+
+```
+[ERROR] The file
+"D:\a\Tonel\Tonel\Tonel-Windows\installer\output\Tonel-Windows-v6.5.12.exe.FullName"
+                                                                       ^^^^^^^^^^^
+                                                            literal text appended
+does not exist.
+```
+
+PowerShell has two parsing modes: **expression mode** (assignment
+RHS, `(...)`-wrapped expressions) and **argument mode** (the token
+list of a command invocation). Property access (`.Prop`) only
+works in expression mode. The wrangler invocation:
+
+```powershell
+wrangler r2 object put ... --file=$exe.FullName --remote
+```
+
+is argument mode, so PowerShell stringifies `$exe` (a `FileInfo`,
+which gives the path) and appends the literal text `.FullName`.
+
+Fix: assign `.FullName` to its own variable in expression mode
+first:
+
+```powershell
+$exePath = $exe.FullName
+wrangler r2 object put ... --file="$exePath" --remote
+```
+
+(Could equivalently use `--file="$($exe.FullName)"` — the
+subexpression `$(...)` forces expression-mode parsing inside an
+otherwise argument-mode position. Local variable is clearer.)
+
+This is the **9th** distinct CI failure in the v6.5.4 → v6.5.14
+series — every fix uncovers a new latent bug. Memory's
+`feedback_windows_ci_traps.md` tracks them all; this trap added
+as Trap 9.
+
 ## [6.5.13] - 2026-05-07
 
 ### Added — full-stack release in one command
