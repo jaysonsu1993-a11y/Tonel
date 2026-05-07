@@ -21,6 +21,14 @@ enum SPA1 {
     enum Codec: UInt8 {
         case pcm16     = 0
         case opus      = 1
+        // v6.5.0 P2P transport — peer-to-peer control codecs.
+        // `peerHello` is the hole-punch packet sprayed at a peer's
+        // (local, public) addresses on first contact; first inbound
+        // hello "wins" and that source addr is locked in for audio.
+        // `peerPing` is a steady-state keepalive (every ~5 s) that
+        // also keeps NAT mappings warm. Both carry zero payload.
+        case peerHello = 0xFE
+        case peerPing  = 0xFD
         case handshake = 0xFF
     }
 

@@ -9,6 +9,97 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.0] - 2026-05-07
+
+### Added — P2P transport (third Tonel-MacOS mode, full mesh)
+
+`TransportMode.p2p` joins `.udp` and `.ws` as the third option in
+the Settings 协议 picker. With P2P selected, the central mixer is
+out of the audio path entirely: each peer sends SPA1 audio frames
+directly to every other peer over UDP, and mixes incoming streams
+locally. The signaling server is involved only for room
+membership + peer-address exchange.
+
+Designed for 同城线上排练 — typical residential broadband NAT.
+Works for cone NAT (the common case) via UDP hole-punching;
+symmetric NAT will fail without TURN (no relay fallback in
+v6.5.0, matching SonoBus's posture).
+
+#### Protocol additions
+
+**TCP signaling (`:9001`):**
+
+- Client → server: `REGISTER_AUDIO_ADDR` (room_id, user_id,
+  public_ip, public_port, local_ip, local_port). Sent after the
+  client completes UDP NAT discovery (below).
+- Server → registrar: `REGISTER_AUDIO_ADDR_ACK` plus one
+  `PEER_ADDR` per already-registered peer in the same room.
+- Server → other room members (broadcast): `PEER_ADDR` for the
+  newly-registered peer.
+
+**UDP discovery (`:9001/udp` — new listener):**
+
+- Client → server: `{"type":"DISCOVER","user_id":"..."}` UDP
+  packet, sent on the same socket the client will use for audio.
+- Server → client: `{"type":"DISCOVER_REPLY","public_ip":"...",
+  "public_port":N}` echoed back to the source (so the client
+  learns its NAT-mapped public endpoint).
+
+**P2P UDP control (peer ↔ peer, SPA1 codec extensions):**
+
+- `SPA1.codec = 0xFE` (peerHello): hole-punch packet, sprayed at
+  both `localAddr` and `publicAddr` of a fresh peer at 100 ms
+  intervals until first inbound from that peer arrives. The first
+  inbound's source address is locked in as the steady-state route.
+- `SPA1.codec = 0xFD` (peerPing): keepalive every 5 s. Carries a
+  100-ms-unit timestamp so peers can EMA an audio RTT figure
+  even when the mic is muted.
+
+#### Implementation
+
+- New `P2PMixerClient.swift` (~480 lines) implements
+  `MixerTransport`. POSIX UDP socket (random port), recvfrom
+  loop on a dedicated thread, hole-punch + keepalive timers on
+  main RunLoop, fan-out send to all peers, per-peer working-addr
+  resolution.
+- `SignalClient` parses `PEER_ADDR` / `REGISTER_AUDIO_ADDR_ACK`
+  and exposes `registerAudioAddr(...)`.
+- `Endpoints.ServerLocation.p2pDiscoveryUDPPort` (defaults to
+  9001, same as the TCP signaling port). `mixerHost` is reused
+  as the discovery host.
+- Server `signaling_server.cpp` adds the UDP listener and
+  `process_register_audio_addr` handler.
+- ATS exception was already in place for the WS path's plain
+  `ws://` to the box's IP — same allowlist covers the P2P UDP
+  socket since macOS only ATS-restricts URL-loaded resources,
+  not POSIX sockets, but the existing exception is no harm.
+
+#### UI
+
+- 协议 picker now shows three options:
+  `UDP（低延迟）` / `WS（兼容）` / `P2P（直连）`.
+- Switching to P2P triggers tear-down + reconnect + UDP
+  discovery + register, just like the WS swap path.
+- 返回我的房间 button gated additionally on `!isJoining` and
+  `!currentRoomId.isEmpty` so it doesn't flash mid-swap.
+
+#### Known limitations (v6.5.0 accepts)
+
+- Symmetric NAT (rare on home broadband, common on mobile +
+  some corporate) — peers simply can't reach each other.
+  Surfaces as a missing peer in the UI; future TURN fallback
+  would be v6.6.0+.
+- N-1 client-side decode + mix gets CPU-heavy past ~8 peers.
+  Designed for ≤6-person band rehearsals.
+- P2P RTT readout uses peerPing timestamp echo, less accurate
+  than the mixer modes' TCP PING/PONG (only 100 ms-grained).
+
+#### Server-side ops
+
+- UFW: `ufw allow 9001/udp` on Aliyun (done at deploy).
+- Aliyun ECS Security Group: 9001/UDP inbound 0.0.0.0/0
+  (operator action — done).
+
 ## [6.4.0] - 2026-05-07
 
 ### Changed — JOIN_ROOM auto-creates on missing; client drops CREATE_ROOM

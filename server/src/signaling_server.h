@@ -20,6 +20,18 @@ struct ClientContext {
     // cascade — that state already belongs to the new ctx and would
     // otherwise erase a live session.
     bool displaced = false;
+    // v6.5.0 P2P transport: client's audio UDP endpoint, registered via
+    // REGISTER_AUDIO_ADDR after the client has done UDP NAT discovery.
+    // Empty `audio_public_ip` means "not registered yet" — peers will
+    // not be told about this client until they are. The local_* pair
+    // is the LAN address the client claims to bind on; some networks
+    // can use it to bypass hole-punching when both peers are on the
+    // same subnet.
+    std::string audio_public_ip;
+    uint16_t    audio_public_port = 0;
+    std::string audio_local_ip;
+    uint16_t    audio_local_port  = 0;
+    std::string audio_room_id;          // room this addr is registered in
     explicit ClientContext(SignalingServer* srv);
 };
 
@@ -55,9 +67,39 @@ private:
     void process_leave_room(uv_stream_t* client, const std::string& room_id, const std::string& user_id);
     void process_list_rooms(uv_stream_t* client);
     void process_heartbeat(uv_stream_t* client, const std::string& user_id);
+    // v6.5.0 P2P transport: client tells the server its audio UDP
+    // endpoint after running NAT discovery. Server stores the (public,
+    // local) pair on the ClientContext, then broadcasts PEER_ADDR to
+    // the rest of the room and replies to this caller with PEER_ADDR
+    // for every already-registered peer. The pair (`public_ip`,
+    // `public_port`) and (`local_ip`, `local_port`) are taken from
+    // the JSON; we don't trust the TCP source IP because Tonel-MacOS
+    // signals through Cloudflare Tunnel (api.tonel.io) and the CF
+    // edge would otherwise be reported as the client's "public" IP.
+    void process_register_audio_addr(uv_stream_t* client,
+                                     const std::string& room_id,
+                                     const std::string& user_id,
+                                     const std::string& public_ip,
+                                     uint16_t           public_port,
+                                     const std::string& local_ip,
+                                     uint16_t           local_port);
+
+    // ── UDP discovery (v6.5.0 P2P) ──────────────────────────────
+    // libuv UDP listener bound to the same port as the TCP signaling
+    // socket. Receives `{"type":"DISCOVER","user_id":"..."}` packets
+    // and replies with `{"type":"DISCOVER_REPLY","public_ip":...,
+    // "public_port":...}` so the client learns its NAT-mapped UDP
+    // address — the public_ip slot it needs for REGISTER_AUDIO_ADDR.
+    static void on_udp_alloc(uv_handle_t*, size_t, uv_buf_t*);
+    static void on_udp_recv(uv_udp_t* handle, ssize_t nread,
+                            const uv_buf_t* buf,
+                            const struct sockaddr* addr, unsigned flags);
+    void handle_udp_discover(const std::string& payload,
+                             const struct sockaddr_in& src);
 
     uv_loop_t* loop_;
     uv_tcp_t server_;
+    uv_udp_t udp_server_;   // P2P discovery
     int port_;
 
     UserManager user_manager_;

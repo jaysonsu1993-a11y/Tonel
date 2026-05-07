@@ -176,6 +176,21 @@ void SignalingServer::start() {
     }
     std::cout << "SignalingServer listening on port " << port_ << std::endl;
 
+    // v6.5.0 P2P: also bind UDP on the same port for NAT discovery.
+    // TCP and UDP are separate protocols; the (host, 9001/tcp) and
+    // (host, 9001/udp) sockets coexist with no kernel collision.
+    uv_udp_init(loop_, &udp_server_);
+    udp_server_.data = this;
+    struct sockaddr_in udp_addr;
+    uv_ip4_addr("0.0.0.0", port_, &udp_addr);
+    uv_udp_bind(&udp_server_, (const struct sockaddr*)&udp_addr, UV_UDP_REUSEADDR);
+    int ur = uv_udp_recv_start(&udp_server_, on_udp_alloc, on_udp_recv);
+    if (ur < 0) {
+        std::cerr << "[Signaling] UDP recv start error: " << uv_strerror(ur) << std::endl;
+    } else {
+        std::cout << "SignalingServer UDP discovery listening on port " << port_ << std::endl;
+    }
+
     uv_timer_init(loop_, &heartbeat_timer_);
     heartbeat_timer_.data = this;
     uv_timer_start(&heartbeat_timer_, on_heartbeat_timer, 30000, 30000);
@@ -360,6 +375,28 @@ void SignalingServer::handle_message(uv_stream_t* client, const std::string& msg
     else if (j.type == "LEAVE_ROOM")  process_leave_room(client, j.room_id, j.user_id);
     else if (j.type == "LIST_ROOMS")  process_list_rooms(client);
     else if (j.type == "HEARTBEAT")   process_heartbeat(client, j.user_id);
+    else if (j.type == "REGISTER_AUDIO_ADDR") {
+        // v6.5.0 P2P: parse the four address fields out of the raw JSON
+        // (SimpleJson only handles a fixed set of string keys; ports are
+        // numeric and need their own extraction).
+        auto extractInt = [](const std::string& s, const std::string& key) -> int {
+            std::string pat = "\"" + key + "\"\\s*:\\s*([0-9]+)";
+            std::smatch m;
+            if (std::regex_search(s, m, std::regex(pat))) {
+                try { return std::stoi(m[1].str()); } catch (...) {}
+            }
+            return 0;
+        };
+        std::string pub_ip   = SimpleJson::extract(msg, "public_ip");
+        std::string loc_ip   = SimpleJson::extract(msg, "local_ip");
+        int pub_port = extractInt(msg, "public_port");
+        int loc_port = extractInt(msg, "local_port");
+        process_register_audio_addr(client, j.room_id, j.user_id,
+                                    pub_ip,
+                                    static_cast<uint16_t>(pub_port),
+                                    loc_ip,
+                                    static_cast<uint16_t>(loc_port));
+    }
     else send_response(client, SimpleJson::make_error("Unknown message type: " + j.type));
 }
 
@@ -572,4 +609,161 @@ void SignalingServer::process_list_rooms(uv_stream_t* client) {
 void SignalingServer::process_heartbeat(uv_stream_t* client, const std::string& user_id) {
     if (!user_id.empty()) user_manager_.update_heartbeat(user_id);
     send_response(client, "{\"type\":\"HEARTBEAT_ACK\"}");
+}
+
+// ============================================================
+// v6.5.0 P2P transport — REGISTER_AUDIO_ADDR + UDP discovery
+// ============================================================
+//
+// Flow:
+//   1. Native client picks .p2p in Settings.
+//   2. Client opens a local UDP socket on a random port.
+//   3. Client sends a UDP `{"type":"DISCOVER","user_id":...}` packet
+//      to <mixerHost>:9001 (this server's UDP listener).
+//   4. Server reads the source IP/port off the packet, replies with
+//      `{"type":"DISCOVER_REPLY","public_ip":"...","public_port":N}`.
+//   5. Client now knows its public-facing UDP endpoint. It TCP-sends
+//      `{"type":"REGISTER_AUDIO_ADDR","public_ip":...,"public_port":...,
+//      "local_ip":...,"local_port":...}` over the existing wss:// signaling.
+//   6. Server stores the addr on the ClientContext and broadcasts
+//      `PEER_ADDR` to the rest of the room AND replies to the registrar
+//      with PEER_ADDR for every already-registered peer.
+//   7. Both peers immediately start sending hole-punch UDP packets to
+//      each other's (local, public) addresses; the first inbound packet
+//      "wins" and is used for steady-state audio.
+//
+// Why discovery is over UDP and registration is over TCP:
+//   - Discovery NEEDS UDP because the whole point is to learn the
+//     NAT-mapped public UDP endpoint. The TCP source IP wouldn't help —
+//     Tonel-MacOS signals through Cloudflare Tunnel (api.tonel.io), so
+//     the TCP source the server sees is a CF edge node, not the user.
+//   - Registration is JSON, doesn't need byte-by-byte timing precision,
+//     and needs reliable delivery → TCP signaling is the right channel.
+
+void SignalingServer::process_register_audio_addr(uv_stream_t* client,
+                                                  const std::string& room_id,
+                                                  const std::string& user_id,
+                                                  const std::string& public_ip,
+                                                  uint16_t           public_port,
+                                                  const std::string& local_ip,
+                                                  uint16_t           local_port) {
+    if (room_id.empty() || user_id.empty() || public_ip.empty() || public_port == 0) {
+        send_response(client, SimpleJson::make_error("REGISTER_AUDIO_ADDR requires room_id, user_id, public_ip, public_port"));
+        return;
+    }
+    auto* ctx = static_cast<ClientContext*>(client->data);
+    if (!ctx) {
+        send_response(client, SimpleJson::make_error("no client context"));
+        return;
+    }
+    Room* room = room_manager_.get_room(room_id);
+    if (!room) {
+        send_response(client, SimpleJson::make_error("Room not found"));
+        return;
+    }
+    ctx->audio_public_ip   = public_ip;
+    ctx->audio_public_port = public_port;
+    ctx->audio_local_ip    = local_ip;
+    ctx->audio_local_port  = local_port;
+    ctx->audio_room_id     = room_id;
+
+    // Build the PEER_ADDR JSON for THIS peer — broadcast to the room.
+    // Format: {"type":"PEER_ADDR","room_id":...,"user_id":...,
+    //          "public_ip":...,"public_port":...,"local_ip":...,"local_port":...}
+    auto buildAddr = [](const std::string& rid, const std::string& uid,
+                        const std::string& pip, uint16_t pport,
+                        const std::string& lip, uint16_t lport) -> std::string {
+        return "{\"type\":\"PEER_ADDR\","
+               "\"room_id\":\""    + rid + "\","
+               "\"user_id\":\""    + SimpleJson::json_escape(uid) + "\","
+               "\"public_ip\":\""  + pip + "\","
+               "\"public_port\":"  + std::to_string(pport) + ","
+               "\"local_ip\":\""   + lip + "\","
+               "\"local_port\":"   + std::to_string(lport) + "}";
+    };
+
+    std::string self_addr = buildAddr(room_id, user_id, public_ip, public_port, local_ip, local_port);
+    broadcast_to_room(room_id, self_addr, /*exclude_user=*/user_id);
+
+    // Reply to the registrar with PEER_ADDR for every already-registered
+    // peer in this room. First-comers in a fresh room get nothing here
+    // (correct — there's no one to talk to yet).
+    auto users = room->get_users();
+    for (const auto& peer_uid : users) {
+        if (peer_uid == user_id) continue;
+        ClientContext* peer_ctx = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(client_map_mutex_);
+            auto it = user_id_to_ctx_.find(peer_uid);
+            if (it != user_id_to_ctx_.end()) peer_ctx = it->second;
+        }
+        if (!peer_ctx) continue;
+        if (peer_ctx->audio_public_ip.empty()) continue;   // not registered yet
+        std::string addr = buildAddr(room_id, peer_uid,
+                                     peer_ctx->audio_public_ip,
+                                     peer_ctx->audio_public_port,
+                                     peer_ctx->audio_local_ip,
+                                     peer_ctx->audio_local_port);
+        send_response(client, addr);
+    }
+
+    send_response(client, SimpleJson::make_ack("REGISTER_AUDIO_ADDR", room_id));
+    std::cout << "[P2P] " << user_id << " registered audio addr "
+              << public_ip << ":" << public_port
+              << " (local " << local_ip << ":" << local_port << ")"
+              << " in room " << room_id << std::endl;
+}
+
+// ── UDP discovery ───────────────────────────────────────────
+
+void SignalingServer::on_udp_alloc(uv_handle_t*, size_t suggested, uv_buf_t* buf) {
+    buf->base = static_cast<char*>(malloc(suggested));
+    buf->len  = suggested;
+}
+
+void SignalingServer::on_udp_recv(uv_udp_t* handle, ssize_t nread,
+                                  const uv_buf_t* buf,
+                                  const struct sockaddr* addr, unsigned /*flags*/) {
+    auto* self = static_cast<SignalingServer*>(handle->data);
+    if (nread > 0 && addr && addr->sa_family == AF_INET) {
+        std::string payload(buf->base, static_cast<size_t>(nread));
+        const auto* sin = reinterpret_cast<const struct sockaddr_in*>(addr);
+        self->handle_udp_discover(payload, *sin);
+    }
+    if (buf && buf->base) free(buf->base);
+}
+
+void SignalingServer::handle_udp_discover(const std::string& payload,
+                                          const struct sockaddr_in& src) {
+    auto j = SimpleJson::parse(payload);
+    if (j.type != "DISCOVER") return;   // ignore unknown types silently
+
+    char ip_buf[INET_ADDRSTRLEN] = {0};
+    inet_ntop(AF_INET, &src.sin_addr, ip_buf, sizeof(ip_buf));
+    uint16_t src_port = ntohs(src.sin_port);
+
+    std::string reply = "{\"type\":\"DISCOVER_REPLY\","
+                        "\"user_id\":\"" + SimpleJson::json_escape(j.user_id) + "\","
+                        "\"public_ip\":\""   + std::string(ip_buf) + "\","
+                        "\"public_port\":"   + std::to_string(src_port) + "}";
+
+    // Send the reply back to the same source addr the discovery came
+    // from — this is the whole point of the dance, the client's source
+    // port is its NAT-mapped public port and we observed it server-side.
+    auto* req      = new uv_udp_send_t;
+    auto* heap_msg = new std::string(reply);
+    uv_buf_t buf   = uv_buf_init(const_cast<char*>(heap_msg->c_str()), heap_msg->size());
+    req->data      = heap_msg;
+    int r = uv_udp_send(req, &udp_server_, &buf, 1,
+                        reinterpret_cast<const struct sockaddr*>(&src),
+                        [](uv_udp_send_t* sreq, int) {
+                            delete static_cast<std::string*>(sreq->data);
+                            delete sreq;
+                        });
+    if (r < 0) {
+        delete heap_msg;
+        delete req;
+    }
+    std::cout << "[P2P] DISCOVER from " << ip_buf << ":" << src_port
+              << " (user=" << j.user_id << ")" << std::endl;
 }

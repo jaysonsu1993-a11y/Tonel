@@ -14,6 +14,12 @@ struct ServerLocation: Identifiable, Hashable {
     let mixerHost: String
     let mixerTCPPort: UInt16   // control
     let mixerUDPPort: UInt16   // SPA1 audio
+    /// Server's UDP port for P2P NAT discovery
+    /// (`SignalingServer::on_udp_recv`). Pre-v6.5.0 this concept didn't
+    /// exist; it's the same number as the TCP signaling port (9001) on
+    /// every deployed box but kept as a separate field for clarity in
+    /// case the convention diverges later.
+    let p2pDiscoveryUDPPort: UInt16
     /// Plain-WS endpoint URL for the TCP-fallback path (`WSMixerClient`).
     /// v6.3.0+ this points directly at the box's `tonel-ws-mixer-proxy`
     /// (Node, plain `ws://`, no TLS termination), bypassing both DNS
@@ -36,22 +42,32 @@ struct ServerLocation: Identifiable, Hashable {
     var wsMixerUDPURL: URL? { wsMixerURL.flatMap { $0.appendingPathComponent("mixer-udp") } }
 }
 
-/// Transport mode for the audio path. UDP is the default and lowest-
-/// latency choice; WS is the fallback for users behind firewalls /
-/// NATs that block direct UDP. **No auto-fallback** — when a connection
-/// fails, the user picks the other mode manually.
+/// Transport mode for the audio path. Three modes:
 ///
-/// v6.3.0 renamed the fallback from `.wss` (TLS over the tonel.io
-/// reverse proxy) to `.ws` (plain WebSocket directly to the mixer's
-/// `tonel-ws-mixer-proxy` port). The native client doesn't need TLS
-/// here — for the firewall-traversal use-case the relevant property
-/// is "TCP not UDP", and a plain ws:// directly to the box on a
-/// known port is simpler than a DNS + cert + nginx chain. Stale
-/// `.wss` raw-values from older releases collapse back to `.udp` via
-/// `init?(rawValue:)` returning nil → AppState's default fallback.
+///   - `.udp` — direct UDP to the central mixer (lowest latency,
+///             single hop). Default.
+///   - `.ws`  — direct plain WebSocket to the central mixer's
+///             `tonel-ws-mixer-proxy` port. For users whose network
+///             blocks direct UDP. (TCP fallback; same mixing topology
+///             as `.udp`.)
+///   - `.p2p` — peer-to-peer mesh. Each peer sends audio directly
+///             to every other peer over UDP, no mixer in the audio
+///             path. Server is signaling-only (peer address
+///             exchange). Fewest hops; works best on LAN or with
+///             cone-NAT residential broadband. v6.5.0+
+///
+/// **No auto-fallback** — when a connection fails the user picks
+/// another mode manually.
+///
+/// History:
+///   v6.3.0 renamed `.wss` → `.ws` (plain ws:// directly to the box).
+///   v6.5.0 added `.p2p`. Stale raw-values from older releases
+///   collapse back to `.udp` via `init?(rawValue:)` returning nil
+///   → AppState's default fallback.
 enum TransportMode: String, CaseIterable, Identifiable {
     case udp
     case ws
+    case p2p
 
     var id: String { rawValue }
 
@@ -59,6 +75,7 @@ enum TransportMode: String, CaseIterable, Identifiable {
         switch self {
         case .udp: return "UDP（低延迟）"
         case .ws:  return "WS（兼容）"
+        case .p2p: return "P2P（直连）"
         }
     }
 }
@@ -82,6 +99,7 @@ enum Endpoints {
         mixerHost: "8.163.21.207",
         mixerTCPPort: 9002,
         mixerUDPPort: 9003,
+        p2pDiscoveryUDPPort: 9001,
         wsMixerURL: URL(string: "ws://8.163.21.207:9005"),
         isAvailable: true
     )
@@ -99,6 +117,7 @@ enum Endpoints {
         mixerHost: "42.240.163.172",
         mixerTCPPort: 9002,
         mixerUDPPort: 9003,
+        p2pDiscoveryUDPPort: 9001,
         wsMixerURL: URL(string: "ws://42.240.163.172:9005"),
         isAvailable: false
     )

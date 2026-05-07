@@ -173,7 +173,15 @@ struct RoomView: View {
             // Quick path home: when the user is in someone else's room
             // and wants back to their own, this is one click instead of
             // typing the room id.
-            if state.currentRoomId != state.myRoomId {
+            //
+            // v6.4.1: also gate on `!isJoining` and `!currentRoomId.isEmpty`
+            // so the button doesn't flash during transport switches —
+            // tearDownSession transiently sets currentRoomId="" while
+            // re-entering, and "" != myRoomId would otherwise show the
+            // button mid-swap.
+            if !state.currentRoomId.isEmpty
+               && state.currentRoomId != state.myRoomId
+               && !state.isJoining {
                 Button {
                     state.returnToMyRoom()
                 } label: {

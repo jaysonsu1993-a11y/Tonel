@@ -11,6 +11,20 @@ enum SignalMessage {
     case sessionReplaced(userId: String)
     case error(message: String)
     case heartbeatAck
+    /// v6.5.0 P2P: peer's audio UDP endpoint, broadcast by the server
+    /// when any peer in the room registers via REGISTER_AUDIO_ADDR.
+    /// Both `public` and `local` addresses are provided so the
+    /// receiver can attempt hole-punching against both — same-LAN
+    /// peers exchange via local, NAT-separated peers via public.
+    case peerAddr(userId: String,
+                  publicIP: String, publicPort: UInt16,
+                  localIP:  String, localPort:  UInt16)
+    /// v6.5.0 P2P: server's response to a UDP DISCOVER probe — tells
+    /// the client what its NAT-mapped public UDP endpoint is. Sent
+    /// via UDP not TCP, but parsed the same way (JSON).
+    case discoverReply(publicIP: String, publicPort: UInt16)
+    /// v6.5.0 P2P: server ack of REGISTER_AUDIO_ADDR.
+    case registerAudioAddrAck(roomId: String)
     case unknown(type: String, raw: [String: Any])
 }
 
@@ -123,6 +137,27 @@ final class SignalClient: NSObject {
         userId = ""
     }
 
+    /// v6.5.0 P2P: tell the server about our audio UDP endpoint after
+    /// completing NAT discovery. Server stores this on the
+    /// ClientContext, broadcasts `PEER_ADDR` to other room members,
+    /// and replies with `PEER_ADDR` for every already-registered peer.
+    /// `await`s the `REGISTER_AUDIO_ADDR_ACK` (5 s timeout).
+    func registerAudioAddr(roomId: String, userId: String,
+                           publicIP: String, publicPort: UInt16,
+                           localIP: String,  localPort: UInt16) async throws {
+        try await ensureConnected()
+        let msg: [String: Any] = [
+            "type":        "REGISTER_AUDIO_ADDR",
+            "room_id":     roomId,
+            "user_id":     userId,
+            "public_ip":   publicIP,
+            "public_port": Int(publicPort),
+            "local_ip":    localIP,
+            "local_port":  Int(localPort),
+        ]
+        try await sendAndWait(msg, ackType: "REGISTER_AUDIO_ADDR_ACK")
+    }
+
     // MARK: - Internals
 
     private func ensureConnected() async throws {
@@ -159,6 +194,8 @@ final class SignalClient: NSObject {
                 case .joinRoomAck(let rid)   where ackType == "JOIN_ROOM_ACK"   && rid == self.roomId:
                     done = true; timer.cancel(); unsub?(); cont.resume()
                 case .createRoomAck(let rid) where ackType == "CREATE_ROOM_ACK" && rid == self.roomId:
+                    done = true; timer.cancel(); unsub?(); cont.resume()
+                case .registerAudioAddrAck(let rid) where ackType == "REGISTER_AUDIO_ADDR_ACK" && rid == self.roomId:
                     done = true; timer.cancel(); unsub?(); cont.resume()
                 case .error(let m):
                     done = true; timer.cancel(); unsub?(); cont.resume(throwing: SignalError.serverError(m))
@@ -272,6 +309,19 @@ final class SignalClient: NSObject {
             broadcast(.createRoomAck(roomId: obj["room_id"] as? String ?? ""))
         case "ERROR":
             broadcast(.error(message: obj["message"] as? String ?? "unknown"))
+        case "PEER_ADDR":
+            // v6.5.0 P2P broadcast.
+            let uid     = obj["user_id"]    as? String ?? ""
+            let pubIP   = obj["public_ip"]  as? String ?? ""
+            let pubPort = (obj["public_port"] as? Int).map(UInt16.init(truncatingIfNeeded:)) ?? 0
+            let locIP   = obj["local_ip"]   as? String ?? ""
+            let locPort = (obj["local_port"]  as? Int).map(UInt16.init(truncatingIfNeeded:)) ?? 0
+            guard !uid.isEmpty else { return }
+            broadcast(.peerAddr(userId: uid,
+                                publicIP: pubIP, publicPort: pubPort,
+                                localIP:  locIP, localPort:  locPort))
+        case "REGISTER_AUDIO_ADDR_ACK":
+            broadcast(.registerAudioAddrAck(roomId: obj["room_id"] as? String ?? ""))
         default:
             broadcast(.unknown(type: type, raw: obj))
         }

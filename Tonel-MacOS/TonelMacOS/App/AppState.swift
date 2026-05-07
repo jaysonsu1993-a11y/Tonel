@@ -104,11 +104,31 @@ final class AppState: ObservableObject {
     }
 
     /// Construct the right mixer for a (server, transport) pair.
+    private func makeMixerInstance(serverLocation: ServerLocation,
+                                   transport: TransportMode) -> any MixerTransport {
+        switch transport {
+        case .udp:  return MixerClient(serverLocation: serverLocation)
+        case .ws:   return WSMixerClient(serverLocation: serverLocation)
+        case .p2p:  return P2PMixerClient(serverLocation: serverLocation, signal: signal)
+        }
+    }
+
+    /// Static facade preserved for the ctor (where `self` doesn't yet
+    /// exist). The .p2p case isn't reachable from here because P2P
+    /// needs the SignalClient; ctor passes a fresh SignalClient via
+    /// `signal` to the instance method instead.
     private static func makeMixer(serverLocation: ServerLocation,
                                   transport: TransportMode) -> any MixerTransport {
         switch transport {
         case .udp:  return MixerClient(serverLocation: serverLocation)
-        case .ws:  return WSMixerClient(serverLocation: serverLocation)
+        case .ws:   return WSMixerClient(serverLocation: serverLocation)
+        case .p2p:
+            // Init-time path: ctor needs to construct SOMETHING for
+            // the @Published `mixer` property even before signal is
+            // available. Default to UDP — the bootstrap() task will
+            // observe the saved transport and re-make to .p2p with
+            // signal access via applyTransportSelection.
+            return MixerClient(serverLocation: serverLocation)
         }
     }
 
@@ -119,8 +139,16 @@ final class AppState: ObservableObject {
     /// for first-launch users, otherwise whichever room the user was
     /// last in.
     private func bootstrap() async {
+        // If the saved transport is .p2p, the ctor used the static
+        // makeMixer facade (which can't construct P2PMixerClient
+        // because that needs a SignalClient handle); rebuild via the
+        // instance method now that `self` is fully initialised.
+        if transportMode == .p2p && !(mixer is P2PMixerClient) {
+            mixer = makeMixerInstance(serverLocation: serverLocation, transport: .p2p)
+            audio.attach(mixer: mixer)
+        }
         let target = Identity.loadOrCreate().currentRoomId
-        AppLog.log("[AppState] bootstrap → room=\(target) user=\(userId)")
+        AppLog.log("[AppState] bootstrap → room=\(target) user=\(userId) transport=\(transportMode.rawValue)")
         await enterRoom(target)
         hasBootstrapped = true
     }
@@ -150,7 +178,9 @@ final class AppState: ObservableObject {
             await self.tearDownSession()
             self.serverLocation = server
             self.transportMode  = transport
-            self.mixer          = AppState.makeMixer(serverLocation: server, transport: transport)
+            // Use the instance method here (not the static facade) so
+            // the .p2p path can grab the SignalClient.
+            self.mixer          = self.makeMixerInstance(serverLocation: server, transport: transport)
             self.audio.attach(mixer: self.mixer)
             AppLog.log("[AppState] transport swapped → server=\(server.id) transport=\(transport.rawValue), re-entering room=\(roomToReenter)")
             await self.enterRoom(roomToReenter)
