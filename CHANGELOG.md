@@ -9,6 +9,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.5] - 2026-05-07
+
+### Fixed — fresh-launch / reconnect surfaces 房间不存在
+
+`Room::add_user` (server) was returning the boolean from
+`std::set::insert` (`false` for duplicate). `RoomManager::join_room`
+forwarded that to `process_join_room`, which surfaced it as
+`make_error("Room not found")`. Wildly misleading — the actual
+condition was "user_id already in this room's user set".
+
+That's exactly what happens after the session-takeover path in
+`process_join_room`: if a previous TCP context for the same
+`user_id` is alive when a new one arrives, we mark the old ctx
+`displaced` and short-circuit its `on_close` leave-cascade (so
+the live session keeps its slots). Side-effect: `room->users_`
+permanently retains the old uid until the new ctx successfully
+re-joins. With non-idempotent `add_user`, that re-join failed
+loudly with "Room not found".
+
+The race fires reliably when:
+- The previous app instance hard-quit (SIGPIPE in v6.3.0, force-
+  quit in dev, app-update relaunch, etc.).
+- The user installs the .dmg on a machine where a debug build
+  previously ran — UserDefaults are bundle-id-scoped, so
+  `Identity.userId` carries over and matches what the server
+  still has in `users_`. Looks like "first launch fails" from
+  the user's POV but is actually "second launch with stale
+  server-side state".
+
+#### Fix
+
+`Room::add_user` is now idempotent:
+
+```cpp
+bool Room::add_user(const std::string& user_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    users_.insert(user_id);   // discard the inserted-flag
+    return true;              // logically a join succeeds whether or
+                              // not we were already members
+}
+```
+
+`process_create_room`'s use of `add_user` was already
+return-value-ignored (it always treats the creator as a member),
+so this change is safe for the create path too. Only
+`process_join_room` consumed the boolean, and "user already in
+room" → success is the correct semantic.
+
+Server-side only. Tonel-MacOS / Web clients unchanged. Deployed
+to both 广州1 (Aliyun) and 广州2 (Kufan).
+
 ## [6.5.4] - 2026-05-07
 
 ### Added — Tonel-Windows source + CI installer build

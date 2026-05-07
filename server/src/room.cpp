@@ -19,8 +19,27 @@ bool Room::check_password(const std::string& plaintext_pwd) const {
 
 bool Room::add_user(const std::string& user_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto [it, inserted] = users_.insert(user_id);
-    return inserted;
+    // v6.5.5: idempotent. We used to return `inserted` here; the only
+    // caller (RoomManager::join_room) propagated that to
+    // process_join_room, which surfaced "false" as
+    // `make_error("Room not found")` — wildly misleading when the real
+    // condition was "user already in the room".
+    //
+    // That can happen by design after process_join_room's session-
+    // takeover path: it marks the previous ctx for the same user_id
+    // as `displaced`, then short-circuits the displaced ctx's on_close
+    // leave-cascade (so the live session keeps its slots). The
+    // upshot: room->users_ permanently retains the old uid until the
+    // new ctx successfully re-joins. With the previous non-idempotent
+    // add_user, that re-join failed loudly.
+    //
+    // A "join" of an already-member uid is logically successful — they
+    // are a member afterwards, which was the goal. Returning true
+    // here also collapses an entire class of reconnect / SIGPIPE /
+    // hard-quit races that all manifested as "Room not found" on the
+    // user's next launch.
+    users_.insert(user_id);
+    return true;
 }
 
 bool Room::remove_user(const std::string& user_id) {
