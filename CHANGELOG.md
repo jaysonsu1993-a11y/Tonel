@@ -9,6 +9,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.3] - 2026-05-07
+
+### Changed — 广州2 (Kufan) re-enabled
+
+The Kufan box (42.240.163.172) was banned by its IDC in v5.1.22
+for hosting the .io TLD without ICP filing. The ban has been
+lifted; the box is back online. Tonel-MacOS's
+`Endpoints.guangzhou2.isAvailable` flips from `false` → `true`,
+so the picker entry is now selectable instead of greyed out.
+
+#### Server side
+
+- Cross-compiled v6.5.2 binary deployed to Kufan via
+  `TONEL_SSH_HOST=root@42.240.163.172 TONEL_SSH_PORT=26806
+  deploy/server.sh --component=binary`.
+- Verified live banner: mixer reports
+  `0.666ms interval, 32 samples/packet` (v6.0+ wire) and signaling
+  reports `UDP discovery listening on port 9001` (v6.5+ P2P
+  discovery), so feature parity with 广州1 is real.
+- All needed ports externally reachable (probed with `nc -z`):
+  9001/tcp+udp, 9002/tcp, 9003/udp, 9005/tcp.
+- UFW is inactive on Kufan; cloud-side security group is the only
+  filter and it's already open.
+
+#### Client side
+
+`Endpoints.swift` two-line flip + comment refresh:
+
+```swift
+// before:
+isAvailable: false   // IDC ban, see memory reference_kufan_test_server
+// after:
+isAvailable: true    // ban lifted, v6.5.2 binary deployed, parity with 广州1
+```
+
+#### What didn't change
+
+- DNS for `srv.tonel.io` still points wherever v5.1.22 left it —
+  the macOS client doesn't use DNS for either server selection
+  (both 广州1 / 广州2 are literal IPs in `Endpoints.swift`), so
+  this works regardless. Web client behaviour unchanged.
+- `/new` fallback path on web still routes to 广州1 (Aliyun) —
+  not touched in this release.
+
 ## [6.5.2] - 2026-05-07
 
 ### Added — desktop client distribution via Cloudflare R2

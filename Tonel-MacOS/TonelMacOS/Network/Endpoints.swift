@@ -105,12 +105,10 @@ enum Endpoints {
     )
 
     /// 广州2 = 酷番云 (42.240.163.172). v5.1.22 the IDC banned the box
-    /// for hosting a foreign TLD without ICP filing — TCP RST'd from
-    /// outside. Kept as a UI placeholder so the multi-server design is
-    /// visible to the user, but `isAvailable = false` blocks selection
-    /// until that situation is resolved (see memory
-    /// `reference_kufan_test_server`). Hosts kept here for the day it
-    /// flips back on; do not delete.
+    /// for hosting a foreign TLD without ICP filing; v6.5.3 the ban
+    /// was lifted and the box is back online. Server upgraded to
+    /// v6.5.2 binary with v6.0+ 32-sample wire + v6.4+ JOIN auto-create
+    /// + v6.5+ UDP discovery on 9001 — feature parity with 广州1.
     static let guangzhou2 = ServerLocation(
         id: "guangzhou2",
         displayName: "广州2",
@@ -119,7 +117,7 @@ enum Endpoints {
         mixerUDPPort: 9003,
         p2pDiscoveryUDPPort: 9001,
         wsMixerURL: URL(string: "ws://42.240.163.172:9005"),
-        isAvailable: false
+        isAvailable: true
     )
 
     /// All servers in the order they appear in the Settings picker.
