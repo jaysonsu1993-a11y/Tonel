@@ -98,9 +98,17 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           npm i -g wrangler@4
-          $exe = Get-ChildItem -Path Tonel-Windows\installer\output\Tonel-Windows-v*.exe `
+          # `defaults.run.working-directory: Tonel-Windows` already
+          # cd's us into the subdir for `run:` blocks, so the path
+          # here is `installer/output/...`, NOT
+          # `Tonel-Windows/installer/output/...`. (The
+          # actions/upload-artifact and action-gh-release `path:` /
+          # `files:` keys ARE repo-root-relative — different
+          # convention from `run:` scripts. Easy mistake; v6.5.10
+          # tripped on it.)
+          $exe = Get-ChildItem -Path installer\output\Tonel-Windows-v*.exe `
                  | Select-Object -First 1
-          if (-not $exe) { throw "No installer .exe found in output\" }
+          if (-not $exe) { throw "No installer .exe found in installer\output\" }
           $versioned = $exe.Name
           $latest    = "Tonel-Windows-latest.exe"
           Write-Host "uploading $versioned + $latest to r2://tonel-downloads/"

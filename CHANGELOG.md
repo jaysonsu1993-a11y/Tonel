@@ -9,6 +9,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.11] - 2026-05-07
+
+### Fixed — R2 push step's path was doubled
+
+v6.5.10 finally produced a valid Windows installer + GitHub
+Release, but the R2 push step errored with:
+
+```
+Cannot find path 'D:\a\Tonel\Tonel\Tonel-Windows\Tonel-Windows\installer\output'
+```
+
+The workflow has `defaults.run.working-directory: Tonel-Windows`,
+so `run:` blocks already start in the subdir. My step then
+prepended `Tonel-Windows\` to the path, doubling it.
+
+Subtlety: the same path key is repo-root-relative for the
+`actions/upload-artifact@v4` `path:` and `softprops/action-gh-release@v2`
+`files:` parameters (those steps don't use `defaults.run.working-directory`
+because they aren't `run:` scripts). Different conventions for
+the same workflow file — easy mistake.
+
+Fix: drop the `Tonel-Windows\` prefix from the `Get-ChildItem`
+in the R2 push step.
+
+### Manual recovery
+
+While waiting for v6.5.11 CI, downloaded
+`Tonel-Windows-v6.5.10.exe` from the v6.5.10 GitHub Release and
+ran `deploy/upload-r2.sh` locally. As of this commit:
+
+- `https://download.tonel.io/Tonel-Windows-v6.5.10.exe` → live
+- `https://download.tonel.io/Tonel-Windows-latest.exe` → live
+
+So tonel.io's "⊞ Windows" pill button is functional **right
+now**, even before v6.5.11 CI catches up.
+
 ## [6.5.10] - 2026-05-07
 
 ### Fixed — GitHub Release step 403 (read-only GITHUB_TOKEN)
