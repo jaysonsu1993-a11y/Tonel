@@ -1,0 +1,49 @@
+<UserControl x:Class="TonelWindows.Views.ChannelStripView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:v="clr-namespace:TonelWindows.Views"
+             Width="96" Height="320">
+    <Border x:Name="StripBorder" CornerRadius="6" Background="{StaticResource StripBrush}"
+            BorderBrush="#0FFFFFFF" BorderThickness="1" Padding="8,10">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel Grid.Row="0" HorizontalAlignment="Center" Height="32">
+                <TextBlock x:Name="TitleText" Text="" FontSize="12" FontWeight="Medium"
+                           HorizontalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"
+                           MaxWidth="80"
+                           Foreground="{StaticResource TextPrimary}"/>
+                <TextBlock x:Name="SubtitleText" FontSize="10"
+                           HorizontalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{StaticResource TextSecondary}"/>
+            </StackPanel>
+
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,8">
+                <v:LedMeterView x:Name="Meter" Width="10"/>
+                <v:VerticalFader x:Name="Fader" Width="30" Margin="6,0,0,0"/>
+            </StackPanel>
+
+            <TextBlock Grid.Row="2" x:Name="DbText" FontFamily="Consolas" FontSize="10"
+                       HorizontalAlignment="Center" Margin="0,4"
+                       Foreground="{StaticResource TextSecondary}"/>
+
+            <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Center" Height="22">
+                <Button x:Name="MuteBtn" Content="M" Width="24" Height="22" Margin="2,0"
+                        FontFamily="Consolas" FontWeight="Bold" FontSize="11"
+                        Background="#2E2E2E" Foreground="#B2B2B2"
+                        BorderThickness="0" Click="OnMuteClick"/>
+                <Button x:Name="SoloBtn" Content="S" Width="24" Height="22" Margin="2,0"
+                        FontFamily="Consolas" FontWeight="Bold" FontSize="11"
+                        Background="#2E2E2E" Foreground="#B2B2B2"
+                        BorderThickness="0" Click="OnSoloClick"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>

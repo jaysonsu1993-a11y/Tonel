@@ -49,6 +49,20 @@ fi
 command -v wrangler >/dev/null 2>&1 \
     || { echo "[upload] wrangler not found — install with: npm i -g wrangler" >&2; exit 2; }
 
+# Load CLOUDFLARE_API_TOKEN from deploy/.env.deploy if not already set.
+# wrangler refuses to run non-interactively without it. The token also
+# needs the "Workers R2 Storage: Edit" permission — see CHANGELOG v6.5.3
+# for the dance to grant it on an existing token.
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+    ENV_FILE="$(dirname "$0")/.env.deploy"
+    if [ -f "$ENV_FILE" ]; then
+        # shellcheck disable=SC2046
+        export $(grep -E '^CLOUDFLARE_API_TOKEN=' "$ENV_FILE" | head -1 | xargs)
+    fi
+fi
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] \
+    || { echo "[upload] CLOUDFLARE_API_TOKEN not set; check deploy/.env.deploy" >&2; exit 2; }
+
 SIZE=$(stat -f %z "$LOCAL" 2>/dev/null || stat -c %s "$LOCAL")
 SIZE_MB=$(awk "BEGIN{printf \"%.1f\", $SIZE/1048576}")
 echo "[upload] $LOCAL (${SIZE_MB} MB) → r2://$BUCKET/$REMOTE"

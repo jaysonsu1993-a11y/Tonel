@@ -9,6 +9,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.4] - 2026-05-07
+
+### Added — Tonel-Windows source + CI installer build
+
+The Tonel-Windows WPF client (developed by user, previously
+untracked locally) is now committed. Mirrors Tonel-MacOS
+structure: `App/AppState.cs` + `Identity.cs` + `UserPrefs.cs`,
+`Network/{MixerClient,WSMixerClient,P2PMixerClient,Endpoints,
+SignalClient}.cs`, `Audio/{AudioEngine,JitterBuffer,SPA1Packet,
+WasapiExclusiveCapture}.cs`, plus matching XAML views.
+
+#### CI: GitHub Actions builds + ships the Windows installer
+
+`.github/workflows/build-installer.yml` (also previously
+untracked, now committed) runs on `windows-latest` for tag
+pushes (`v*`), PRs that touch `Tonel-Windows/**`, and manual
+dispatch:
+
+1. `dotnet publish` → self-contained single-file Tonel.exe
+2. Inno Setup `iscc Tonel.iss` → installer
+3. Upload as workflow artifact (always)
+4. Publish to GitHub Release (only on `v*` tag)
+5. **Push to Cloudflare R2** (only on `v*` tag) — uploads both
+   the versioned filename and the `Tonel-Windows-latest.exe`
+   alias so `https://download.tonel.io/Tonel-Windows-latest.exe`
+   stays current
+
+To enable step 5 the user must add `CLOUDFLARE_API_TOKEN` to
+the repo's Actions secrets (Settings → Secrets and variables →
+Actions → New repository secret). Same token used for the
+local `deploy/upload-r2.sh` flow; needs the
+"Workers R2 Storage: Edit" permission.
+
+#### Filename convention aligned
+
+`Tonel.iss`'s `OutputBaseFilename` changed from
+`Tonel-Setup-X.Y.Z` → `Tonel-Windows-vX.Y.Z`. This matches the
+`Tonel-(MacOS|Windows)-vX.Y.Z` pattern that
+`deploy/upload-r2.sh` regex-matches to auto-publish the
+`*-latest` alias. `build.ps1`'s success message updated to
+match.
+
+#### Version sourcing
+
+CI now reads the global version from the repo-root
+`CMakeLists.txt` (`project(Tonel VERSION X.Y.Z ...)`) and passes
+it as `-Version` to `build.ps1`. This way the Windows installer
+filename + Inno's `AppVersion` track the global tag instead of
+the per-file `csproj` Version (which was hardcoded `0.1.0`).
+The csproj `<Version>` is a fallback for local dev builds only.
+
+#### Other
+
+- `deploy/upload-r2.sh` now reads `CLOUDFLARE_API_TOKEN` from
+  `deploy/.env.deploy` if not already set in the env. Failing
+  for the lack of an env-var prompted the v6.5.3 attempted
+  upload to error out before this autoload was added.
+- `.gitignore` adds `**/obj/` and `**/.vs/` for .NET build
+  intermediates.
+
+#### Rollout
+
+- Tagging `v6.5.4` triggers the CI workflow on GitHub. The first
+  run from a fresh runner takes ~5 min (downloads .NET SDK +
+  Inno Setup + wrangler).
+- After CI succeeds: `https://download.tonel.io/Tonel-Windows-latest.exe`
+  serves the installer; tonel.io home-page "⊞ Windows" pill
+  links straight at it.
+
 ## [6.5.3] - 2026-05-07
 
 ### Changed — 广州2 (Kufan) re-enabled

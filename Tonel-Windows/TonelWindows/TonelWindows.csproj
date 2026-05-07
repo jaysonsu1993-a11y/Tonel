@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>TonelWindows</RootNamespace>
+    <AssemblyName>Tonel</AssemblyName>
+    <ApplicationManifest>Resources\app.manifest</ApplicationManifest>
+
+    <!-- Versioning. Bump for each release. -->
+    <Version>0.1.0</Version>
+    <FileVersion>0.1.0.0</FileVersion>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+
+    <Company>Tonel</Company>
+    <Copyright>© 2026 Tonel</Copyright>
+    <Product>Tonel</Product>
+    <AssemblyTitle>Tonel for Windows</AssemblyTitle>
+
+    <!-- Optional: app icon for the .exe. Drop AppIcon.ico into Resources/
+         (256×256 multi-size) and uncomment to embed. -->
+    <!-- <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon> -->
+  </PropertyGroup>
+
+  <!-- Publish profile: self-contained single-file for the installer.
+       60 MB extra payload for the .NET 8 runtime, but users don't
+       need to pre-install anything. ReadyToRun pre-jits the IL for
+       ~30% faster cold start. Trimming is OFF for WPF (XAML reflection
+       breaks under aggressive trimmers). -->
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.4" />
+  </ItemGroup>
+
+</Project>

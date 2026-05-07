@@ -1,0 +1,71 @@
+<Window x:Class="TonelWindows.Views.AudioDebugSheet"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Audio Debug" Width="420" Height="540"
+        WindowStartupLocation="CenterOwner"
+        Background="Black" Foreground="#22C55E"
+        FontFamily="Consolas" FontSize="12"
+        WindowStyle="None" ResizeMode="NoResize">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <DockPanel Grid.Row="0">
+            <TextBlock Text="Audio Debug" FontSize="18" FontWeight="Bold"/>
+            <Button Content="关闭" DockPanel.Dock="Right" Background="Transparent"
+                    Foreground="#22C55E" BorderThickness="0" Click="OnClose"/>
+        </DockPanel>
+        <ScrollViewer Grid.Row="1" Margin="0,12">
+            <StackPanel>
+                <TextBlock Text="CLIENT — per-peer jitter buffer" FontWeight="Bold" Margin="0,0,0,4"/>
+                <Grid Margin="0,2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="120"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="primeMin"/>
+                    <Slider x:Name="PrimeMin" Grid.Column="1" Minimum="1" Maximum="16" TickFrequency="1"
+                            IsSnapToTickEnabled="True" ValueChanged="OnPrimeMin"/>
+                    <TextBlock x:Name="PrimeMinText" Grid.Column="2" Foreground="#FFD700"
+                               HorizontalAlignment="Right"/>
+                </Grid>
+
+                <Rectangle Height="1" Fill="#225C2A" Margin="0,8"/>
+
+                <TextBlock Text="SERVER — per-user jitter buffer (MIXER_TUNE)" FontWeight="Bold" Margin="0,0,0,4"/>
+                <Grid Margin="0,2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="120"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="jitterTarget"/>
+                    <Slider x:Name="JitterTarget" Grid.Column="1" Minimum="1" Maximum="16" TickFrequency="1"
+                            IsSnapToTickEnabled="True" ValueChanged="OnJitterTarget"/>
+                    <TextBlock x:Name="JitterTargetText" Grid.Column="2" Foreground="#FFD700"
+                               HorizontalAlignment="Right"/>
+                </Grid>
+                <Grid Margin="0,2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="120"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="jitterMaxDepth"/>
+                    <Slider x:Name="JitterMax" Grid.Column="1" Minimum="1" Maximum="64" TickFrequency="1"
+                            IsSnapToTickEnabled="True" ValueChanged="OnJitterMax"/>
+                    <TextBlock x:Name="JitterMaxText" Grid.Column="2" Foreground="#FFD700"
+                               HorizontalAlignment="Right"/>
+                </Grid>
+
+                <Rectangle Height="1" Fill="#225C2A" Margin="0,8"/>
+
+                <TextBlock Text="LIVE" FontWeight="Bold"/>
+                <TextBlock x:Name="LiveText"/>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>

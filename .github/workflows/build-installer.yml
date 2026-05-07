@@ -1,0 +1,98 @@
+name: Build Tonel-Windows installer
+
+# Triggers:
+#   • Manual (workflow_dispatch) — pick any branch / commit, get an installer
+#   • Tag push  v*               — automatic release-time build
+#   • PR to main                 — sanity-check the installer still compiles
+#     (artifact uploaded but not published as a release)
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "Tonel-Windows/**"
+      - ".github/workflows/build-installer.yml"
+
+jobs:
+  build:
+    name: Build installer
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: Tonel-Windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # Inno Setup 6 ships preinstalled on windows-latest runners. Verify
+      # and surface the version so we notice if Microsoft drops it.
+      - name: Locate Inno Setup
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc /? | Select-Object -First 1
+          "INNO=$iscc" >> $env:GITHUB_ENV
+
+      - name: Read version from repo CMakeLists.txt
+        id: version
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          v=$(awk -F'VERSION ' '/project\(Tonel /{print $2}' CMakeLists.txt | tr -d '() LANGUAGES C CXX' | head -1)
+          echo "tonel_version=$v" >> "$GITHUB_OUTPUT"
+          echo "Tonel global version = $v"
+
+      - name: Build installer
+        run: |
+          .\installer\build.ps1 -Version "${{ steps.version.outputs.tonel_version }}"
+
+      - name: Upload setup.exe as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tonel-Windows-Installer
+          # v6.5.4: filename pattern aligned with Tonel-(MacOS|Windows)-vX.Y.Z
+          # — see Tonel-Windows/installer/Tonel.iss for the rationale.
+          path: Tonel-Windows/installer/output/Tonel-Windows-v*.exe
+          if-no-files-found: error
+
+      # Tag pushes (v*) → also publish as a GitHub release asset.
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Tonel-Windows/installer/output/Tonel-Windows-v*.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # v6.5.4: also push to Cloudflare R2 so the home-page download
+      # button (https://download.tonel.io/Tonel-Windows-latest.exe)
+      # serves the freshest build without a manual upload step. The
+      # token is read from the repo secret CLOUDFLARE_API_TOKEN —
+      # add it via Settings → Secrets and variables → Actions, with
+      # at minimum the "Workers R2 Storage: Edit" permission scoped
+      # to the account.
+      - name: Push installer to Cloudflare R2
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm i -g wrangler@4
+          $exe = Get-ChildItem -Path Tonel-Windows\installer\output\Tonel-Windows-v*.exe `
+                 | Select-Object -First 1
+          if (-not $exe) { throw "No installer .exe found in output\" }
+          $versioned = $exe.Name
+          $latest    = "Tonel-Windows-latest.exe"
+          Write-Host "uploading $versioned + $latest to r2://tonel-downloads/"
+          wrangler r2 object put "tonel-downloads/$versioned" --file=$exe.FullName --remote
+          wrangler r2 object put "tonel-downloads/$latest"    --file=$exe.FullName --remote
