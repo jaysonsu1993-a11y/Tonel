@@ -51,7 +51,12 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExe}
-MinVersion=10.0.17763   ; Windows 10 1809 (WASAPI low-latency baseline)
+; Windows 10 1809 (WASAPI low-latency baseline). v6.5.7: comment moved
+; off the value line — Inno Setup's [Setup] parser treats the whole RHS
+; (including the ; and trailing text) as part of the value, which fails
+; with `Parsing [Setup] section, line N` and ISCC exit code 2. Block
+; comments only, never inline.
+MinVersion=10.0.17763
 CloseApplications=yes
 RestartApplications=no
 

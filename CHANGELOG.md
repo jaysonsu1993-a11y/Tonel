@@ -9,6 +9,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.7] - 2026-05-07
+
+### Fixed — Inno Setup line-54 parse error blocking CI
+
+`iscc` was failing with `Parsing [Setup] section, line 54` and
+exit code 2. Tonel.iss line 54:
+
+```ini
+MinVersion=10.0.17763   ; Windows 10 1809 (WASAPI low-latency baseline)
+```
+
+Inno Setup's `[Setup]` section directive parser does **not**
+accept inline `;` comments — the entire RHS, including the `;`
+and trailing text, is taken as the value. So the version string
+became `"10.0.17763   ; Windows 10 ..."`, which doesn't match the
+expected `Major.Minor[.Build]` format and aborts compilation.
+
+Fix: hoist the comment onto its own line. Block comments only.
+
+`iscc` exit code 2 = "compile error". Annotation surfaced as a
+generic step failure (no `*.cs` line number to attach to), which
+is why it didn't show up in the v6.5.6 check-runs annotations
+that solved the previous round.
+
 ## [6.5.6] - 2026-05-07
 
 ### Fixed — Tonel-Windows compile errors blocking CI
