@@ -9,6 +9,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.12] - 2026-05-07
+
+### Docs
+
+`Tonel-Windows/README.md` updated to reflect the CI-driven
+distribution model that landed in v6.5.4 → v6.5.11:
+
+- Installer filename is now `Tonel-Windows-vX.Y.Z.exe` (not
+  `Tonel-Setup-X.Y.Z.exe`).
+- `build.ps1` example uses the explicit `-Version 6.5.11` flag,
+  with a note about `<Version>` in csproj being the local-dev
+  fallback.
+- The "CI (GitHub Actions)" section now documents:
+  1. Workflow artifact upload
+  2. GitHub Release asset (with `permissions: contents: write`
+     mention)
+  3. Cloudflare R2 push (with `CLOUDFLARE_API_TOKEN` repo secret
+     mention)
+- The R2 alias `Tonel-Windows-latest.exe` is the URL the
+  tonel.io home-page "⊞ Windows" pill points at.
+
+(Memory side: this is also the moment the `feedback_windows_ci_traps.md`
++ `project_distribution_v6_5.md` files were added to the project's
+memory store with the full lessons-learned + the wire diagram
+of the distribution stack. They live outside this repo at
+`~/.claude/projects/-Users-niko-project-s-Tonel/memory/`.)
+
 ## [6.5.11] - 2026-05-07
 
 ### Fixed — R2 push step's path was doubled

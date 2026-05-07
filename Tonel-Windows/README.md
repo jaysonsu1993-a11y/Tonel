@@ -96,9 +96,15 @@ We ship as a self-contained single-file installer built with **Inno Setup**
 #                         (or set $env:INNO to ISCC.exe)
 
 cd Tonel-Windows
-powershell -ExecutionPolicy Bypass -File installer\build.ps1
-# → installer\output\Tonel-Setup-0.1.0.exe   (~70 MB)
+powershell -ExecutionPolicy Bypass -File installer\build.ps1 -Version 6.5.11
+# → installer\output\Tonel-Windows-v6.5.11.exe   (~50 MB)
 ```
+
+The `-Version` flag aligns the installer's `AppVersion` (and the
+output filename) with the global repo version. Without it,
+`build.ps1` falls back to the `<Version>` in the `.csproj` (which
+is pinned at `0.1.0` for local dev — see history of v6.5.4 ~
+v6.5.11 in the root CHANGELOG for why).
 
 What it does:
 1. `dotnet publish -c Release` → produces a self-contained
@@ -121,16 +127,36 @@ The installer:
 ### CI (GitHub Actions)
 
 [`.github/workflows/build-installer.yml`](../.github/workflows/build-installer.yml)
-builds the installer on every PR (artifact only) and on every `v*` tag
-push (artifact + auto-uploaded as a GitHub Release asset). Uses the free
-`windows-latest` runner — Inno Setup 6 is preinstalled on it.
+runs on every PR (artifact only) and every `v*` tag push (artifact +
+GitHub Release asset + Cloudflare R2 push). Free `windows-latest`
+runner; Inno Setup 6 either preinstalled or `choco install`-ed at
+runtime.
 
 To cut a release:
 ```bash
-git tag v0.1.0 && git push --tags
+git tag v6.5.X && git push origin v6.5.X
 ```
-The workflow runs ~3 min and the signed installer drops onto the release
-page automatically.
+
+The workflow runs ~3 min and produces three things:
+
+1. **Workflow artifact** — accessible from the Actions UI.
+2. **GitHub Release asset** — at
+   `https://github.com/<owner>/Tonel/releases/tag/v6.5.X` with
+   `Tonel-Windows-v6.5.X.exe` attached. Requires
+   `permissions: contents: write` (granted at the workflow level
+   so the elevated token only applies to this workflow — see
+   the workflow file's top-level `permissions:` block).
+3. **Cloudflare R2 upload** — pushes both the versioned
+   filename and a `Tonel-Windows-latest.exe` alias to the
+   `tonel-downloads` bucket. Public URL:
+   `https://download.tonel.io/Tonel-Windows-latest.exe`. Requires
+   the `CLOUDFLARE_API_TOKEN` repo Actions secret with
+   *Workers R2 Storage: Edit* permission.
+
+The `Tonel-Windows-latest.exe` URL is what
+[tonel.io](https://tonel.io)'s "⊞ Windows" home-page button
+points at, so a successful tag push automatically makes the new
+build downloadable from the home page.
 
 ### Code signing (recommended before public distribution)
 
