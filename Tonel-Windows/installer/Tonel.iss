@@ -17,7 +17,16 @@
 #define AppName        "Tonel"
 #define AppPublisher   "Tonel"
 #define AppExe         "Tonel.exe"
-#define AppVersion     "0.1.0"
+; v6.5.9: AppVersion is `iscc /DAppVersion=...`-overridable. Without
+; the #ifndef guard, `#define` here would always reset the macro to
+; "0.1.0" AFTER the command-line /D had set it, so the CI's
+; `iscc /DAppVersion=6.5.8` ended up producing a v0.1.0 installer
+; (and build.ps1 then errored "Setup not produced" looking for the
+; expected versioned name). Guarded define lets local dev keep
+; "0.1.0" as a fallback when no /D is passed.
+#ifndef AppVersion
+  #define AppVersion   "0.1.0"
+#endif
 #define AppId          "{{B7F6A140-3F7E-4D2C-9A92-1C8A4D3E5A21}"
 #define AppURL         "https://api.tonel.io"
 

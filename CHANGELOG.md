@@ -9,6 +9,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.9] - 2026-05-07
+
+### Fixed — `iscc /DAppVersion=...` not overriding the in-script `#define`
+
+v6.5.8's CI got past iscc parse + language-pack errors and
+successfully produced an installer — but with the wrong version
+in the filename:
+
+```
+Successful compile (51.937 sec). Resulting Setup program filename is:
+D:\a\Tonel\Tonel\Tonel-Windows\installer\output\Tonel-Windows-v0.1.0.exe
+                                                              ^^^^^
+                                       expected v6.5.8 (from /DAppVersion=6.5.8)
+```
+
+build.ps1 then threw "Setup not produced" because it was looking
+for the expected `Tonel-Windows-v6.5.8.exe`.
+
+Cause: Tonel.iss declares `#define AppVersion "0.1.0"`. Inno's
+preprocessor processes `#define` after `/D` flags from the
+command line, so the in-script value always wins regardless of
+what the CI passes.
+
+Fix: guard the local define with `#ifndef`:
+
+```ini
+#ifndef AppVersion
+  #define AppVersion   "0.1.0"
+#endif
+```
+
+Now `iscc /DAppVersion=6.5.9` sets the macro before the script
+is read, and the `#ifndef` check skips the local default. Local
+dev still gets the 0.1.0 fallback when no `/D` is passed.
+
 ## [6.5.8] - 2026-05-07
 
 ### Fixed — Inno Setup ChineseSimplified.isl missing on CI runner
