@@ -63,6 +63,11 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
+        # v6.5.0 P2P: binding a UDP socket to listen for inbound peer
+        # packets requires `network.server` even if the app initiated
+        # the conversation. EPERM (Operation not permitted) on bind()
+        # is the sandbox refusing without this.
+        com.apple.security.network.server: true
         com.apple.security.device.audio-input: true
     settings:
       base:

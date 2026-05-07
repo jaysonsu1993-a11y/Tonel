@@ -9,6 +9,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.1] - 2026-05-07
+
+### Fixed — P2P bind() failed with "Operation not permitted"
+
+Switching to P2P surfaced "P2P UDP bind: Operation not permitted"
+in the connection-failure alert. Cause: the macOS App Sandbox
+entitlements only listed `com.apple.security.network.client`. A
+client-initiated UDP socket that's also expected to receive
+inbound packets from peers needs `com.apple.security.network.server`
+— EPERM on `bind()` is the sandbox refusing without it.
+
+Fix: add `com.apple.security.network.server: true` to
+`project.yml` (so xcodegen writes it into the entitlements file
+on every regen, mirroring the v6.1.1 Info.plist lesson).
+
+The UDP/WS modes never tripped this because they use NWConnection
+(client-only) or URLSessionWebSocketTask, both of which the
+sandbox classifies as outbound. POSIX `bind(SOCK_DGRAM)` for
+inbound packets is the only path that needs `network.server`.
+
 ## [6.5.0] - 2026-05-07
 
 ### Added — P2P transport (third Tonel-MacOS mode, full mesh)
