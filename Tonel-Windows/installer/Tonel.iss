@@ -67,7 +67,15 @@ RestartApplications=no
 
 [Languages]
 Name: "english";  MessagesFile: "compiler:Default.isl"
-Name: "chinese";  MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; v6.5.8: dropped ChineseSimplified.isl — the .isl ships with the
+; official Inno Setup installer's "Languages" subfolder but is NOT
+; included by Chocolatey's `choco install innosetup` distribution
+; that the CI runner uses, so iscc aborts with "couldn't open include
+; file". Internal-distribution installer is English-only; the app
+; itself is Chinese (UI is independent of the installer wizard's
+; language). When we go public we'll either commit a copy of
+; ChineseSimplified.isl into installer/ or switch CI to install
+; Inno Setup from the official .exe instead of choco.
 
 [Tasks]
 Name: "desktopicon";   Description: "{cm:CreateDesktopIcon}";   GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce

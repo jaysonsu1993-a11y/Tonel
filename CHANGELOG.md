@@ -9,6 +9,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.8] - 2026-05-07
+
+### Fixed — Inno Setup ChineseSimplified.isl missing on CI runner
+
+`iscc` aborted with:
+
+```
+Error on line 70 in installer/Tonel.iss:
+  Couldn't open include file
+  "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl":
+  The system cannot find the file specified.
+```
+
+ChineseSimplified.isl ships with the official Inno Setup installer's
+`Languages\` subfolder, but **Chocolatey's `choco install innosetup`
+distribution doesn't include it** — and that's what the GitHub
+Actions runner uses (the workflow falls back to choco when the
+preinstalled Inno Setup isn't found).
+
+Fix: drop the Chinese language entry from `[Languages]`. The
+installer wizard is English-only for internal distribution; the
+app's own UI is Chinese (independent of the installer wizard's
+language).
+
+Future fix when going public:
+- Option A: commit a copy of `ChineseSimplified.isl` into
+  `Tonel-Windows/installer/` and reference it via relative path
+  instead of `compiler:Languages\...`.
+- Option B: replace `choco install innosetup` in the workflow
+  with a direct download of the official Inno Setup .exe (which
+  bundles all language packs).
+
 ## [6.5.7] - 2026-05-07
 
 ### Fixed — Inno Setup line-54 parse error blocking CI
