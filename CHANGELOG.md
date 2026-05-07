@@ -9,6 +9,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.6] - 2026-05-07
+
+### Fixed — Tonel-Windows compile errors blocking CI
+
+The v6.5.4 / v6.5.5 GitHub Actions runs failed at `dotnet publish`
+with two distinct compile errors. Surfaced via the public
+check-runs annotations API; logs themselves require admin auth so
+we couldn't see them in v6.5.4 / 6.5.5 directly.
+
+#### `AllowUnsafeBlocks` not enabled
+
+`AudioEngine.cs` has two `unsafe { fixed (byte* p = buf) ... }`
+blocks (lines 310 and 655) that decode `byte[]` capture buffers
+into `float*` / `short*` for the per-sample mono-fold + gain
+application. CSC's default policy refuses unsafe code without an
+opt-in.
+
+Fix: `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>` in
+`TonelWindows.csproj`. The conversion loops run at
+48 kHz × N channels per capture period; the `unsafe` route is
+~3× faster than `Buffer.BlockCopy` + marshalling, which is the
+honest reason to keep them.
+
+#### `AudioClient.GetDevicePeriod` renamed in NAudio 2.x
+
+NAudio 2.x dropped the `GetDevicePeriod(out long, out long)`
+method in favour of two read-only properties on the same class:
+`DefaultDevicePeriod` and `MinimumDevicePeriod`. Same 100-ns
+ticks. Three call-sites were on the old API:
+- `AudioEngine.cs:276` (capture latency display)
+- `AudioEngine.cs:282` (render latency display)
+- `WasapiExclusiveCapture.cs:53` (exclusive-mode buffer sizing)
+
+Fix: replace with the property accessors.
+
+#### CI auth note
+
+`actions/runs/<id>/logs` is admin-only. Public callers can pull
+error positions + messages from
+`/repos/<owner>/<repo>/check-runs/<id>/annotations`, which is
+exactly what surfaced the errors above. Worth remembering for
+future un-debuggable CI failures.
+
 ## [6.5.5] - 2026-05-07
 
 ### Fixed — fresh-launch / reconnect surfaces 房间不存在

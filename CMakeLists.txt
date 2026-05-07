@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Tonel VERSION 6.5.5 LANGUAGES C CXX)
+project(Tonel VERSION 6.5.6 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

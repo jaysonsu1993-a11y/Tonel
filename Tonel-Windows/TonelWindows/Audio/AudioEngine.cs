@@ -268,18 +268,20 @@ public sealed class AudioEngine : INotifyPropertyChanged
         // surface that as both "device" and "buffer" latency. The two
         // numbers used to be split on macOS via CoreAudio HAL; on WASAPI
         // there's only one knob.
+        // v6.5.6: NAudio 2.x replaced `GetDevicePeriod(out, out)` with
+        // `DefaultDevicePeriod` / `MinimumDevicePeriod` properties on
+        // AudioClient. Same 100-ns ticks; we only need the default
+        // period for the latency display.
         try
         {
             if (_captureDevice != null)
             {
-                long defP, minP;
-                _captureDevice.AudioClient.GetDevicePeriod(out defP, out minP);
+                long defP = _captureDevice.AudioClient.DefaultDevicePeriod;
                 DeviceInputLatencyMs = (int)Math.Round(defP / 10_000.0);
             }
             if (_renderDevice != null)
             {
-                long defP, minP;
-                _renderDevice.AudioClient.GetDevicePeriod(out defP, out minP);
+                long defP = _renderDevice.AudioClient.DefaultDevicePeriod;
                 DeviceOutputLatencyMs = (int)Math.Round(defP / 10_000.0);
             }
         }

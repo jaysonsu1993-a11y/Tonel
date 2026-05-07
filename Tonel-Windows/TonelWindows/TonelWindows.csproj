@@ -11,6 +11,13 @@
     <RootNamespace>TonelWindows</RootNamespace>
     <AssemblyName>Tonel</AssemblyName>
     <ApplicationManifest>Resources\app.manifest</ApplicationManifest>
+    <!-- v6.5.6: AudioEngine.cs uses `unsafe { fixed (byte* p = buf) ... }`
+         blocks for the float/int16 PCM convert loops. CSC's default policy
+         forbids unsafe code; this opt-in is required per-project. The
+         alternative — pulling the conversions into Buffer.BlockCopy or
+         marshaling — would slow the audio path by ~3× on a hot loop that
+         runs at 48 kHz × N channels. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <!-- Versioning. Bump for each release. -->
     <Version>0.1.0</Version>

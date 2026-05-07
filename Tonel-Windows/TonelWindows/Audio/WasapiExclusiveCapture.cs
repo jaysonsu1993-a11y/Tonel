@@ -48,9 +48,11 @@ public sealed class WasapiExclusiveCapture : IDisposable
 
         WaveFormat = chosen;
         // Compute min device period — Exclusive mode demands buffer ≥ device's
-        // minimum period. GetDevicePeriod returns ticks (100-ns units).
-        long defaultPeriod, minPeriod;
-        _client.GetDevicePeriod(out defaultPeriod, out minPeriod);
+        // minimum period. v6.5.6: NAudio 2.x replaced
+        // `GetDevicePeriod(out, out)` (method) with two read-only
+        // properties on AudioClient. Same units (ticks, 100-ns).
+        long defaultPeriod = _client.DefaultDevicePeriod;
+        long minPeriod     = _client.MinimumDevicePeriod;
         long requested = requestedLatencyMs * 10_000L; // ms → 100-ns
         long bufferDuration = Math.Max(requested, minPeriod);
 
