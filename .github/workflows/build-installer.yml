@@ -15,6 +15,16 @@ on:
       - "Tonel-Windows/**"
       - ".github/workflows/build-installer.yml"
 
+# v6.5.10: GITHUB_TOKEN defaults to read-only on this repo
+# (Settings → Actions → General → Workflow permissions). The
+# `softprops/action-gh-release` step needs `contents: write` to
+# create the release; without it the step 403s after a successful
+# build. Granting at the workflow level (rather than the more
+# permissive repo-wide toggle) keeps the blast radius small —
+# only this workflow can write to the contents API.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build installer

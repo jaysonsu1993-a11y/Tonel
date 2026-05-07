@@ -9,6 +9,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.10] - 2026-05-07
+
+### Fixed — GitHub Release step 403 (read-only GITHUB_TOKEN)
+
+v6.5.9's CI got past every previous failure point — Inno Setup
+compiled cleanly, the artifact uploaded fine — and then the
+`softprops/action-gh-release` step 403'd:
+
+```
+GitHub release failed with status: 403
+{"message":"Resource not accessible by integration"}
+```
+
+The repo's Actions defaults to a read-only `GITHUB_TOKEN`
+(Settings → Actions → General → Workflow permissions →
+"Read repository contents and packages permissions"). Creating
+a release needs `contents: write`.
+
+Fix: add a workflow-level `permissions:` block:
+
+```yaml
+permissions:
+  contents: write
+```
+
+Workflow-level (not job-level, not repo-wide) so the elevated
+token only applies to this single workflow file. Other
+workflows in the future stay read-only by default; the repo
+setting doesn't change.
+
+The R2 push step had its own `if: startsWith(github.ref,
+'refs/tags/v')` gate so it was skipped (the previous step
+failed). With the fix, both steps run on the next tag push.
+
 ## [6.5.9] - 2026-05-07
 
 ### Fixed — `iscc /DAppVersion=...` not overriding the in-script `#define`
