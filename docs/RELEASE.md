@@ -3,116 +3,227 @@
 The single canonical way to ship a new version. **No bare commits to `main`.**
 Every change to `main` must go through this flow.
 
-## Before you start any release
-
-Five-second sanity check that catches the cheapest mistakes:
-
-1. `git status` is clean (or holds *only* the changes this release will ship)
-2. `git rev-parse --abbrev-ref HEAD` is `main`
-3. `git fetch && git log origin/main..HEAD` shows no surprise — i.e. you are
-   ahead of `origin/main` by exactly the commits you intend to ship
-4. **`deploy/health.sh` returns all-green** (or notes any pre-existing
-   warnings you'll want to distinguish from the ones your deploy might cause).
-   This is the single most important step — it establishes the baseline so
-   that if something breaks during the release, you know your release caused it.
-5. `ssh "$TONEL_SSH_HOST" 'cat /opt/tonel/VERSION'` matches the latest tag
-   on `main` (`git describe --tags --abbrev=0`). If it doesn't, find out why
-   *before* shipping anything new.
+This doc is the entry point for any AI agent or human contributor onboarding
+to the project's release flow. Reading it cover-to-cover gives you everything
+you need to ship a release end-to-end without prior context.
 
 ## TL;DR
 
 ```bash
-# 1. Make your changes on a branch (or directly if you're solo).
-# 2. Update CHANGELOG.md with a new ## [X.Y.Z] - YYYY-MM-DD section.
-# 3. Run the orchestrator:
-scripts/release.sh 1.0.4
+# 1. Make your changes (any branch). Commit them.
+# 2. Add a CHANGELOG.md ## [X.Y.Z] - YYYY-MM-DD section at the top.
+# 3. Run the orchestrator from a Mac with Xcode installed:
+scripts/release.sh 6.5.15
 ```
 
-That single command:
+That single command runs an 8-step pipeline that ships to **every**
+target platform. After it finishes:
 
-1. Bumps version in 5 files (CMakeLists × 3, web/package.json, config.schema.json)
-2. Verifies `CHANGELOG.md` has an entry for the new version (hard-fail if not)
-3. `git commit -m "release: v1.0.4"`
-4. `git tag -a v1.0.4 -m v1.0.4`
-5. **Pauses for confirmation** before `git push origin main --tags`
-6. Deploys server (binaries + proxies + ops)
-7. Deploys web (Cloudflare Pages)
-8. Runs health check (port listeners + PM2 status + WSS handshake)
+- `https://tonel.io` serves the new web build
+- `https://download.tonel.io/Tonel-MacOS-latest.dmg` serves the new mac
+  installer
+- `https://download.tonel.io/Tonel-Windows-latest.exe` serves the new
+  Windows installer (built async by GitHub Actions, lands ~3 min after
+  tag push)
+- The mixer + signaling C++ binaries are running on both 广州1 (Aliyun)
+  and 广州2 (Kufan) at the new version
+- A new GitHub Release exists with the Windows .exe attached
 
-## Prerequisites
+If you skip writing a CHANGELOG entry, the script hard-fails at step 2.
+This is intentional — every release must be self-documenting.
 
-- Working tree clean (`git status` empty)
-- On the `main` branch
-- `deploy/.env.deploy` exists (see [deploy/README.md](../deploy/README.md))
-- SSH key authorized to `root@8.163.21.207`
-- `CLOUDFLARE_API_TOKEN` valid (Pages — Edit permission)
+## The 8-step pipeline
+
+| # | Step                                | Where it runs       | What can go wrong |
+|---|-------------------------------------|---------------------|-------------------|
+| 0 | `scripts/pretest.sh`                | local               | Layer 1 (server unit tests) / Layer 2 (audio quality) / Layer 6 (state migration) — see `feedback_state_migration_test` |
+| 1 | `scripts/bump-version.sh`           | local               | Bumps CMakeLists × 2 + web/package.json |
+| 2 | CHANGELOG check                     | local               | Hard-fail if no `## [X.Y.Z]` line |
+| 3 | `git commit + tag + push`           | local → GitHub      | **Tag push triggers Windows CI in parallel** (`.github/workflows/build-installer.yml`) |
+| 4 | `deploy/package-macos.sh` + `upload-r2.sh` | local Mac    | xcodebuild Release + ad-hoc codesign + hdiutil → wrangler R2 push |
+| 5 | `deploy/server.sh` → 广州1 (Aliyun) | local → 8.163.21.207:22 | Cross-compile via Docker → rsync → PM2 reload |
+| 6 | `deploy/server.sh` → 广州2 (Kufan)  | local → 42.240.163.172:26806 | Same, second box |
+| 7 | `deploy/web.sh`                     | local → CF Pages    | `npm run build` → `wrangler pages deploy` |
+| 8 | URL verify                          | local → public CDN  | curl HTTP 200 on R2 + tonel.io |
+
+Step 3's tag push fires the Windows CI **asynchronously**. The
+orchestrator doesn't block on it. By the time step 8 finishes (~5 min
+into the run), the Windows .exe is usually already on R2 too — but not
+guaranteed. The verify step warns (doesn't fail) if Windows-latest.exe
+isn't yet updated.
+
+## Prerequisites (one-time setup per machine)
+
+| Item | What | How to verify |
+|---|---|---|
+| OS | macOS with Xcode installed | `xcodebuild -version` |
+| .NET 8 SDK | optional (only for local Windows build, CI handles releases) | `dotnet --version` |
+| Docker Desktop | for cross-compiling Linux binaries | `docker info` |
+| Node 18+ + wrangler | `npm i -g wrangler` | `wrangler --version` |
+| `deploy/.env.deploy` | from `.env.deploy.example`, fill in `CLOUDFLARE_API_TOKEN` (Pages + R2 Edit perms) + SSH host | `grep CLOUDFLARE_API_TOKEN deploy/.env.deploy` |
+| SSH key on Aliyun | `root@8.163.21.207:22` | `ssh -p 22 root@8.163.21.207 whoami` |
+| SSH key on Kufan  | `root@42.240.163.172:26806` | `ssh -p 26806 root@42.240.163.172 whoami` |
+| GitHub Actions secret `CLOUDFLARE_API_TOKEN` | for CI Windows R2 push | Repo Settings → Secrets → Actions |
+
+If any of these are missing, the script fails noisily at the first
+affected step. Re-run after fixing.
+
+## CHANGELOG format (Keep a Changelog)
+
+Required structure (the orchestrator hard-fails if it can't find this
+section):
+
+```markdown
+## [6.5.15] - 2026-05-08
+
+### Fixed
+- Description of fix (focus on **why**, not the diff).
+
+### Added
+- New thing.
+
+### Changed
+- Behaviour delta.
+```
+
+Categories: `Added`, `Changed`, `Fixed`, `Deprecated`, `Removed`,
+`Security`. Use only the categories that have entries.
 
 ## Versioning rules (semver)
 
 | Bump | When |
 |---|---|
-| MAJOR | Breaking SPA1 protocol change, breaking API change, breaking DB schema |
-| MINOR | New feature, new endpoint, new SPA1 message type, additive only |
-| PATCH | Bug fix, refactor, drift cleanup, doc-only |
+| MAJOR | Breaking SPA1 protocol change (e.g. v6.0.0 frame size 120 → 32) |
+| MINOR | New feature, new endpoint, new SPA1 codec, additive only |
+| PATCH | Bug fix, infrastructure tweak, doc-only change |
 
-## CHANGELOG format (Keep a Changelog)
+## Distribution outputs (where users actually get the bits)
 
-Required structure (the orchestrator hard-fails if it can't find this section):
-
-```markdown
-## [1.0.4] - 2026-04-30
-
-### Fixed
-- Description of fix.
-
-### Added
-- Description of new thing.
-
-### Changed
-- Description of behavior change.
+```
+                          tonel.io home page
+                                 │
+                                 │ <a href> pills
+                                 ▼
+                  download.tonel.io  (CF R2 custom domain)
+                                 │
+                                 ▼
+                   r2://tonel-downloads/
+                       │
+                       ├─ Tonel-MacOS-vX.Y.Z.dmg
+                       ├─ Tonel-MacOS-latest.dmg     ← always-newest alias
+                       ├─ Tonel-Windows-vX.Y.Z.exe
+                       └─ Tonel-Windows-latest.exe   ← always-newest alias
 ```
 
-Categories: `Added`, `Changed`, `Fixed`, `Deprecated`, `Removed`, `Security`.
-Use only the categories you have. Entries focus on the **why**, not the diff.
+The `*-latest` aliases are what the home-page download buttons point at.
+That means **the web doesn't need to redeploy for users to get a fresh
+installer** — just push the new file to R2 (which the release script
+does automatically).
+
+End users see:
+- macOS: right-click → 打开 → "无法验证开发者" → 打开 (ad-hoc signed,
+  no Apple notarization yet — see `project_distribution_v6_5` memory)
+- Windows: 更多信息 → 仍要运行 (unsigned, no SmartScreen reputation yet)
 
 ## Partial flows
 
 | Want to | Run |
 |---|---|
-| Bump + commit + tag + push, no deploy | `release.sh 1.0.4 --skip-deploy` |
-| Bump + commit + tag locally, no push | `release.sh 1.0.4 --skip-push` |
-| Re-deploy current HEAD (no version bump) | `release.sh deploy-only` |
-| Hot-fix web only | `deploy/web.sh` |
-| Hot-fix proxy only | `deploy/server.sh --component=proxy` |
-| Roll back binaries | `deploy/rollback.sh --component=binary` |
+| Full release | `scripts/release.sh 6.5.15` |
+| Bump + commit + tag + push, no deploy | `scripts/release.sh 6.5.15 --skip-deploy` |
+| Bump + commit + tag locally, no push | `scripts/release.sh 6.5.15 --skip-push` |
+| Re-deploy current HEAD (no version bump) | `scripts/release.sh deploy-only` |
+| macOS dmg only | `deploy/package-macos.sh && deploy/upload-r2.sh deploy/dist/Tonel-MacOS-vX.Y.Z.dmg` |
+| Server only (one box) | `TONEL_SSH_HOST=root@<ip> TONEL_SSH_PORT=<port> deploy/server.sh --component=binary` |
+| Web only | `deploy/web.sh` |
+| Health check (no deploy) | `deploy/health.sh` |
+| Roll back binary | `deploy/rollback.sh --component=binary` |
+
+## Hotfix flow
+
+If production is broken now:
+
+1. Identify the smallest possible fix in the repo.
+2. Add a CHANGELOG.md `## [<patch-version>]` entry describing it.
+3. `scripts/release.sh <patch-version>`.
+4. If the fix made things worse:
+   `deploy/rollback.sh --component=binary`. Then revert the commit on
+   `main` and run `release.sh` again with a clean fix.
+
+There is no "manual SSH and edit a file on production" path. The repo
+is the source of truth; bypassing release.sh leaves drift that breaks
+the next deploy.
+
+## What NOT to do
+
+- ❌ `git commit` directly on `main` without `release.sh`.
+- ❌ Manually `wrangler pages deploy` for a routine release. The
+  orchestrator does it; bypassing it means CHANGELOG / version
+  manifests fall out of sync.
+- ❌ Edit files on `/opt/tonel/` (Aliyun / Kufan) directly. Edit
+  locally → commit → release.
+- ❌ Tag without committing. The orchestrator always commits + tags
+  atomically.
+- ❌ Push the same version twice. Bump the patch number even for
+  trivial doc-only changes — every commit on `main` must trigger a
+  fresh release flow.
+- ❌ Skip the CHANGELOG entry. The orchestrator refuses; if you're
+  tempted to skip, you're probably bypassing the wrong tool.
 
 ## Working on the deploy scripts themselves
 
 If you're modifying anything in [`deploy/`](../deploy/) or
-[`ops/`](../ops/), read [DEPLOY_SCRIPTING_STANDARDS.md](DEPLOY_SCRIPTING_STANDARDS.md)
-first. Six bugs surfaced during the v1.0.3 → v1.0.4 release cycle —
-each one became a rule. The case files are at
-[deploy/LESSONS.md](../deploy/LESSONS.md).
+[`ops/`](../ops/) or `.github/workflows/`, read
+[DEPLOY_SCRIPTING_STANDARDS.md](./DEPLOY_SCRIPTING_STANDARDS.md) first.
+The R1–R10 rules came from real production incidents; each one is a
+case file at [deploy/LESSONS.md](../deploy/LESSONS.md).
 
-## What NOT to do
+For the Windows CI workflow specifically, read the project memory
+`feedback_windows_ci_traps.md` — it documents the 9 distinct CI
+failures the v6.5.4 → v6.5.14 series uncovered. Most are environment
+quirks (PowerShell argument-mode parsing, Inno Setup directive syntax,
+GitHub-hosted Inno Setup not bundling language packs, GITHUB_TOKEN
+default permissions) that won't reproduce locally.
 
-- ❌ `git commit` directly on `main` without going through `release.sh`.
-- ❌ `npm publish` or `wrangler pages deploy` from your laptop without the deploy
-  script. Drift detection lives in `deploy/server.sh`; bypassing it
-  means the next real deploy will refuse to run until you reconcile.
-- ❌ Edit files on `/opt/tonel/` directly. Edit in repo, commit, deploy.
-- ❌ Tag without committing. Always `release.sh`.
+## How an AI agent should run a release
 
-## Hotfix workflow
+Two cases.
 
-If something is broken in production right now:
+### Case A: ship a feature/fix you just wrote
 
-1. Identify the smallest possible fix in the repo.
-2. Run `scripts/release.sh <patch-version>` — full pipeline. The whole
-   thing including health-check should take under 90 seconds.
-3. If the fix breaks more than it solves, immediately
-   `deploy/rollback.sh --component=<binary|proxy>`.
+```
+1. Make sure your code changes are committed (or stashed) and the
+   working tree is clean.
+2. Edit CHANGELOG.md — add a `## [X.Y.Z] - YYYY-MM-DD` section at
+   the top. List Added / Changed / Fixed bullets focused on the why.
+3. Commit the CHANGELOG: `git add CHANGELOG.md && git commit -m "docs: changelog for vX.Y.Z"`
+4. Run `scripts/release.sh X.Y.Z`.
+5. When it asks to push, type `y`.
+6. Wait for it to finish (~5-7 min).
+7. After it returns, glance at the verify step's URL list. All four
+   should be `HTTP 200`. If `Tonel-Windows-latest.exe` is the previous
+   version (Windows CI hasn't finished), wait 1-2 min and `curl -I` it
+   manually to confirm.
+8. Done.
+```
 
-There is no "manual hotfix on the server" path. The fastest way to fix
-production is still through this pipeline because everything else assumes the
-repo is the source of truth.
+### Case B: redeploy current HEAD (no code change)
+
+```
+scripts/release.sh deploy-only
+```
+
+Skips the bump/commit/tag/push and goes straight to the deploy steps
+(macOS / dual server / web / verify). Useful for re-running after a
+flaky network failure or after manually fixing something on a server.
+
+### When things go wrong
+
+The orchestrator's `set -euo pipefail` means any sub-step's non-zero
+exit halts the rest. The terminal output makes it obvious which step
+broke. Re-run after fixing — every sub-script is idempotent.
+
+For Windows CI failures (which run async, not in the orchestrator's
+shell), check `https://github.com/jaysonsu1993-a11y/Tonel/actions`.
+The `check-runs/<id>/annotations` API exposes C# / iscc errors without
+needing admin log access — see `feedback_windows_ci_traps` memory.

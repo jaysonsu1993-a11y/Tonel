@@ -9,6 +9,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.15] - 2026-05-07
+
+### Docs — `docs/RELEASE.md` rewritten for the v6.5.x distribution stack
+
+The canonical release-process doc was 6.x stale: described an old
+6-step pipeline that ended at server.sh + web.sh + health.sh, and
+made no mention of the v6.5.x additions:
+
+- macOS .dmg local build + R2 push
+- Windows CI auto-build + R2 push on tag
+- Aliyun + Kufan dual-server deploy (since v6.5.3)
+- The `*-latest` R2 alias scheme that lets stable web URLs serve
+  fresh installers without re-deploying web
+
+A new AI agent (or human) onboarding to the project now has a
+single self-contained entry point: top-level README → `Versioning`
+section → `docs/RELEASE.md`. Reading that one doc cover-to-cover
+covers:
+
+- 8-step pipeline table (what runs, where, what can break)
+- Prerequisites checklist (macOS + Xcode + Docker + wrangler +
+  SSH keys to two boxes + GitHub Actions secret)
+- CHANGELOG format, semver rules
+- Distribution outputs diagram (tonel.io → download.tonel.io →
+  R2 bucket)
+- Partial-flow table (skip-deploy / skip-push / deploy-only /
+  hot-fix flows for each component)
+- Hotfix playbook
+- "Don'ts" for common foot-guns
+- **An explicit "How an AI agent should run a release" section**
+  with two cases (ship-a-feature, redeploy-HEAD) and exact
+  CHANGELOG-entry-required steps.
+
+For workflow-yaml debugging the doc points at memory's
+`feedback_windows_ci_traps` (9 distinct CI failures from
+v6.5.4 → v6.5.14, with the public `check-runs/<id>/annotations`
+trick to surface compile errors without admin log access).
+
+No code change.
+
 ## [6.5.14] - 2026-05-07
 
 ### Fixed — R2 push step's `$exe.FullName` not evaluated
