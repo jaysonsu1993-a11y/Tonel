@@ -23,7 +23,9 @@ deploy/bootstrap.sh
 
 | Command | What it does |
 |---|---|
-| `scripts/release.sh <version>` | Full release: bump → CHANGELOG → commit → tag → push → deploy → verify |
+| `scripts/release.sh <version>` | **Full-stack release**: pretest → bump → CHANGELOG → commit → tag → push → macOS .dmg + R2 → Aliyun + Kufan server deploy → web → URL verify. Push triggers Windows CI in parallel. |
+| `deploy/package-macos.sh` | Build Tonel-MacOS Release `.app` → ad-hoc codesign → `hdiutil` UDZO `.dmg`. Output: `deploy/dist/Tonel-MacOS-v<version>.dmg` |
+| `deploy/upload-r2.sh <file>` | Wrangler push to R2 bucket `tonel-downloads`. Auto-publishes `*-latest.{dmg,exe}` alias when filename matches `Tonel-(MacOS\|Windows)-vX.Y.Z` |
 | `deploy/server.sh` | Deploy server (binary + proxy + ops) without bumping version |
 | `deploy/server.sh --component=binary` | Just rebuild + swap C++ servers |
 | `deploy/server.sh --component=proxy` | Just rsync ws-proxy + ws-mixer-proxy |
@@ -32,6 +34,26 @@ deploy/bootstrap.sh
 | `deploy/health.sh` | Verify ports + PM2 + WSS handshake (used internally too) |
 | `deploy/rollback.sh --component=binary` | Restore most recent binary `.bak.*` |
 | `deploy/rollback.sh --component=proxy` | Restore proxy/ from `$TONEL_ARCHIVE_DIR/proxy-*` |
+
+### Distribution pipeline notes
+
+- **macOS .dmg**: built locally on a Mac (CI doesn't have a free
+  macOS runner). `scripts/release.sh` does it; manual is
+  `deploy/package-macos.sh && deploy/upload-r2.sh deploy/dist/...dmg`.
+- **Windows .exe**: built by GitHub Actions
+  (`.github/workflows/build-installer.yml`) on every `v*` tag push.
+  Auto-publishes both the GitHub Release asset AND the R2 alias.
+  **No local action needed for Windows release** — just push the tag.
+- **Server (mixer + signaling)**: must be deployed to BOTH 广州1
+  (Aliyun, port 22) and 广州2 (Kufan, port 26806) since v6.5.3 brought
+  Kufan back online. `scripts/release.sh` handles both via inline
+  `TONEL_SSH_HOST=...` overrides — `.env.deploy` default points at HK
+  (still in DNS for `srv.tonel.io`) and isn't used in the dual flow.
+- **Web (tonel.io)**: `deploy/web.sh` → `wrangler pages deploy`. The
+  download-button URLs in the home page point at the stable `*-latest`
+  R2 aliases, so even old web versions automatically link to the
+  freshest installers — re-deploying web is only needed for
+  copy / UI changes.
 
 All scripts accept `--dry-run`. All scripts require a clean working tree
 (no uncommitted changes) — exception: `health.sh` and `rollback.sh`.

@@ -9,6 +9,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.13] - 2026-05-07
+
+### Added — full-stack release in one command
+
+`scripts/release.sh <version>` now drives the entire release
+pipeline end-to-end. After v6.5.x's stack stabilised (R2 + CI +
+dual-server) it was easy to forget step 4 (macOS .dmg) or step
+5b (Kufan) and ship a half-released tag. One script eliminates
+the foot-gun and lets an AI agent execute the whole release with
+a single command.
+
+#### Pipeline (8 steps)
+
+```
+[0/8] pretest                    server tests + audio + browser smoke
+[1/8] bump-version.sh            CMakeLists × 2 + package.json
+[2/8] CHANGELOG check            hard-fail if missing [vX.Y.Z] section
+[3/8] git commit + tag + push    Windows CI starts in parallel here
+[4/8] macOS .dmg → R2            package-macos.sh + upload-r2.sh
+[5/8] server → 广州1 Aliyun       TONEL_SSH_HOST=root@8.163.21.207
+[6/8] server → 广州2 Kufan        TONEL_SSH_HOST=root@42.240.163.172:26806
+[7/8] web → CF Pages              vite build + wrangler pages deploy
+[8/8] verify URLs                 curl R2 dmg/exe + tonel.io HTTP 200
+```
+
+Step 3's tag push is what triggers Windows CI
+(`.github/workflows/build-installer.yml`). The script doesn't
+block on it; CI runs ~3 min and updates
+`Tonel-Windows-latest.exe` on R2 asynchronously. macOS step 4
+takes ~2 min so by the time it finishes, Windows CI is usually
+near-done.
+
+#### `deploy/README.md` daily-commands table
+
+Updated to list `package-macos.sh` and `upload-r2.sh` alongside
+the existing `server.sh` / `web.sh` / `health.sh` row, plus a new
+"Distribution pipeline notes" subsection that calls out:
+- macOS = local build (no free macOS CI runner)
+- Windows = CI handles everything on tag push
+- Server = dual-deploy (Aliyun + Kufan since v6.5.3)
+- Web = re-deploy only needed for copy / UI changes; the
+  `*-latest` R2 aliases mean old web versions still link to
+  fresh installers.
+
+(Memory `project_distribution_v6_5.md` updated in lockstep —
+also lives outside this repo.)
+
 ## [6.5.12] - 2026-05-07
 
 ### Docs
